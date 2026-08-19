@@ -8,7 +8,12 @@ Two tiers share one framework and one DB table:
   services Claude's connector directory covers, where a public endpoint
   exists). Remote entries authenticate with a bearer token pasted in the UI
   (an API key, PAT, or OAuth access token obtained from the service — noted
-  per entry); a few are local stdio servers configured via env vars.
+  per entry); several are local stdio servers configured via env vars.
+
+Every remote URL below was probed against the live endpoint and checked
+against the vendor's public docs on 2026-08-19; auth notes record what each
+vendor actually accepts (several are OAuth-only and say so honestly). Local
+commands are pinned to exact published versions so sessions are reproducible.
 
 Secrets never enter the rendered opencode.json: token values are passed to
 the session container as FORGE_CONN_<ID>_<FIELD> env vars and referenced with
@@ -37,7 +42,7 @@ class CatalogEntry:
     id: str
     name: str
     description: str
-    category: str  # core | productivity | developer | design | business | search
+    category: str  # core | productivity | developer | design | business
     mcp_type: str  # remote | local
     url: str = ""
     command: tuple[str, ...] = ()
@@ -110,24 +115,28 @@ CORE: tuple[CatalogEntry, ...] = (
 )
 
 
-# Public integrations. URLs are verified against each vendor's published MCP
-# endpoint; entries whose service only issues OAuth tokens say so in
-# auth_note — paste an OAuth access token obtained from the vendor (or use a
-# PAT/API key where the service accepts one).
+# Public integrations, verified 2026-08-19 (live endpoint probe + vendor docs).
+# OAuth-only services are labeled as such: Forge can still talk to them if you
+# paste an OAuth access token, but there is no simple API-key path — the
+# auth_note is honest about it. Local commands pin exact npm/PyPI versions so
+# session containers never pull a surprise release.
 INTEGRATIONS: tuple[CatalogEntry, ...] = (
+    # ── productivity ────────────────────────────────────────────────────────
     CatalogEntry(
         id="notion",
         name="Notion",
         description="Search, read, and write Notion pages and databases.",
         category="productivity",
-        mcp_type="remote",
-        url="https://mcp.notion.com/mcp",
-        auth_fields=TOKEN,
+        mcp_type="local",
+        command=("npx", "-y", "@notionhq/notion-mcp-server@2.5.1"),
+        environment={"NOTION_TOKEN": "{env:FORGE_CONN_NOTION_TOKEN}"},
+        auth_fields=(AuthField("token", "Integration secret", placeholder="ntn_…"),),
         auth_note=(
-            "OAuth access token (or internal integration secret) from "
-            "notion.so/profile/integrations."
+            "Internal integration secret from notion.so/profile/integrations; share the "
+            "target pages with the integration. (Notion's hosted mcp.notion.com is "
+            "OAuth-only, so Forge runs the official local server instead.)"
         ),
-        docs_url="https://developers.notion.com/docs/mcp",
+        docs_url="https://github.com/makenotion/notion-mcp-server",
     ),
     CatalogEntry(
         id="linear",
@@ -136,42 +145,12 @@ INTEGRATIONS: tuple[CatalogEntry, ...] = (
         category="productivity",
         mcp_type="remote",
         url="https://mcp.linear.app/mcp",
-        auth_fields=TOKEN,
-        auth_note="OAuth access token — Linear's MCP uses OAuth; a personal API key may also work.",
+        auth_fields=(AuthField("token", "API key", placeholder="lin_api_…"),),
+        auth_note=(
+            "Linear API key (Settings → Security & access → API keys) or an OAuth access "
+            "token — both are accepted as Authorization: Bearer."
+        ),
         docs_url="https://linear.app/docs/mcp",
-    ),
-    CatalogEntry(
-        id="figma",
-        name="Figma",
-        description="Read designs, components, and variables from Figma files.",
-        category="design",
-        mcp_type="remote",
-        url="https://mcp.figma.com/mcp",
-        auth_fields=TOKEN,
-        auth_note="OAuth access token or a Figma personal access token.",
-        docs_url="https://help.figma.com/hc/en-us/articles/32132100833559",
-    ),
-    CatalogEntry(
-        id="sentry",
-        name="Sentry",
-        description="Query errors, issues, and traces from your Sentry org.",
-        category="developer",
-        mcp_type="remote",
-        url="https://mcp.sentry.dev/mcp",
-        auth_fields=TOKEN,
-        auth_note="OAuth access token or a Sentry user auth token.",
-        docs_url="https://docs.sentry.io/product/sentry-mcp/",
-    ),
-    CatalogEntry(
-        id="stripe",
-        name="Stripe",
-        description="Customers, invoices, payments, and docs search.",
-        category="business",
-        mcp_type="remote",
-        url="https://mcp.stripe.com",
-        auth_fields=(AuthField("token", "API key", placeholder="rk_live_… / sk_test_…"),),
-        auth_note="Use a restricted API key; bearer auth is supported directly.",
-        docs_url="https://docs.stripe.com/mcp",
     ),
     CatalogEntry(
         id="asana",
@@ -179,9 +158,12 @@ INTEGRATIONS: tuple[CatalogEntry, ...] = (
         description="Tasks and projects in Asana.",
         category="productivity",
         mcp_type="remote",
-        url="https://mcp.asana.com/sse",
+        url="https://mcp.asana.com/v2/mcp",
         auth_fields=TOKEN,
-        auth_note="OAuth access token or an Asana personal access token.",
+        auth_note=(
+            "OAuth-only per Asana's docs — paste an OAuth access token. The old /sse "
+            "endpoint is deprecated (shutdown 05/11/2026); this is the v2 endpoint."
+        ),
         docs_url="https://developers.asana.com/docs/using-asanas-mcp-server",
     ),
     CatalogEntry(
@@ -190,54 +172,16 @@ INTEGRATIONS: tuple[CatalogEntry, ...] = (
         description="Jira issues and Confluence pages.",
         category="productivity",
         mcp_type="remote",
-        url="https://mcp.atlassian.com/v1/sse",
+        url="https://mcp.atlassian.com/v1/mcp",
         auth_fields=TOKEN,
-        auth_note="OAuth access token — Atlassian's remote MCP uses OAuth 2.1.",
-        docs_url="https://support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server/",
-    ),
-    CatalogEntry(
-        id="intercom",
-        name="Intercom",
-        description="Conversations and customer data from Intercom.",
-        category="business",
-        mcp_type="remote",
-        url="https://mcp.intercom.com/mcp",
-        auth_fields=TOKEN,
-        auth_note="OAuth access token or an Intercom access token.",
-        docs_url="https://developers.intercom.com/docs/guides/mcp",
-    ),
-    CatalogEntry(
-        id="paypal",
-        name="PayPal",
-        description="Invoices, payments, and disputes via PayPal's MCP.",
-        category="business",
-        mcp_type="remote",
-        url="https://mcp.paypal.com/mcp",
-        auth_fields=TOKEN,
-        auth_note="OAuth access token from developer.paypal.com.",
-        docs_url="https://developer.paypal.com/tools/mcp-server/",
-    ),
-    CatalogEntry(
-        id="square",
-        name="Square",
-        description="Payments, catalog, and customers in Square.",
-        category="business",
-        mcp_type="remote",
-        url="https://mcp.squareup.com/sse",
-        auth_fields=TOKEN,
-        auth_note="OAuth access token or a Square access token.",
-        docs_url="https://developer.squareup.com/docs/mcp",
-    ),
-    CatalogEntry(
-        id="plaid",
-        name="Plaid",
-        description="Inspect Plaid integrations and API usage.",
-        category="business",
-        mcp_type="remote",
-        url="https://api.dashboard.plaid.com/mcp/sse",
-        auth_fields=TOKEN,
-        auth_note="OAuth access token from the Plaid dashboard.",
-        docs_url="https://plaid.com/docs/resources/mcp/",
+        auth_note=(
+            "OAuth 2.1 is the primary flow (paste an OAuth access token); Atlassian also "
+            "documents optional API-token auth — see their setup guide."
+        ),
+        docs_url=(
+            "https://support.atlassian.com/rovo/docs/"
+            "getting-started-with-the-atlassian-remote-mcp-server/"
+        ),
     ),
     CatalogEntry(
         id="monday",
@@ -245,21 +189,216 @@ INTEGRATIONS: tuple[CatalogEntry, ...] = (
         description="Boards and items in monday.com.",
         category="productivity",
         mcp_type="remote",
-        url="https://mcp.monday.com/sse",
-        auth_fields=TOKEN,
-        auth_note="OAuth access token or a monday API token.",
-        docs_url="https://developer.monday.com/apps/docs/mondaycom-mcp-integration",
+        url="https://mcp.monday.com/mcp",
+        auth_fields=(AuthField("token", "API token"),),
+        auth_note=(
+            "Personal API token (monday.com → Developers → My access tokens) as bearer, "
+            "or OAuth 2.1."
+        ),
+        docs_url="https://developer.monday.com/api-reference/docs/integrate-with-monday-mcp",
     ),
     CatalogEntry(
-        id="canva",
-        name="Canva",
-        description="Create and edit Canva designs.",
-        category="design",
+        id="todoist",
+        name="Todoist",
+        description="Tasks, projects, and filters in Todoist.",
+        category="productivity",
         mcp_type="remote",
-        url="https://mcp.canva.com/mcp",
+        url="https://ai.todoist.net/mcp",
+        auth_fields=(AuthField("token", "API token"),),
+        auth_note=(
+            "Todoist API token (Settings → Integrations → Developer) sent as bearer; "
+            "OAuth is also supported."
+        ),
+        docs_url="https://github.com/Doist/todoist-mcp",
+    ),
+    CatalogEntry(
+        id="clickup",
+        name="ClickUp",
+        description="Tasks, lists, docs, and comments in ClickUp.",
+        category="productivity",
+        mcp_type="remote",
+        url="https://mcp.clickup.com/mcp",
         auth_fields=TOKEN,
-        auth_note="OAuth access token — Canva's MCP uses OAuth.",
-        docs_url="https://www.canva.dev/docs/connect/canva-mcp-server-setup/",
+        auth_note=(
+            "OAuth-only (public beta) with a vetted client list — personal API keys are "
+            "rejected; paste an OAuth access token and expect friction outside approved "
+            "clients."
+        ),
+        docs_url=(
+            "https://developer.clickup.com/docs/connect-an-ai-assistant-to-clickups-mcp-server"
+        ),
+    ),
+    CatalogEntry(
+        id="box",
+        name="Box",
+        description="Search and query files and enterprise content in Box.",
+        category="productivity",
+        mcp_type="remote",
+        url="https://mcp.box.com",
+        auth_fields=TOKEN,
+        auth_note=(
+            "OAuth 2.1 only — no API-key auth; paste an OAuth access token minted for a "
+            "Box app with the MCP integration enabled."
+        ),
+        docs_url="https://developer.box.com/guides/box-mcp/remote/",
+    ),
+    CatalogEntry(
+        id="slack",
+        name="Slack",
+        description="Read channels, threads, and DMs; posting is off until you allow it.",
+        category="productivity",
+        mcp_type="local",
+        command=("npx", "-y", "slack-mcp-server@1.3.0", "--transport", "stdio"),
+        environment={
+            "SLACK_MCP_XOXP_TOKEN": "{env:FORGE_CONN_SLACK_XOXP_TOKEN}",
+            "SLACK_MCP_XOXB_TOKEN": "{env:FORGE_CONN_SLACK_XOXB_TOKEN}",
+            "SLACK_MCP_ADD_MESSAGE_TOOL": "{env:FORGE_CONN_SLACK_ADD_MESSAGE_TOOL}",
+        },
+        auth_fields=(
+            AuthField("xoxp_token", "User OAuth token", placeholder="xoxp-…"),
+            AuthField("xoxb_token", "Bot token", placeholder="xoxb-…"),
+            AuthField(
+                "add_message_tool",
+                "Enable posting (true / channel IDs)",
+                secret=False,
+                placeholder="true or C0123…,C0456…",
+            ),
+        ),
+        auth_note=(
+            "Set a user token (xoxp) or a bot token (xoxb) from a Slack app — user tokens "
+            "unlock search; bots must be invited to channels. Message posting stays "
+            "disabled unless the third field is set."
+        ),
+        docs_url="https://github.com/korotovsky/slack-mcp-server",
+    ),
+    CatalogEntry(
+        id="airtable",
+        name="Airtable",
+        description="Read and write Airtable bases.",
+        category="productivity",
+        mcp_type="local",
+        command=("npx", "-y", "airtable-mcp-server@1.14.0"),
+        environment={"AIRTABLE_API_KEY": "{env:FORGE_CONN_AIRTABLE_TOKEN}"},
+        auth_fields=(AuthField("token", "Personal access token", placeholder="pat…"),),
+        auth_note="Airtable personal access token with the scopes you need.",
+        docs_url="https://github.com/domdomegg/airtable-mcp-server",
+    ),
+    CatalogEntry(
+        id="gmail",
+        name="Gmail",
+        description="Read, search, draft, and send Gmail (community server).",
+        category="productivity",
+        mcp_type="local",
+        command=("npx", "-y", "@shinzolabs/gmail-mcp@1.7.4"),
+        environment={
+            "CLIENT_ID": "{env:FORGE_CONN_GMAIL_CLIENT_ID}",
+            "CLIENT_SECRET": "{env:FORGE_CONN_GMAIL_CLIENT_SECRET}",
+            "REFRESH_TOKEN": "{env:FORGE_CONN_GMAIL_REFRESH_TOKEN}",
+        },
+        auth_fields=(
+            AuthField("client_id", "OAuth client ID", secret=False),
+            AuthField("client_secret", "OAuth client secret"),
+            AuthField("refresh_token", "Refresh token"),
+        ),
+        auth_note=(
+            "Experimental — Google has no public remote MCP. Create a Google Cloud OAuth "
+            "client (Desktop) with the Gmail API enabled, run `npx @shinzolabs/gmail-mcp "
+            "auth` once on your own machine to mint a refresh token, then paste all three "
+            "values here."
+        ),
+        docs_url="https://github.com/shinzo-labs/gmail-mcp",
+    ),
+    CatalogEntry(
+        id="discord",
+        name="Discord",
+        description="Read channels and send messages through a Discord bot.",
+        category="productivity",
+        mcp_type="local",
+        command=("npx", "-y", "mcp-discord@1.3.4"),
+        environment={"DISCORD_TOKEN": "{env:FORGE_CONN_DISCORD_TOKEN}"},
+        auth_fields=(AuthField("token", "Bot token"),),
+        auth_note=(
+            "Bot token from the Discord Developer Portal; invite the bot to your server "
+            "with the permissions you want it to have (community server)."
+        ),
+        docs_url="https://github.com/barryyip0625/mcp-discord",
+    ),
+    CatalogEntry(
+        id="zapier",
+        name="Zapier",
+        description="Trigger thousands of app actions through your Zapier MCP endpoint.",
+        category="productivity",
+        mcp_type="remote",
+        url="",  # account-specific: paste your endpoint from mcp.zapier.com
+        auth_fields=(
+            AuthField(
+                "url",
+                "Your Zapier MCP URL",
+                secret=True,
+                placeholder="https://mcp.zapier.com/api/mcp/…",
+            ),
+        ),
+        bearer=False,
+        auth_note="Zapier issues a per-account MCP URL (credentials embedded) — paste it here.",
+        docs_url="https://zapier.com/mcp",
+    ),
+    # ── developer ───────────────────────────────────────────────────────────
+    CatalogEntry(
+        id="sentry",
+        name="Sentry",
+        description="Query errors, issues, and traces from your Sentry org.",
+        category="developer",
+        mcp_type="remote",
+        url="https://mcp.sentry.dev/mcp",
+        auth_fields=TOKEN,
+        auth_note=(
+            "OAuth-only per Sentry's docs — paste an OAuth access token; plain user auth "
+            "tokens are not documented to work here."
+        ),
+        docs_url="https://mcp.sentry.dev/",
+    ),
+    CatalogEntry(
+        id="vercel",
+        name="Vercel",
+        description="Projects, deployments, logs, and docs search on Vercel.",
+        category="developer",
+        mcp_type="remote",
+        url="https://mcp.vercel.com",
+        auth_fields=TOKEN,
+        auth_note=(
+            "OAuth-only, and Vercel only approves reviewed MCP clients — no API-token "
+            "auth; some tools (docs search) work without authentication."
+        ),
+        docs_url="https://vercel.com/docs/agent-resources/vercel-mcp",
+    ),
+    CatalogEntry(
+        id="netlify",
+        name="Netlify",
+        description="Create, deploy, and manage Netlify sites and env vars.",
+        category="developer",
+        mcp_type="local",
+        command=("npx", "-y", "@netlify/mcp@1.15.1"),
+        environment={"NETLIFY_PERSONAL_ACCESS_TOKEN": "{env:FORGE_CONN_NETLIFY_TOKEN}"},
+        auth_fields=(AuthField("token", "Personal access token", placeholder="nfp_…"),),
+        auth_note=(
+            "Netlify PAT (User settings → OAuth → New access token). The official local "
+            "server is used because Netlify's remote MCP is OAuth-only."
+        ),
+        docs_url="https://docs.netlify.com/build/build-with-ai/netlify-mcp-server/",
+    ),
+    CatalogEntry(
+        id="supabase",
+        name="Supabase",
+        description="Query databases, manage migrations, and inspect Supabase projects.",
+        category="developer",
+        mcp_type="remote",
+        url="https://mcp.supabase.com/mcp",
+        auth_fields=(AuthField("token", "Personal access token", placeholder="sbp_…"),),
+        auth_note=(
+            "Personal access token (supabase.com/dashboard/account/tokens) as bearer — "
+            "documented for CI use; OAuth login is the interactive default."
+        ),
+        docs_url="https://supabase.com/docs/guides/getting-started/mcp",
     ),
     CatalogEntry(
         id="cloudflare",
@@ -267,7 +406,7 @@ INTEGRATIONS: tuple[CatalogEntry, ...] = (
         description="Search Cloudflare's documentation.",
         category="developer",
         mcp_type="remote",
-        url="https://docs.mcp.cloudflare.com/sse",
+        url="https://docs.mcp.cloudflare.com/mcp",
         auth_note="No auth needed — public docs server.",
         docs_url="https://github.com/cloudflare/mcp-server-cloudflare",
     ),
@@ -282,49 +421,117 @@ INTEGRATIONS: tuple[CatalogEntry, ...] = (
         auth_note="Works anonymously; add a token for private/gated repos.",
         docs_url="https://huggingface.co/settings/mcp",
     ),
+    # ── design ──────────────────────────────────────────────────────────────
     CatalogEntry(
-        id="zapier",
-        name="Zapier",
-        description="Trigger thousands of app actions through your Zapier MCP endpoint.",
-        category="productivity",
+        id="figma",
+        name="Figma",
+        description="Read designs, components, and variables from Figma files.",
+        category="design",
         mcp_type="remote",
-        url="",  # account-specific: paste your endpoint from mcp.zapier.com
-        auth_fields=(
-            AuthField("url", "Your Zapier MCP URL", secret=True, placeholder="https://mcp.zapier.com/api/mcp/…"),
+        url="https://mcp.figma.com/mcp",
+        auth_fields=TOKEN,
+        auth_note=(
+            "OAuth-only — the remote server authenticates via Figma's OAuth flow; "
+            "personal access tokens are not documented to work."
         ),
-        bearer=False,
-        auth_note="Zapier issues a per-account MCP URL (credentials embedded) — paste it here.",
-        docs_url="https://zapier.com/mcp",
+        docs_url="https://developers.figma.com/docs/figma-mcp-server/",
     ),
     CatalogEntry(
-        id="airtable",
-        name="Airtable",
-        description="Read and write Airtable bases.",
-        category="productivity",
-        mcp_type="local",
-        command=("npx", "-y", "airtable-mcp-server"),
-        environment={"AIRTABLE_API_KEY": "{env:FORGE_CONN_AIRTABLE_TOKEN}"},
-        auth_fields=(AuthField("token", "Personal access token", placeholder="pat…"),),
-        auth_note="Airtable personal access token with the scopes you need.",
-        docs_url="https://github.com/domdomegg/airtable-mcp-server",
+        id="canva",
+        name="Canva",
+        description="Create and edit Canva designs.",
+        category="design",
+        mcp_type="remote",
+        url="https://mcp.canva.com/mcp",
+        auth_fields=TOKEN,
+        auth_note="OAuth-only — Canva's MCP authenticates via its OAuth consent flow.",
+        docs_url="https://www.canva.com/help/mcp-agent-setup/",
+    ),
+    # ── business ────────────────────────────────────────────────────────────
+    CatalogEntry(
+        id="stripe",
+        name="Stripe",
+        description="Customers, invoices, payments, and docs search.",
+        category="business",
+        mcp_type="remote",
+        url="https://mcp.stripe.com",
+        auth_fields=(AuthField("token", "API key", placeholder="rk_live_… / sk_test_…"),),
+        auth_note=(
+            "Restricted API key as bearer is officially supported (recommended for "
+            "agents); OAuth is the interactive default."
+        ),
+        docs_url="https://docs.stripe.com/mcp",
     ),
     CatalogEntry(
-        id="slack",
-        name="Slack",
-        description="Read channels and post messages as a Slack bot.",
-        category="productivity",
-        mcp_type="local",
-        command=("npx", "-y", "@modelcontextprotocol/server-slack"),
-        environment={
-            "SLACK_BOT_TOKEN": "{env:FORGE_CONN_SLACK_TOKEN}",
-            "SLACK_TEAM_ID": "{env:FORGE_CONN_SLACK_TEAM_ID}",
-        },
-        auth_fields=(
-            AuthField("token", "Bot token", placeholder="xoxb-…"),
-            AuthField("team_id", "Team ID", secret=False, placeholder="T01234567"),
+        id="intercom",
+        name="Intercom",
+        description="Conversations and customer data from Intercom.",
+        category="business",
+        mcp_type="remote",
+        url="https://mcp.intercom.com/mcp",
+        auth_fields=(AuthField("token", "Access token"),),
+        auth_note=(
+            "Intercom access token (Developer Hub app) as bearer, or OAuth. EU-hosted "
+            "workspaces should use https://mcp.eu.intercom.com/mcp via a custom connector."
         ),
-        auth_note="Create a Slack app with a bot token (chat:write, channels:history, …).",
-        docs_url="https://github.com/modelcontextprotocol/servers-archived/tree/main/src/slack",
+        docs_url="https://developers.intercom.com/docs/guides/mcp",
+    ),
+    CatalogEntry(
+        id="hubspot",
+        name="HubSpot",
+        description="CRM contacts, companies, deals, and tickets in HubSpot.",
+        category="business",
+        mcp_type="local",
+        command=("npx", "-y", "@hubspot/mcp-server@0.4.0"),
+        environment={"PRIVATE_APP_ACCESS_TOKEN": "{env:FORGE_CONN_HUBSPOT_TOKEN}"},
+        auth_fields=(AuthField("token", "Private app token", placeholder="pat-na1-…"),),
+        auth_note=(
+            "Private app access token (Settings → Integrations → Private apps). The "
+            "official local server is used because HubSpot's remote MCP is OAuth-only."
+        ),
+        docs_url="https://developers.hubspot.com/mcp",
+    ),
+    CatalogEntry(
+        id="paypal",
+        name="PayPal",
+        description="Invoices, payments, and disputes via PayPal's MCP.",
+        category="business",
+        mcp_type="remote",
+        url="https://mcp.paypal.com/mcp",
+        auth_fields=TOKEN,
+        auth_note=(
+            "OAuth access token generated from your PayPal app's client ID + secret "
+            "(developer.paypal.com), passed as bearer."
+        ),
+        docs_url="https://developer.paypal.com/tools/mcp-server/",
+    ),
+    CatalogEntry(
+        id="square",
+        name="Square",
+        description="Payments, catalog, and customers in Square.",
+        category="business",
+        mcp_type="remote",
+        url="https://mcp.squareup.com/mcp",
+        auth_fields=TOKEN,
+        auth_note=(
+            "OAuth is the documented flow for the remote server — paste an OAuth access "
+            "token; developer-dashboard access tokens are not documented to work here."
+        ),
+        docs_url="https://developer.squareup.com/docs/mcp",
+    ),
+    CatalogEntry(
+        id="plaid",
+        name="Plaid",
+        description="Inspect Plaid integrations and API usage.",
+        category="business",
+        mcp_type="remote",
+        url="https://api.dashboard.plaid.com/mcp/sse",
+        auth_fields=TOKEN,
+        auth_note=(
+            "OAuth client-credentials token (scope mcp:dashboard) as bearer — tokens "
+            "expire after ~15 minutes, so expect frequent re-auth."
+        ),
+        docs_url="https://plaid.com/docs/resources/mcp/",
     ),
 )
 
