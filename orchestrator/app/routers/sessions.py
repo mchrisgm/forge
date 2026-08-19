@@ -30,7 +30,12 @@ _SKIP_HEADERS = {
 def _get_session(session_id: str, user: User) -> Session:
     with read_session() as db:
         session = db.get(Session, session_id)
-    if session is None or (session.user_id is not None and session.user_id != user.id):
+    owned = session is not None and (
+        session.user_id == user.id
+        # Legacy pre-multi-user sessions (no owner) belong to the admin view.
+        or (session.user_id is None and user.is_admin)
+    )
+    if not owned:
         raise HTTPException(404, "session not found")
     return session
 

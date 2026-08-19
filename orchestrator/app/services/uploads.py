@@ -101,9 +101,8 @@ def delete_upload(upload_id: str, user_id: int) -> None:
     upload = get_owned(upload_id, user_id)
     path = Path(upload.path)
     settings = get_settings()
-    if path.exists() and str(path.resolve()).startswith(
-        str(Path(settings.uploads_dir).resolve())
-    ):
+    uploads_root = Path(settings.uploads_dir).resolve()
+    if path.exists() and uploads_root in path.resolve().parents:
         path.unlink(missing_ok=True)
     with write_session() as db:
         row = db.get(Upload, upload_id)

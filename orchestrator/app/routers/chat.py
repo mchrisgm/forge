@@ -278,6 +278,12 @@ async def send_message(
         memory.record_use(entries)
 
     history = _history_for(conversation)
+    if (
+        history
+        and history[-1]["role"] == "user"
+        and history[-1]["content"] == body.content
+    ):
+        history = history[:-1]  # retry of an unanswered turn — don't double it
     messages = chat_service.assemble(
         user,
         history,
@@ -290,16 +296,29 @@ async def send_message(
     )
 
     # Persist the user turn before streaming so a dropped connection still
-    # leaves a consistent history.
-    user_message = ChatMessage(
-        conversation_id=conversation_id,
-        role="user",
-        content=body.content,
-        attachments_json=json.dumps([a.id for a in attachments]),
-        token_estimate=memory.estimate_tokens(body.content),
-    )
+    # leaves a consistent history. Retry-idempotent: re-sending the same
+    # content while it is still the (unanswered) last message reuses it
+    # instead of duplicating the turn (e.g. retry after an engine error).
     with write_session() as db:
-        db.add(user_message)
+        last = db.exec(
+            select(ChatMessage)
+            .where(ChatMessage.conversation_id == conversation_id)
+            .order_by(ChatMessage.id.desc())  # type: ignore[union-attr]
+        ).first()
+        if not (
+            last is not None
+            and last.role == "user"
+            and last.content == body.content
+        ):
+            db.add(
+                ChatMessage(
+                    conversation_id=conversation_id,
+                    role="user",
+                    content=body.content,
+                    attachments_json=json.dumps([a.id for a in attachments]),
+                    token_estimate=memory.estimate_tokens(body.content),
+                )
+            )
         row = db.get(Conversation, conversation_id)
         if row:
             row.updated_at = datetime.now(UTC)
@@ -308,28 +327,40 @@ async def send_message(
             db.add(row)
 
     collected: list[str] = []
+    persisted: dict[str, int | None] = {}
+
+    def persist_assistant() -> int | None:
+        """Idempotent save of whatever streamed — runs on normal completion
+        AND on client disconnect, so an aborted reply keeps its partial text."""
+        if "id" in persisted:
+            return persisted["id"]
+        assistant_text = "".join(collected)
+        if not assistant_text:
+            persisted["id"] = None
+            return None
+        with write_session() as db:
+            assistant_message = ChatMessage(
+                conversation_id=conversation_id,
+                role="assistant",
+                content=assistant_text,
+                token_estimate=memory.estimate_tokens(assistant_text),
+            )
+            db.add(assistant_message)
+            db.flush()
+            persisted["id"] = assistant_message.id
+        memory.schedule_background(
+            _post_exchange(user, conversation, body.content, assistant_text)
+        )
+        return persisted["id"]
 
     async def generate():
-        async for frame in chat_service.stream_completion(
-            lease.base_url, lease.model_slug, messages, collected
-        ):
-            yield frame
-        assistant_text = "".join(collected)
-        assistant_id = None
-        if assistant_text:
-            with write_session() as db:
-                assistant_message = ChatMessage(
-                    conversation_id=conversation_id,
-                    role="assistant",
-                    content=assistant_text,
-                    token_estimate=memory.estimate_tokens(assistant_text),
-                )
-                db.add(assistant_message)
-                db.flush()
-                assistant_id = assistant_message.id
-            memory.schedule_background(
-                _post_exchange(user, conversation, body.content, assistant_text)
-            )
+        try:
+            async for frame in chat_service.stream_completion(
+                lease.base_url, lease.model_slug, messages, collected
+            ):
+                yield frame
+        finally:
+            assistant_id = persist_assistant()
         yield (
             "data: "
             + json.dumps(
