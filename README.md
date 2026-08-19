@@ -100,7 +100,23 @@ git clone <your-forge-repo> forge && cd forge
 make up
 ```
 
-That's the whole setup — no manual `.env` step. `make up`:
+**No `make`?** A standalone first-run script does the identical bring-up on any
+host with Docker — the right choice on Windows or a bare server:
+
+```bash
+# Linux / macOS
+scripts/setup.sh                     # add --sandbox for the code-run lane
+```
+```powershell
+# Windows (PowerShell, Docker Desktop)
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+```
+
+Both scripts run the same steps as `make up` (preflight → `.env` + secrets →
+GPU-overlay detection → build/start → engine prefetch) and are re-runnable.
+
+That's the whole setup — no manual `.env` step. `make up` (and the setup
+scripts):
 
 1. runs a **preflight check** (`scripts/preflight.sh`): docker + compose v2
    are hard requirements with actionable messages; no GPU, low disk, or no
