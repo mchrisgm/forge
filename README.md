@@ -1,18 +1,20 @@
 # Forge
 
-**Self-hosted agentic coding, on your own GPU, from any device on your LAN.**
+**Self-hosted AI for your whole household or team — chat and agentic coding on
+your own GPUs, from any device on your LAN.**
 
-Forge gives you Claude Code-style coding sessions — an agent that reads, writes,
-runs, and commits code in a sandboxed workspace — powered entirely by
-open-weight models running on local hardware. There are **no external LLM
-providers anywhere**: no API keys, no per-token bills, no code leaving your
-network. The only outbound traffic is model downloads from Hugging Face, git
+Forge gives every person on your network their own profile: a general-purpose
+**chat** with persistent history and long-term memory, plus Claude Code-style
+**coding sessions** — an agent that reads, writes, runs, and commits code in a
+sandboxed workspace — powered entirely by open-weight models running on local
+hardware. There are **no external LLM providers anywhere**: no API keys, no
+per-token bills, no conversations leaving your network. The only outbound traffic is model downloads from Hugging Face, git
 operations, and whatever your agent's own tools fetch. A weekly registry job
 watches Hugging Face for new models that fit your hardware and files
 suggestions; nothing is downloaded without your approval.
 
-Under the hood, a FastAPI **orchestrator** is the brain: it enforces a
-single-GPU lease across three inference lanes (llama.cpp, vLLM, AirLLM), spawns
+Under the hood, a FastAPI **orchestrator** is the brain: it manages per-GPU
+engine leases across three inference lanes (llama.cpp, vLLM, AirLLM), spawns
 one sandboxed [OpenCode](https://opencode.ai) container per coding session over
 the host Docker socket, streams everything to a custom React **PWA** you can
 install on your phone, and wires MCP connectors (GitHub, web fetch, SearXNG
@@ -44,8 +46,8 @@ every session.
 ```
 
 The PWA never talks to session containers directly — the orchestrator proxies
-every OpenCode call and streams events over SSE, so one bearer token guards
-everything.
+every OpenCode call and streams events over SSE, so per-profile bearer tokens
+guard everything.
 
 ## Screenshots
 
@@ -88,30 +90,41 @@ Different hardware? Adjust `FORGE_VRAM_BUDGET_GB` and
 ```bash
 git clone <your-forge-repo> forge && cd forge
 cp .env.example .env
-# edit .env: set FORGE_PASSWORD, and FORGE_SECRET_KEY (openssl rand -hex 32)
+# optional: set FORGE_SECRET_KEY (openssl rand -hex 32)
 make up
 ```
 
-Then open `http://<host-ip>:8080` from any device on your LAN and log in with
-`FORGE_PASSWORD`. On your phone, use the browser's **"Add to Home Screen" /
-"Install app"** — the UI is an installable PWA with a mobile-first layout.
+That's the whole setup: on first boot the orchestrator initializes the
+database, seeds the starter model catalog, and waits for you. Open
+`http://<host-ip>:8080` from any device on your LAN — the **setup wizard**
+asks you to create the first profile (it becomes the admin), and from then on
+anyone on the LAN can visit the same URL and register their own profile. On
+your phone, use the browser's **"Add to Home Screen" / "Install app"** — the
+UI is an installable PWA with a mobile-first layout.
 
 `make help` lists all targets (`up`, `down`, `logs`, `seed`, `smoke`, `test`,
 `dev`, `clean`).
 
 ## First run
 
-1. **Seed the model catalog** — `make seed` inserts a curated,
-   hardware-verified starter catalog (see `scripts/seed_models.py`): Qwen2.5
-   Coder 14B (AWQ + GGUF), Qwen3 Coder 30B-A3B MoE (the expected daily
-   driver), gpt-oss-20b, and a 7B utility model. Entries arrive as
-   `approved` — nothing is downloaded yet.
-2. **Download a model** — Models page → pick one → **Download**. Progress
+1. **Create your profile** — the setup wizard appears automatically on a
+   fresh install. The first profile is the admin; everyone else on the LAN
+   registers from the login screen (the admin can close registration in
+   Settings). Each profile has its own chats, memory, connectors, sessions,
+   and personal instructions.
+2. **Pick a model** — the starter catalog is seeded automatically on first
+   boot (Qwen2.5 Coder 14B AWQ + GGUF, Qwen3 Coder 30B-A3B MoE — the expected
+   daily driver, gpt-oss-20b, and a 7B utility model), arriving as
+   `approved` — nothing is downloaded without a click.
+3. **Download a model** — Models page → pick one → **Download**. Progress
    streams live. Start with the 7B if you want a quick end-to-end check.
-3. **Load it** — Models page → **Load**. The orchestrator starts the right
+4. **Load it** — Models page → **Load**. The orchestrator starts the right
    engine container with computed flags and holds the single GPU lease; the
    VRAM gauge and lease state update live. Big GGUFs can take minutes.
-4. **Create a session** — Sessions page → **New session**, pick the loaded
+5. **Chat or code** — the **Chat** tab is the everyday surface: ask
+   anything, attach images and files, continue old conversations, or flip on
+   a temporary chat that stores nothing. For agentic coding, create a
+   **session** — Sessions page → **New session**, pick the loaded
    model, optionally paste a `repo_url` to clone. Then chat: ask it to build
    something and watch the streamed tool calls, edit files in Files, and
    commit from Git.
@@ -149,6 +162,30 @@ Notes:
   token, no tool calling, chat only — it never appears in the session model
   picker. Talk to it (or any loaded model) via **Chat with model** on the
   Models page once its lease is ready.
+
+## Profiles, chat & memory
+
+Forge is **multi-user**: every person on the LAN gets their own profile with
+separate chat history, memory, connectors (and tokens), coding sessions,
+personal instructions, and settings. Registration is open by default and the
+admin can close it.
+
+The **Chat** section is a full conversational surface backed by whatever model
+holds a GPU lease:
+
+- **History & continuation** — every conversation is stored per profile;
+  reopen any chat and keep going. Titles are generated automatically.
+- **Temporary chats** — one toggle gives you an incognito chat that is never
+  stored and never reads or writes memory.
+- **Attachments** — drop in images and files. Text and PDFs are read into
+  context; images go to the model when it is vision-capable (and are honestly
+  labeled as not-viewable otherwise).
+- **Memory** — Forge learns durable facts, preferences, and projects from
+  your saved chats, retrieves the relevant ones per message under a strict
+  token budget, and compresses long conversations into rolling summaries so
+  month-old chats resume for a few thousand tokens. Inspect, edit, pin, or
+  wipe everything on the Memory page; see [docs/memory.md](docs/memory.md)
+  for the full design.
 
 ## Thinking levels
 

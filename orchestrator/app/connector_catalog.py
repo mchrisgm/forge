@@ -447,6 +447,21 @@ INTEGRATIONS: tuple[CatalogEntry, ...] = (
         auth_note="OAuth-only — Canva's MCP authenticates via its OAuth consent flow.",
         docs_url="https://www.canva.com/help/mcp-agent-setup/",
     ),
+    CatalogEntry(
+        id="higgsfield",
+        name="Higgsfield",
+        description="Generate images, video, and audio with Higgsfield's AI models.",
+        category="design",
+        mcp_type="remote",
+        url="https://mcp.higgsfield.ai/mcp",
+        auth_fields=TOKEN,
+        auth_note=(
+            "OAuth-only — the hosted MCP signs in with your Higgsfield account "
+            "(OAuth 2.1 + PKCE, no API-key path); paste an OAuth access token. "
+            "Generations spend your Higgsfield plan credits."
+        ),
+        docs_url="https://higgsfield.ai/mcp",
+    ),
     # ── business ────────────────────────────────────────────────────────────
     CatalogEntry(
         id="stripe",

@@ -46,6 +46,7 @@ versions so sessions are reproducible.
 | Hugging Face | developer | remote | optional HF token (`hf_…`) | [HF MCP](https://huggingface.co/settings/mcp) |
 | Figma | design | remote | **OAuth-only** | [Figma MCP](https://developers.figma.com/docs/figma-mcp-server/) |
 | Canva | design | remote | **OAuth-only** | [Canva MCP setup](https://www.canva.com/help/mcp-agent-setup/) |
+| Higgsfield | design | remote | **OAuth-only** (account sign-in, uses plan credits) | [Higgsfield MCP](https://higgsfield.ai/mcp) |
 | Stripe | business | remote | Restricted API key (`rk_…`) as bearer | [Stripe MCP](https://docs.stripe.com/mcp) |
 | Intercom | business | remote | Access token or OAuth (EU: `mcp.eu.intercom.com`) | [Intercom MCP](https://developers.intercom.com/docs/guides/mcp) |
 | HubSpot | business | local | Private app token (`pat-na1-…`) | [HubSpot MCP](https://developers.hubspot.com/mcp) |
@@ -97,14 +98,20 @@ versions so sessions are reproducible.
   with credentials embedded. Treat the URL itself as a secret.
 
 **OAuth-only services (honest limitations)** — Asana, ClickUp, Box, Sentry, Vercel, Figma,
-Canva, and Square only authenticate their hosted MCP endpoints through an interactive OAuth
-browser flow (some additionally restrict which MCP clients may connect). Forge sends
-whatever you paste as `Authorization: Bearer …`, so these connectors only work if you can
-obtain an OAuth *access token* out of band (e.g. from a vendor app you registered, or a
-token minted by another MCP client). There is no plain API-key path; the connector card
-says so. PayPal and Plaid sit in between: you mint an OAuth access token yourself from your
-app's client ID + secret (Plaid tokens expire after ~15 minutes, which makes that connector
-impractical for long sessions). Atlassian is OAuth-first but documents an API-token option.
+Canva, Higgsfield, and Square only authenticate their hosted MCP endpoints through an
+interactive OAuth browser flow (some additionally restrict which MCP clients may connect).
+Forge sends whatever you paste as `Authorization: Bearer …`, so these connectors only work
+if you can obtain an OAuth *access token* out of band (e.g. from a vendor app you
+registered, or a token minted by another MCP client). There is no plain API-key path; the
+connector card says so. PayPal and Plaid sit in between: you mint an OAuth access token
+yourself from your app's client ID + secret (Plaid tokens expire after ~15 minutes, which
+makes that connector impractical for long sessions). Atlassian is OAuth-first but documents
+an API-token option. Higgsfield's MCP (`mcp.higgsfield.ai/mcp`) signs in with your
+Higgsfield *account* — generations spend your plan credits, and its API keys
+(cloud.higgsfield.ai, a separate developer product) do **not** work against the hosted MCP.
+If you need headless key-based auth instead, the community stdio server
+[`higgsfield-mcp`](https://github.com/Storyvord/higgsfield-mcp) takes Cloud API keys via
+env vars and can be added as a custom connector.
 
 **Gmail (experimental)** — Google offers no public remote MCP, so Forge ships a pinned
 community server. One-time setup on your own machine: create a Google Cloud project,

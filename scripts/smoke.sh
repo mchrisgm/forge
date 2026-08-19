@@ -101,14 +101,11 @@ for cmd in docker curl jq; do
   command -v "$cmd" >/dev/null 2>&1 || fail "'$cmd' is required but not installed"
 done
 docker compose version >/dev/null 2>&1 || fail "docker compose v2 is required"
-[ -f .env ] || fail "no .env at repo root — run: cp .env.example .env  (then set FORGE_PASSWORD)"
+[ -f .env ] || fail "no .env at repo root — run: cp .env.example .env"
 
-# FORGE_PASSWORD from env wins; otherwise parse .env (strip inline comments).
-if [ -z "${FORGE_PASSWORD:-}" ]; then
-  FORGE_PASSWORD=$( (grep -E '^FORGE_PASSWORD=' .env || true) | head -n1 | cut -d= -f2- \
-    | sed -e 's/[[:space:]]*#.*$//' -e 's/^["'\'']//' -e 's/["'\'']$//' -e 's/[[:space:]]*$//')
-fi
-[ -n "$FORGE_PASSWORD" ] || fail "FORGE_PASSWORD is empty in .env"
+# Forge is multi-user: the smoke test registers (or reuses) its own profile.
+SMOKE_USER="${SMOKE_USER:-smoke}"
+SMOKE_PASSWORD="${SMOKE_PASSWORD:-smoke-ci-password}"
 info "docker, curl, jq present; .env found"
 
 # ── Step 2: bring the stack up ──────────────────────────────────────────────
@@ -131,12 +128,20 @@ info "gateway is healthy"
 
 # ── Step 4: login ───────────────────────────────────────────────────────────
 
-banner "4/9 Login"
+banner "4/9 Register/login the smoke profile"
+register_body=$(jq -n --arg u "$SMOKE_USER" --arg p "$SMOKE_PASSWORD" \
+  '{username: $u, password: $p, display_name: "Smoke Test"}')
+login_body=$(jq -n --arg u "$SMOKE_USER" --arg p "$SMOKE_PASSWORD" \
+  '{username: $u, password: $p}')
+# Try register first (fresh install / first run); fall back to login (re-run).
 TOKEN=$(curl -fsS --max-time 15 -X POST -H 'Content-Type: application/json' \
-  -d "$(jq -n --arg p "$FORGE_PASSWORD" '{password: $p}')" \
-  "${API}/auth/login" | jq -r '.token // empty')
-[ -n "$TOKEN" ] || fail "login failed — check FORGE_PASSWORD in .env"
-info "got bearer token"
+  -d "$register_body" "${API}/auth/register" 2>/dev/null | jq -r '.token // empty' || true)
+if [ -z "$TOKEN" ]; then
+  TOKEN=$(curl -fsS --max-time 15 -X POST -H 'Content-Type: application/json' \
+    -d "$login_body" "${API}/auth/login" | jq -r '.token // empty')
+fi
+[ -n "$TOKEN" ] || fail "could not register or log in the smoke profile"
+info "authenticated as profile '$SMOKE_USER'"
 
 # ── Step 5: pick a ready model ──────────────────────────────────────────────
 
