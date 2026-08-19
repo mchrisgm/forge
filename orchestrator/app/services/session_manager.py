@@ -52,7 +52,12 @@ def opencode_base_url(session_id: str) -> str:
 def _publish_state(session: Session) -> None:
     bus.publish(
         "session.state",
-        {"session_id": session.id, "state": session.state.value, "name": session.name},
+        {
+            "session_id": session.id,
+            "user_id": session.user_id,
+            "state": session.state.value,
+            "name": session.name,
+        },
     )
 
 
@@ -66,7 +71,11 @@ class SessionManager:
         return local, host
 
     async def create(
-        self, name: str, model_id: int, repo_url: str | None = None
+        self,
+        name: str,
+        model_id: int,
+        repo_url: str | None = None,
+        user_id: int | None = None,
     ) -> Session:
         import asyncio
 
@@ -92,7 +101,9 @@ class SessionManager:
                 f"max parallel sessions reached ({settings.max_parallel_sessions})", 409
             )
 
-        session = Session(name=name, model_id=model_id, repo_url=repo_url)
+        session = Session(
+            name=name, model_id=model_id, repo_url=repo_url, user_id=user_id
+        )
         local_ws, _ = self._workspace_paths(session.id)
         session.workspace_path = str(local_ws)
         with write_session() as db:
@@ -143,7 +154,12 @@ class SessionManager:
             model = db.get(ModelEntry, session.model_id) if session else None
             from sqlmodel import select
 
-            connectors = list(db.exec(select(Connector)).all())
+            owner_id = session.user_id if session else None
+            connectors = list(
+                db.exec(
+                    select(Connector).where(Connector.user_id == owner_id)
+                ).all()
+            )
         if session is None or model is None:
             raise RuntimeError("session or model vanished during spawn")
 
@@ -289,6 +305,7 @@ class SessionManager:
             session = db.get(Session, session_id)
         if session is None:
             raise SessionError("session not found", 404)
+        owner_id = session.user_id
         container = await asyncio.to_thread(self._get_container, session)
         if container is not None:
             await asyncio.to_thread(docker_util.remove_container, container)
@@ -305,7 +322,9 @@ class SessionManager:
             session = db.get(Session, session_id)
             if session:
                 db.delete(session)
-        bus.publish("session.deleted", {"session_id": session_id})
+        bus.publish(
+            "session.deleted", {"session_id": session_id, "user_id": owner_id}
+        )
 
     def touch(self, session_id: str) -> None:
         with write_session() as db:

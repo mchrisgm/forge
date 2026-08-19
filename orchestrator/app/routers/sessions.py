@@ -1,13 +1,14 @@
 import asyncio
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
+from ..auth import current_user
 from ..db import read_session
-from ..models import Session, Task, ThinkingLevel
+from ..models import Session, Task, ThinkingLevel, User
 from ..services import exec_service, opencode_client, task_runner
 from ..services.exec_service import ExecError
 from ..services.session_manager import (
@@ -26,10 +27,15 @@ _SKIP_HEADERS = {
 }
 
 
-def _get_session(session_id: str) -> Session:
+def _get_session(session_id: str, user: User) -> Session:
     with read_session() as db:
         session = db.get(Session, session_id)
-    if session is None:
+    owned = session is not None and (
+        session.user_id == user.id
+        # Legacy pre-multi-user sessions (no owner) belong to the admin view.
+        or (session.user_id is None and user.is_admin)
+    )
+    if not owned:
         raise HTTPException(404, "session not found")
     return session
 
@@ -56,29 +62,38 @@ class TaskBody(BaseModel):
 
 
 @router.get("/sessions")
-def list_sessions() -> list[dict]:
+def list_sessions(user: User = Depends(current_user)) -> list[dict]:
     with read_session() as db:
         rows = db.exec(select(Session)).all()
+    rows = [
+        r for r in rows
+        if r.user_id == user.id or (r.user_id is None and user.is_admin)
+    ]
     rows = sorted(rows, key=lambda r: r.created_at, reverse=True)
     return [r.model_dump(mode="json") for r in rows]
 
 
 @router.post("/sessions")
-async def create_session(body: CreateSessionBody) -> dict:
+async def create_session(
+    body: CreateSessionBody, user: User = Depends(current_user)
+) -> dict:
     try:
-        session = await session_manager.create(body.name, body.model_id, body.repo_url)
+        session = await session_manager.create(
+            body.name, body.model_id, body.repo_url, user_id=user.id
+        )
     except SessionError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
     return session.model_dump(mode="json")
 
 
 @router.get("/sessions/{session_id}")
-def get_session(session_id: str) -> dict:
-    return _get_session(session_id).model_dump(mode="json")
+def get_session(session_id: str, user: User = Depends(current_user)) -> dict:
+    return _get_session(session_id, user).model_dump(mode="json")
 
 
 @router.post("/sessions/{session_id}/stop")
-async def stop_session(session_id: str) -> dict:
+async def stop_session(session_id: str, user: User = Depends(current_user)) -> dict:
+    _get_session(session_id, user)
     try:
         session = await session_manager.stop(session_id)
     except SessionError as exc:
@@ -87,7 +102,8 @@ async def stop_session(session_id: str) -> dict:
 
 
 @router.post("/sessions/{session_id}/start")
-async def start_session(session_id: str) -> dict:
+async def start_session(session_id: str, user: User = Depends(current_user)) -> dict:
+    _get_session(session_id, user)
     try:
         session = await session_manager.start(session_id)
     except SessionError as exc:
@@ -96,7 +112,8 @@ async def start_session(session_id: str) -> dict:
 
 
 @router.delete("/sessions/{session_id}")
-async def delete_session(session_id: str) -> dict:
+async def delete_session(session_id: str, user: User = Depends(current_user)) -> dict:
+    _get_session(session_id, user)
     try:
         await session_manager.delete(session_id)
     except SessionError as exc:
@@ -111,8 +128,10 @@ async def delete_session(session_id: str) -> dict:
     "/sessions/{session_id}/opencode/{path:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
 )
-async def opencode_proxy(session_id: str, path: str, request: Request):
-    _get_session(session_id)
+async def opencode_proxy(
+    session_id: str, path: str, request: Request, user: User = Depends(current_user)
+):
+    _get_session(session_id, user)
     session_manager.touch(session_id)
     base = opencode_base_url(session_id)
     url = f"{base}/{path}"
@@ -165,9 +184,11 @@ async def opencode_proxy(session_id: str, path: str, request: Request):
 
 
 @router.get("/sessions/{session_id}/events")
-async def session_events(session_id: str) -> StreamingResponse:
+async def session_events(
+    session_id: str, user: User = Depends(current_user)
+) -> StreamingResponse:
     """Proxied OpenCode SSE event stream for this session's container."""
-    _get_session(session_id)
+    _get_session(session_id, user)
     base = opencode_base_url(session_id)
 
     async def generate():
@@ -187,8 +208,10 @@ async def session_events(session_id: str) -> StreamingResponse:
 
 
 @router.get("/sessions/{session_id}/files")
-async def list_files(session_id: str, path: str = "") -> dict:
-    session = _get_session(session_id)
+async def list_files(
+    session_id: str, path: str = "", user: User = Depends(current_user)
+) -> dict:
+    session = _get_session(session_id, user)
     try:
         entries = await asyncio.to_thread(exec_service.list_dir, session, path)
     except ExecError as exc:
@@ -197,8 +220,10 @@ async def list_files(session_id: str, path: str = "") -> dict:
 
 
 @router.get("/sessions/{session_id}/file")
-async def read_file(session_id: str, path: str) -> dict:
-    session = _get_session(session_id)
+async def read_file(
+    session_id: str, path: str, user: User = Depends(current_user)
+) -> dict:
+    session = _get_session(session_id, user)
     try:
         content = await asyncio.to_thread(exec_service.read_file, session, path)
     except ExecError as exc:
@@ -207,8 +232,10 @@ async def read_file(session_id: str, path: str) -> dict:
 
 
 @router.put("/sessions/{session_id}/file")
-async def write_file(session_id: str, body: WriteFileBody) -> dict:
-    session = _get_session(session_id)
+async def write_file(
+    session_id: str, body: WriteFileBody, user: User = Depends(current_user)
+) -> dict:
+    session = _get_session(session_id, user)
     try:
         await asyncio.to_thread(exec_service.write_file, session, body.path, body.content)
     except ExecError as exc:
@@ -218,8 +245,8 @@ async def write_file(session_id: str, body: WriteFileBody) -> dict:
 
 
 @router.get("/sessions/{session_id}/git/status")
-async def git_status(session_id: str) -> dict:
-    session = _get_session(session_id)
+async def git_status(session_id: str, user: User = Depends(current_user)) -> dict:
+    session = _get_session(session_id, user)
     try:
         return await asyncio.to_thread(exec_service.git_status, session)
     except ExecError as exc:
@@ -227,8 +254,10 @@ async def git_status(session_id: str) -> dict:
 
 
 @router.get("/sessions/{session_id}/git/log")
-async def git_log(session_id: str, limit: int = 30) -> list[dict]:
-    session = _get_session(session_id)
+async def git_log(
+    session_id: str, limit: int = 30, user: User = Depends(current_user)
+) -> list[dict]:
+    session = _get_session(session_id, user)
     try:
         return await asyncio.to_thread(exec_service.git_log, session, limit)
     except ExecError as exc:
@@ -236,8 +265,10 @@ async def git_log(session_id: str, limit: int = 30) -> list[dict]:
 
 
 @router.get("/sessions/{session_id}/git/diff")
-async def git_diff(session_id: str, staged: bool = False) -> dict:
-    session = _get_session(session_id)
+async def git_diff(
+    session_id: str, staged: bool = False, user: User = Depends(current_user)
+) -> dict:
+    session = _get_session(session_id, user)
     try:
         diff = await asyncio.to_thread(exec_service.git_diff, session, staged)
     except ExecError as exc:
@@ -246,8 +277,10 @@ async def git_diff(session_id: str, staged: bool = False) -> dict:
 
 
 @router.post("/sessions/{session_id}/git/commit")
-async def git_commit(session_id: str, body: CommitBody) -> dict:
-    session = _get_session(session_id)
+async def git_commit(
+    session_id: str, body: CommitBody, user: User = Depends(current_user)
+) -> dict:
+    session = _get_session(session_id, user)
     try:
         out = await asyncio.to_thread(
             exec_service.git_commit, session, body.message, body.add_all
@@ -259,8 +292,8 @@ async def git_commit(session_id: str, body: CommitBody) -> dict:
 
 
 @router.post("/sessions/{session_id}/git/push")
-async def git_push(session_id: str) -> dict:
-    session = _get_session(session_id)
+async def git_push(session_id: str, user: User = Depends(current_user)) -> dict:
+    session = _get_session(session_id, user)
     try:
         out = await asyncio.to_thread(exec_service.git_push, session)
     except ExecError as exc:
@@ -272,16 +305,22 @@ async def git_push(session_id: str) -> dict:
 
 
 @router.get("/tasks")
-def list_all_tasks() -> list[dict]:
+def list_all_tasks(user: User = Depends(current_user)) -> list[dict]:
     with read_session() as db:
         rows = db.exec(select(Task)).all()
+    rows = [
+        r for r in rows
+        if r.user_id == user.id or (r.user_id is None and user.is_admin)
+    ]
     rows = sorted(rows, key=lambda r: r.created_at, reverse=True)
     return [r.model_dump(mode="json") for r in rows]
 
 
 @router.get("/sessions/{session_id}/tasks")
-def list_session_tasks(session_id: str) -> list[dict]:
-    _get_session(session_id)
+def list_session_tasks(
+    session_id: str, user: User = Depends(current_user)
+) -> list[dict]:
+    _get_session(session_id, user)
     with read_session() as db:
         rows = db.exec(select(Task).where(Task.session_id == session_id)).all()
     rows = sorted(rows, key=lambda r: r.created_at, reverse=True)
@@ -289,9 +328,13 @@ def list_session_tasks(session_id: str) -> list[dict]:
 
 
 @router.post("/sessions/{session_id}/tasks")
-async def create_task(session_id: str, body: TaskBody) -> dict:
-    _get_session(session_id)
+async def create_task(
+    session_id: str, body: TaskBody, user: User = Depends(current_user)
+) -> dict:
+    _get_session(session_id, user)
     if not body.prompt.strip():
         raise HTTPException(400, "prompt required")
-    task = await task_runner.create_task(session_id, body.prompt, body.thinking)
+    task = await task_runner.create_task(
+        session_id, body.prompt, body.thinking, user_id=user.id
+    )
     return task.model_dump(mode="json")

@@ -1,10 +1,13 @@
 import type { ReactNode } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useGlobalEvents } from "../hooks/events";
+import { useCurrentUser } from "../lib/auth";
 import { cx } from "../lib/utils";
 import {
   IconActivity,
   IconAlert,
+  IconBrain,
+  IconChat,
   IconCube,
   IconDots,
   IconFlame,
@@ -13,8 +16,10 @@ import {
   IconSparkles,
   IconTerminal,
 } from "./icons";
+import { Avatar } from "./ui";
 
 const PRIMARY_TABS = [
+  { to: "/chats", label: "Chat", icon: IconChat },
   { to: "/sessions", label: "Sessions", icon: IconTerminal },
   { to: "/models", label: "Models", icon: IconCube },
   { to: "/system", label: "System", icon: IconActivity },
@@ -22,10 +27,12 @@ const PRIMARY_TABS = [
 ] as const;
 
 const SIDEBAR_LINKS = [
+  { to: "/chats", label: "Chat", icon: IconChat },
   { to: "/sessions", label: "Sessions", icon: IconTerminal },
   { to: "/models", label: "Models", icon: IconCube },
   { to: "/skills", label: "Skills", icon: IconSparkles },
   { to: "/connectors", label: "Connectors", icon: IconPlug },
+  { to: "/memory", label: "Memory", icon: IconBrain },
   { to: "/system", label: "System", icon: IconActivity },
   { to: "/settings", label: "Settings", icon: IconSliders },
 ] as const;
@@ -44,13 +51,45 @@ function ConnectionBanner() {
   );
 }
 
+function SidebarUserChrome() {
+  const user = useCurrentUser();
+  if (!user) return null;
+  return (
+    <NavLink
+      to="/profile"
+      className={({ isActive }) =>
+        cx(
+          "mx-3 mb-4 flex min-h-12 items-center gap-2.5 rounded-lg px-2.5 transition-colors duration-150",
+          isActive
+            ? "bg-accent/10 text-accent"
+            : "text-muted hover:bg-raised hover:text-text",
+        )
+      }
+    >
+      <Avatar name={user.display_name || user.username} color={user.avatar_color} size="sm" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium text-text">
+          {user.display_name || user.username}
+        </span>
+        <span className="block text-[11px] text-faint">
+          {user.is_admin ? "Admin · view profile" : "View profile"}
+        </span>
+      </span>
+    </NavLink>
+  );
+}
+
 export function AppLayout() {
   const location = useLocation();
-  // Chat surfaces (session detail + model chat) pin their own composer to the
-  // bottom edge, so they manage bottom spacing and hide the tab bar.
+  // Chat surfaces pin their own composer to the bottom edge, so they manage
+  // bottom spacing and hide the tab bar. /chats (the conversation list on
+  // mobile) keeps the tab bar; an open conversation (/chats/…) hides it.
   const inChatSurface =
     /^\/sessions\/[^/]+/.test(location.pathname) ||
+    /^\/chats\/[^/]+/.test(location.pathname) ||
     location.pathname === "/chat";
+  // The Chat section runs a two-pane layout that wants the full width.
+  const isChatSection = /^\/chats(\/|$)/.test(location.pathname);
 
   return (
     <div className="min-h-dvh bg-bg">
@@ -83,8 +122,8 @@ export function AppLayout() {
             </NavLink>
           ))}
         </nav>
-        <div className="mt-auto px-5 pb-5 text-[11px] text-faint">
-          Self-hosted agentic coding
+        <div className="mt-auto">
+          <SidebarUserChrome />
         </div>
       </aside>
 
@@ -93,8 +132,9 @@ export function AppLayout() {
         <ConnectionBanner />
         <main
           className={cx(
-            "mx-auto w-full max-w-4xl px-4 pt-safe md:px-8",
-            inChatSurface ? "pb-4" : "pb-tabbar md:pb-10",
+            "mx-auto w-full pt-safe",
+            isChatSection ? "max-w-6xl" : "max-w-4xl px-4 md:px-8",
+            inChatSurface || isChatSection ? "pb-0" : "pb-tabbar md:pb-10",
           )}
         >
           <Outlet />

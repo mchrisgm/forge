@@ -196,14 +196,22 @@ def seed() -> tuple[int, int]:
     skipped = 0
     with write_session() as db:
         existing = db.exec(select(ModelEntry)).all()
-        for entry in SEED_MODELS:
-            if any(_is_same_artifact(row, entry) for row in existing):
+        for template in SEED_MODELS:
+            if any(_is_same_artifact(row, template) for row in existing):
                 skipped += 1
-                print(f"  skip   {entry.hf_repo} ({entry.display_name}) — already in catalog")
+                print(
+                    f"  skip   {template.hf_repo} ({template.display_name}) — already in catalog"
+                )
                 continue
+            # Fresh instance per call: adding the module-level template itself
+            # would leave it expired+detached after commit, breaking any later
+            # seed() in the same process.
+            entry = ModelEntry(**template.model_dump(exclude={"id"}))
             db.add(entry)
             inserted += 1
-            print(f"  insert {entry.hf_repo} [{entry.engine.value}] -> {entry.display_name}")
+            print(
+                f"  insert {entry.hf_repo} [{entry.engine.value}] -> {entry.display_name}"
+            )
     return inserted, skipped
 
 

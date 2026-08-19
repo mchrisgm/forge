@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     models_dir: str = "/data/models"
     skills_dir: str = "/data/skills"
     workspaces_dir: str = "/data/workspaces"
+    uploads_dir: str = "/data/uploads"
+
+    # Uploads (chat attachments)
+    upload_max_mb: int = 20
+
+    # Memory engine
+    memory_token_budget: int = 700       # injected memory block cap
+    chat_context_tokens: int = 6000      # prompt-side budget before compression
+    chat_keep_tail_messages: int = 12    # recent turns never summarized away
 
     # Hardware budgets (PLAN §2)
     vram_budget_gb: float = 11.0

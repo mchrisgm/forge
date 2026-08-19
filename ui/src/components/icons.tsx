@@ -256,6 +256,40 @@ export const IconBrain = (p: IconProps) => (
   </Icon>
 );
 
+export const IconGhost = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M12 3.5A6.5 6.5 0 0 0 5.5 10v10l2.2-1.8 2.1 1.8 2.2-1.8 2.2 1.8 2.1-1.8 2.2 1.8V10A6.5 6.5 0 0 0 12 3.5Z" />
+    <circle cx="9.5" cy="10.5" r="0.4" fill="currentColor" />
+    <circle cx="14.5" cy="10.5" r="0.4" fill="currentColor" />
+  </Icon>
+);
+
+export const IconPaperclip = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="m20.6 11.4-8.8 8.8a5.6 5.6 0 0 1-7.9-8L12.4 3.7a3.7 3.7 0 0 1 5.3 5.2l-8.5 8.5a1.9 1.9 0 0 1-2.7-2.7l8.1-8" />
+  </Icon>
+);
+
+export const IconArchive = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="3" y="4" width="18" height="4.5" rx="1.2" />
+    <path d="M5 8.5v9A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-9M10 12.5h4" />
+  </Icon>
+);
+
+export const IconStar = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="m12 3.6 2.5 5.1 5.6.8-4 4 .9 5.6-5-2.7-5 2.7.9-5.6-4-4 5.6-.8L12 3.6Z" />
+  </Icon>
+);
+
+export const IconUser = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="12" cy="8" r="3.6" />
+    <path d="M4.8 20.2c.9-3.7 3.8-5.7 7.2-5.7s6.3 2 7.2 5.7" />
+  </Icon>
+);
+
 export const IconFlame = (p: IconProps) => (
   <Icon {...p}>
     <path d="M12 3c1 3-3.5 5-3.5 9a3.5 3.5 0 0 0 7 0c0-1.3-.5-2.3-1-3.2 2.4 1 4 3.3 4 6.2a6.5 6.5 0 0 1-13 0C5.5 8.8 10.5 7.5 12 3Z" />

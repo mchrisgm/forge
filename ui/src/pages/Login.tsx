@@ -1,22 +1,29 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
-import { Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useNavigate } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { IconFlame } from "../components/icons";
-import { Button, TextInput } from "../components/ui";
-import { getToken, setToken } from "../lib/auth";
+import { Button, Field, TextInput } from "../components/ui";
+import { getToken, setAuth } from "../lib/auth";
 import { cx } from "../lib/utils";
 
 export default function Login() {
   const navigate = useNavigate();
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [shake, setShake] = useState(false);
 
+  const status = useQuery({
+    queryKey: ["auth-status"],
+    queryFn: api.authStatus,
+    staleTime: 30_000,
+  });
+
   const login = useMutation({
-    mutationFn: (pw: string) => api.login(pw),
-    onSuccess: ({ token }) => {
-      setToken(token);
-      navigate("/sessions", { replace: true });
+    mutationFn: () => api.login(username.trim(), password),
+    onSuccess: ({ token, user }) => {
+      setAuth(token, user);
+      navigate("/chats", { replace: true });
     },
     onError: () => {
       setShake(true);
@@ -24,11 +31,12 @@ export default function Login() {
     },
   });
 
-  if (getToken()) return <Navigate to="/sessions" replace />;
+  if (status.data?.setup_required) return <Navigate to="/setup" replace />;
+  if (getToken()) return <Navigate to="/chats" replace />;
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (password) login.mutate(password);
+    if (username.trim() && password) login.mutate();
   };
 
   return (
@@ -39,53 +47,73 @@ export default function Login() {
             <IconFlame size={30} />
           </span>
           <h1 className="text-2xl font-bold tracking-tight text-text">Forge</h1>
-          <p className="mt-1 text-sm text-muted">
-            Self-hosted agentic coding
-          </p>
+          <p className="mt-1 text-sm text-muted">Sign in to your profile</p>
         </div>
 
         <form
           onSubmit={submit}
           className={cx("space-y-4", shake && "animate-shake")}
         >
-          <div>
-            <label htmlFor="password" className="sr-only">
-              Password
-            </label>
-            <TextInput
-              id="password"
-              type="password"
-              autoComplete="current-password"
-              autoFocus
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              aria-invalid={login.isError}
-              className={cx(
-                "text-center",
-                login.isError && "border-danger focus:border-danger",
-              )}
-            />
-            {login.isError && (
-              <p role="alert" className="mt-2 text-center text-xs text-danger">
-                {errorMessage(login.error)}
-              </p>
+          <Field label="Username">
+            {(id) => (
+              <TextInput
+                id={id}
+                autoComplete="username"
+                autoCapitalize="none"
+                spellCheck={false}
+                autoFocus
+                value={username}
+                onChange={(e) => setUsername(e.target.value.toLowerCase())}
+                aria-invalid={login.isError}
+                required
+              />
             )}
-          </div>
+          </Field>
+          <Field label="Password">
+            {(id) => (
+              <TextInput
+                id={id}
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                aria-invalid={login.isError}
+                className={cx(login.isError && "border-danger focus:border-danger")}
+                required
+              />
+            )}
+          </Field>
+          {login.isError && (
+            <p role="alert" className="text-center text-xs text-danger">
+              {errorMessage(login.error)}
+            </p>
+          )}
           <Button
             type="submit"
             variant="primary"
             className="w-full"
             loading={login.isPending}
-            disabled={!password}
+            disabled={!username.trim() || !password}
           >
-            Unlock
+            Sign in
           </Button>
         </form>
 
-        <p className="mt-8 text-center text-xs text-faint">
-          Set via FORGE_PASSWORD · changeable in Settings
-        </p>
+        {status.data?.allow_registration ? (
+          <p className="mt-8 text-center text-sm text-muted">
+            New here?{" "}
+            <Link
+              to="/register"
+              className="font-medium text-accent underline-offset-2 hover:underline"
+            >
+              Create a profile
+            </Link>
+          </p>
+        ) : (
+          <p className="mt-8 text-center text-xs text-faint">
+            Registration is closed — ask the admin for an account.
+          </p>
+        )}
       </div>
     </div>
   );

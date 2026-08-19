@@ -14,15 +14,35 @@ const README = join(ROOT, "README.md");
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
+// The complete suite shoot-screens.mjs captures — a missing one fails.
+const REQUIRED = [
+  "chat-desktop",
+  "memory-desktop",
+  "setup-desktop",
+  "sessions-desktop",
+  "session-chat-desktop",
+  "models-desktop",
+  "system-desktop",
+  "connectors-desktop",
+  "chat-mobile",
+  "sessions-mobile",
+  "session-chat-mobile",
+  "models-mobile",
+  "system-mobile",
+];
+
 let failures = 0;
 const fail = (msg) => {
   failures += 1;
   console.error(`FAIL ${msg}`);
 };
 
-// 1) Every file in docs/screenshots is a real PNG.
+// 1) Every file in docs/screenshots is a real PNG, and the suite is complete.
 const files = readdirSync(SHOTS).filter((f) => f.endsWith(".png")).sort();
 if (files.length === 0) fail("no PNG files in docs/screenshots");
+for (const name of REQUIRED) {
+  if (!files.includes(`${name}.png`)) fail(`missing screenshot: ${name}.png`);
+}
 for (const f of files) {
   const full = join(SHOTS, f);
   const head = readFileSync(full).subarray(0, 8);

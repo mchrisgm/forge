@@ -1,5 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import {
+  IconBrain,
   IconChevronRight,
   IconLogout,
   IconPlug,
@@ -7,9 +8,16 @@ import {
   IconSparkles,
 } from "../components/icons";
 import { PageHeader } from "../components/layout";
-import { clearToken } from "../lib/auth";
+import { Avatar } from "../components/ui";
+import { clearAuth, useCurrentUser } from "../lib/auth";
 
 const LINKS = [
+  {
+    to: "/memory",
+    label: "Memory",
+    hint: "What Forge remembers about you",
+    icon: IconBrain,
+  },
   {
     to: "/skills",
     label: "Skills",
@@ -25,21 +33,51 @@ const LINKS = [
   {
     to: "/settings",
     label: "Settings",
-    hint: "Password, timeouts, schedules",
+    hint: "Timeouts, schedules, registration",
     icon: IconSliders,
   },
 ] as const;
 
 export default function More() {
   const navigate = useNavigate();
+  const user = useCurrentUser();
   const logout = () => {
-    clearToken();
+    clearAuth();
     navigate("/login", { replace: true });
   };
 
   return (
     <div>
       <PageHeader title="More" />
+
+      {user && (
+        <Link
+          to="/profile"
+          className="mb-4 flex min-h-16 items-center gap-3 rounded-xl border border-border bg-surface px-4 hover:bg-raised"
+        >
+          <Avatar
+            name={user.display_name || user.username}
+            color={user.avatar_color}
+          />
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-2 text-sm font-medium text-text">
+              <span className="truncate">
+                {user.display_name || user.username}
+              </span>
+              {user.is_admin && (
+                <span className="shrink-0 rounded-full border border-accent/40 bg-accent/10 px-1.5 py-px text-[9px] font-semibold tracking-wider text-accent uppercase">
+                  Admin
+                </span>
+              )}
+            </span>
+            <span className="block font-mono text-xs text-faint">
+              @{user.username}
+            </span>
+          </span>
+          <IconChevronRight size={16} className="text-faint" />
+        </Link>
+      )}
+
       <ul className="overflow-hidden rounded-xl border border-border bg-surface">
         {LINKS.map(({ to, label, hint, icon: Icon }) => (
           <li key={to} className="border-b border-border last:border-none">

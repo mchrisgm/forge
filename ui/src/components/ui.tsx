@@ -1,4 +1,5 @@
 import {
+  forwardRef,
   useCallback,
   useEffect,
   useId,
@@ -199,6 +200,39 @@ export function LaneBadge({
   );
 }
 
+// ── Avatar ──────────────────────────────────────────────────────────────────
+
+const AVATAR_SIZES = {
+  sm: "h-6 w-6 text-[11px]",
+  md: "h-8 w-8 text-sm",
+  lg: "h-14 w-14 text-xl",
+} as const;
+
+/** Colored initial dot for a user profile (avatar_color from the backend). */
+export function Avatar({
+  name,
+  color,
+  size = "md",
+}: {
+  name: string;
+  color?: string;
+  size?: keyof typeof AVATAR_SIZES;
+}) {
+  const initial = (name.trim()[0] ?? "?").toUpperCase();
+  return (
+    <span
+      aria-hidden
+      className={cx(
+        "flex shrink-0 items-center justify-center rounded-full font-bold text-bg select-none",
+        AVATAR_SIZES[size],
+      )}
+      style={{ backgroundColor: color || "var(--color-accent)" }}
+    >
+      {initial}
+    </span>
+  );
+}
+
 // ── Skeleton & empty states ─────────────────────────────────────────────────
 
 export function SkeletonBlock({ className }: { className?: string }) {
@@ -312,19 +346,25 @@ export function Field({
   );
 }
 
-export function TextInput({
-  className,
-  ...rest
-}: InputHTMLAttributes<HTMLInputElement>) {
-  return <input className={cx(FIELD_CLASSES, className)} {...rest} />;
-}
+export const TextInput = forwardRef<
+  HTMLInputElement,
+  InputHTMLAttributes<HTMLInputElement>
+>(function TextInput({ className, ...rest }, ref) {
+  return <input ref={ref} className={cx(FIELD_CLASSES, className)} {...rest} />;
+});
 
-export function TextArea({
-  className,
-  ...rest
-}: TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return <textarea className={cx(FIELD_CLASSES, "resize-y", className)} {...rest} />;
-}
+export const TextArea = forwardRef<
+  HTMLTextAreaElement,
+  TextareaHTMLAttributes<HTMLTextAreaElement>
+>(function TextArea({ className, ...rest }, ref) {
+  return (
+    <textarea
+      ref={ref}
+      className={cx(FIELD_CLASSES, "resize-y", className)}
+      {...rest}
+    />
+  );
+});
 
 export function Select({
   className,

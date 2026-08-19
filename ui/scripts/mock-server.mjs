@@ -10,10 +10,15 @@ import { createServer } from "node:http";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, extname, dirname, resolve, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
+import { deflateSync } from "node:zlib";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DIST = resolve(__dirname, "..", "dist");
 const PORT = Number(process.argv[2] || 4173);
+// SETUP_MODE=1 → /api/auth/status reports a fresh install (setup_required),
+// which routes the app to the /setup wizard. Run a second instance with this
+// set to capture the first-run screens.
+const SETUP_MODE = process.env.SETUP_MODE === "1";
 
 const now = Date.now();
 const iso = (msAgo) => new Date(now - msAgo).toISOString();
@@ -587,6 +592,352 @@ const connectors = JSON.parse(
   readFileSync(join(__dirname, "mock-connectors.json"), "utf8"),
 );
 
+// ── Multi-user profiles (routers/users.py) ──────────────────────────────────
+
+const currentUser = {
+  id: 1,
+  username: "chris",
+  display_name: "Chris",
+  is_admin: true,
+  avatar_color: "#f59e0b",
+  memory_enabled: true,
+  personal_instructions:
+    "Be concise. Metric units and 24-hour times. When code is involved, lead with a runnable snippet.",
+  created_at: iso(90 * DAY),
+};
+
+const publicUsers = [
+  {
+    id: 1,
+    username: "chris",
+    display_name: "Chris",
+    is_admin: true,
+    avatar_color: "#f59e0b",
+  },
+  {
+    id: 2,
+    username: "maya",
+    display_name: "Maya",
+    is_admin: false,
+    avatar_color: "#8b5cf6",
+  },
+  {
+    id: 3,
+    username: "sam",
+    display_name: "Sam",
+    is_admin: false,
+    avatar_color: "#10b981",
+  },
+];
+
+// ── Chat conversations (routers/chat.py) ────────────────────────────────────
+
+const chatStatus = { serving: [lease0] };
+
+const conv = (id, title, model_slug, updatedAgo, createdAgo, extra = {}) => ({
+  id,
+  user_id: 1,
+  title,
+  model_slug,
+  thinking: "auto",
+  memory_enabled: true,
+  archived: false,
+  summarized_until: 0,
+  created_at: iso(createdAgo),
+  updated_at: iso(updatedAgo),
+  ...extra,
+});
+
+const conversations = [
+  conv("conv-1", "Plan the garden irrigation", "qwen3-coder-30b-a3b", 8 * MIN, 2 * HOUR),
+  conv("conv-2", "Debug docker compose networking", "qwen3-coder-30b-a3b", 3 * HOUR, 5 * HOUR),
+  conv("conv-3", "Trip to Lisbon in October", "qwen25-coder-14b-awq", 26 * HOUR, 28 * HOUR),
+  conv("conv-4", "Sourdough starter rescue", "qwen3-coder-30b-a3b", 2 * DAY, 2 * DAY + 2 * HOUR),
+  conv("conv-5", "Birthday gift ideas for Maya", "qwen3-coder-30b-a3b", 4 * DAY, 4 * DAY + HOUR),
+  conv("conv-6", "Regex for log timestamps", "qwen25-coder-14b-awq", 6 * DAY, 6 * DAY + HOUR),
+];
+
+const archivedConversations = [
+  conv("conv-7", "Compare NAS drive options", "qwen25-coder-14b-awq", 21 * DAY, 22 * DAY, {
+    archived: true,
+  }),
+];
+
+// The curated conversation the chat screenshots open: an everyday question
+// with an image attachment and markdown-rich replies (table, lists, code).
+const gardenAttachment = {
+  id: "up-1",
+  filename: "raised-beds.png",
+  kind: "image",
+  mime: "image/png",
+  size_bytes: 0, // patched after the PNG is generated below
+};
+
+const gardenReply = [
+  "Nice setup — three beds off one rain barrel is very doable with a gravity-fed drip line.",
+  "",
+  "**Split the beds into two zones**",
+  "",
+  "| Zone | Beds | Emitters | Daily water |",
+  "|---|---|---|---|",
+  "| A | Tomatoes | 6 × 2 L/h | ~8 L |",
+  "| B | Herbs + greens | 8 × 1 L/h | ~5 L |",
+  "",
+  "Tomatoes want deep, infrequent watering; herbs and greens prefer little and often — separate timer valves keep both happy. Add a cheap inline mesh filter right at the barrel: rain water clogs emitters fast.",
+  "",
+  "**Starting schedule** — adjust to the weather after a week:",
+  "",
+  "```",
+  "Zone A  06:30  20 min  daily",
+  "Zone B  07:00   8 min  twice daily",
+  "```",
+].join("\n");
+
+const gardenFollowUp = [
+  "80 cm of head is only **0.08 bar**, so skip anything rated 1–4 bar:",
+  "",
+  "- Choose *gravity-rated* (unregulated) drippers — pressure-compensating ones barely open",
+  "- Keep each zone under ~10 m of line so friction losses stay negligible",
+  "- Raise the barrel on cinder blocks if you can; every extra 30 cm helps",
+  "",
+  "Fully open you'll get roughly 1–2 L/h per outlet — exactly the trickle a drip bed wants.",
+].join("\n");
+
+const chatMsg = (id, role, content, createdAgo, attachments = []) => ({
+  id,
+  conversation_id: "conv-1",
+  role,
+  content,
+  token_estimate: Math.ceil(content.length / 4),
+  created_at: iso(createdAgo),
+  attachments,
+});
+
+const conversationDetail = {
+  ...conversations[0],
+  summary: "",
+  messages: [
+    chatMsg(
+      101,
+      "user",
+      "Here's our back garden — we just built three raised beds (tomatoes, herbs, salad greens). I want drip irrigation running off the rain barrel before it gets properly hot. Where do I start?",
+      24 * MIN,
+      [gardenAttachment],
+    ),
+    chatMsg(102, "assistant", gardenReply, 22 * MIN),
+    chatMsg(
+      103,
+      "user",
+      "The barrel only sits about 80 cm above the beds — is that enough pressure for drippers?",
+      10 * MIN,
+    ),
+    chatMsg(104, "assistant", gardenFollowUp, 8 * MIN),
+  ],
+};
+
+/** Small generic detail so every listed conversation opens without errors. */
+const genericDetail = (c) => ({
+  ...c,
+  summary: "",
+  messages: [
+    chatMsg(1, "user", "…", 2 * HOUR),
+    chatMsg(2, "assistant", "…", 2 * HOUR),
+  ].map((m) => ({ ...m, conversation_id: c.id })),
+});
+
+// ── Memory (routers/memory_api.py) ──────────────────────────────────────────
+
+let memId = 0;
+const mem = (kind, content, importance, pinned, useCount, agoDays, src = "") => ({
+  id: ++memId,
+  user_id: 1,
+  kind,
+  content,
+  importance,
+  pinned,
+  source_conversation_id: src,
+  use_count: useCount,
+  created_at: iso(agoDays * DAY),
+  updated_at: iso(Math.max(0.2, agoDays / 2) * DAY),
+  last_used_at: iso(Math.max(0.1, agoDays / 3) * DAY),
+});
+
+const memories = [
+  mem("fact", "Lives in Rotterdam; the garden faces south-west.", 1.6, true, 12, 60),
+  mem("fact", "Household: Chris, Maya and two kids (8 and 11).", 1.1, false, 4, 45),
+  mem(
+    "fact",
+    "Runs Forge on a two-GPU box in the attic (2× RTX 4070 Ti Super).",
+    0.9,
+    false,
+    3,
+    30,
+  ),
+  mem(
+    "preference",
+    "Prefers concise answers with metric units and 24-hour times.",
+    1.8,
+    true,
+    31,
+    75,
+  ),
+  mem("preference", "Docker Compose over Kubernetes for home projects.", 1.2, false, 7, 40),
+  mem("preference", "Vegetarian household; spicy food is welcome.", 0.8, false, 2, 20),
+  mem(
+    "project",
+    "Building drip irrigation for three raised beds, fed from a rain barrel.",
+    1.4,
+    false,
+    6,
+    5,
+    "conv-1",
+  ),
+  mem(
+    "project",
+    "Migrating the family photo archive to Immich on the NAS.",
+    1.0,
+    false,
+    3,
+    14,
+  ),
+  mem(
+    "episode",
+    "2026-08-12: fixed the compose networking flake by renaming the conflicting `web` service.",
+    0.7,
+    false,
+    1,
+    7,
+    "conv-2",
+  ),
+  mem(
+    "episode",
+    "Planned a week in Lisbon for October — flights not booked yet.",
+    0.6,
+    false,
+    1,
+    1,
+    "conv-3",
+  ),
+];
+
+// ── Attachment image: a small pleasant PNG rendered at startup ──────────────
+// Zero-dependency PNG encoder (deflate via node:zlib, hand-rolled CRC32) so
+// the attachment thumbnail in the chat screenshots is a real image.
+
+const CRC_TABLE = new Int32Array(256).map((_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c;
+});
+
+function crc32(buf) {
+  let c = 0xffffffff;
+  for (const byte of buf) c = CRC_TABLE[(c ^ byte) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const chunk = Buffer.concat([Buffer.from(type, "ascii"), data]);
+  const out = Buffer.alloc(chunk.length + 8);
+  out.writeUInt32BE(data.length, 0);
+  chunk.copy(out, 4);
+  out.writeUInt32BE(crc32(chunk), chunk.length + 4);
+  return out;
+}
+
+function encodePng(width, height, rgb) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // color type: truecolor
+  const raw = Buffer.alloc(height * (1 + width * 3));
+  for (let y = 0; y < height; y++) {
+    raw[y * (1 + width * 3)] = 0; // filter: none
+    rgb.copy(raw, y * (1 + width * 3) + 1, y * width * 3, (y + 1) * width * 3);
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", deflateSync(raw, { level: 9 })),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function renderGardenPng() {
+  const W = 480;
+  const H = 360;
+  const px = Buffer.alloc(W * H * 3);
+  const set = (x, y, r, g, b) => {
+    if (x < 0 || y < 0 || x >= W || y >= H) return;
+    const i = (y * W + x) * 3;
+    px[i] = r;
+    px[i + 1] = g;
+    px[i + 2] = b;
+  };
+  const rect = (x0, y0, x1, y1, r, g, b) => {
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) set(x, y, r, g, b);
+  };
+  const HORIZON = 210;
+  // Sky: soft blue fading to warm near the horizon.
+  for (let y = 0; y < HORIZON; y++) {
+    const t = y / HORIZON;
+    const r = Math.round(140 + 90 * t);
+    const g = Math.round(196 + 40 * t);
+    const b = Math.round(235 - 30 * t);
+    for (let x = 0; x < W; x++) set(x, y, r, g, b);
+  }
+  // Sun with a soft rim.
+  for (let y = 30; y < 130; y++) {
+    for (let x = 340; x < 440; x++) {
+      const d = Math.hypot(x - 390, y - 80);
+      if (d < 34) set(x, y, 255, 209, 102);
+      else if (d < 42) set(x, y, 250, 220, 150);
+    }
+  }
+  // Grass: gentle vertical gradient.
+  for (let y = HORIZON; y < H; y++) {
+    const t = (y - HORIZON) / (H - HORIZON);
+    const r = Math.round(116 - 30 * t);
+    const g = Math.round(176 - 40 * t);
+    const b = Math.round(101 - 30 * t);
+    for (let x = 0; x < W; x++) set(x, y, r, g, b);
+  }
+  // Three raised beds: timber frame, dark soil, rows of plants.
+  const beds = [
+    { x: 28, w: 128 },
+    { x: 176, w: 128 },
+    { x: 324, w: 128 },
+  ];
+  for (const bed of beds) {
+    const y0 = 248;
+    const y1 = 332;
+    rect(bed.x, y0, bed.x + bed.w, y1, 146, 104, 66); // timber
+    rect(bed.x + 8, y0 + 8, bed.x + bed.w - 8, y1 - 8, 74, 52, 38); // soil
+    for (let row = 0; row < 3; row++) {
+      for (let col = 0; col < 5; col++) {
+        const cx = bed.x + 22 + col * ((bed.w - 44) / 4);
+        const cy = y0 + 22 + row * 24;
+        for (let dy = -6; dy <= 6; dy++) {
+          for (let dx = -6; dx <= 6; dx++) {
+            if (dx * dx + dy * dy <= 30) {
+              set(Math.round(cx + dx), cy + dy, 96, 168, 82);
+            }
+          }
+        }
+        set(Math.round(cx), cy - 1, 132, 200, 112);
+      }
+    }
+  }
+  // Rain barrel on the right edge.
+  rect(452, 196, 478, 250, 92, 112, 128);
+  rect(452, 196, 478, 202, 70, 88, 102);
+  return encodePng(W, H, px);
+}
+
+const gardenPngBuffer = renderGardenPng();
+gardenAttachment.size_bytes = gardenPngBuffer.length;
+
 // ── HTTP plumbing ───────────────────────────────────────────────────────────
 
 const MIME = {
@@ -637,10 +988,61 @@ function sendSse(res, { events = [] } = {}) {
 function handleApi(req, res, url) {
   const p = url.pathname.replace(/\/+$/, "") || "/";
   const q = url.searchParams;
+  let m;
 
-  // auth — any password unlocks the demo
+  // auth — multi-user: any credentials sign in as the demo profile
+  if (p === "/api/auth/status") {
+    return sendJson(res, {
+      setup_required: SETUP_MODE,
+      allow_registration: true,
+      user_count: SETUP_MODE ? 0 : publicUsers.length,
+    });
+  }
   if (p === "/api/auth/login" && req.method === "POST") {
-    return sendJson(res, { token: "demo-token" });
+    return sendJson(res, { token: "demo-token", user: currentUser });
+  }
+  if (p === "/api/auth/register" && req.method === "POST") {
+    return sendJson(res, { token: "demo-token", user: currentUser });
+  }
+  if (p === "/api/auth/check") {
+    return sendJson(res, { ok: true, user: currentUser });
+  }
+
+  // users
+  if (p === "/api/users/me") return sendJson(res, currentUser);
+  if (p === "/api/users") return sendJson(res, publicUsers);
+
+  // chat
+  if (p === "/api/chat/status") return sendJson(res, chatStatus);
+  if (p === "/api/chat/conversations") {
+    if (req.method === "POST") return sendJson(res, conversations[0]);
+    const archived = q.get("archived") === "true";
+    return sendJson(res, archived ? archivedConversations : conversations);
+  }
+  m = p.match(/^\/api\/chat\/conversations\/([^/]+)$/);
+  if (m) {
+    if (m[1] === "conv-1") return sendJson(res, conversationDetail);
+    const c = [...conversations, ...archivedConversations].find(
+      (x) => x.id === m[1],
+    );
+    if (!c) return sendJson(res, { detail: "conversation not found" }, 404);
+    return sendJson(res, req.method === "GET" ? genericDetail(c) : c);
+  }
+
+  // memory
+  if (p === "/api/memory") {
+    if (req.method === "POST") return sendJson(res, memories[0]);
+    return sendJson(res, memories);
+  }
+
+  // files — every upload id serves the demo garden photo
+  m = p.match(/^\/api\/files\/([^/]+)$/);
+  if (m && req.method === "GET") {
+    res.writeHead(200, {
+      "Content-Type": "image/png",
+      "Cache-Control": "no-store",
+    });
+    return res.end(gardenPngBuffer);
   }
 
   // global SSE — one download.progress frame makes the 62% download live
@@ -663,7 +1065,7 @@ function handleApi(req, res, url) {
   }
 
   // per-session SSE
-  let m = p.match(/^\/api\/sessions\/([^/]+)\/events$/);
+  m = p.match(/^\/api\/sessions\/([^/]+)\/events$/);
   if (m) return sendSse(res);
 
   if (p === "/api/system/stats") return sendJson(res, systemStats);

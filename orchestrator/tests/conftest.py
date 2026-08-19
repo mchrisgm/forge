@@ -23,6 +23,9 @@ from app.services import engine_manager as engine_manager_module
 from app.services import events as events_module
 
 TEST_PASSWORD = "forge-test-password"
+TEST_USERNAME = "tester"
+SECOND_USERNAME = "second"
+SECOND_PASSWORD = "second-user-password"
 
 
 # ── per-test isolation ──────────────────────────────────────────────────────
@@ -36,7 +39,7 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("FORGE_MODELS_DIR", str(tmp_path / "models"))
     monkeypatch.setenv("FORGE_SKILLS_DIR", str(tmp_path / "skills"))
     monkeypatch.setenv("FORGE_WORKSPACES_DIR", str(tmp_path / "workspaces"))
-    monkeypatch.setenv("FORGE_PASSWORD", TEST_PASSWORD)
+    monkeypatch.setenv("FORGE_UPLOADS_DIR", str(tmp_path / "uploads"))
     monkeypatch.setenv("FORGE_SECRET_KEY", "test-secret-key-0123456789abcdef0123456789abcdef")
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_PAT", raising=False)
@@ -174,17 +177,45 @@ def _no_docker() -> None:
 @pytest.fixture
 def api(monkeypatch):
     """TestClient running the real app lifespan against the tmp database.
-    Docker is hard-disabled: any accidental client() call raises."""
+    Docker is hard-disabled: any accidental client() call raises.
+
+    Bootstrap's model-catalog seeding is a no-op here so tests keep an empty
+    ModelEntry table (dedicated tests in test_db_migration exercise the real
+    seeding — be consistent and don't re-enable it per test)."""
     monkeypatch.setattr(docker_util, "client", _no_docker)
+    from app.services import bootstrap
+
+    monkeypatch.setattr(bootstrap, "seed_model_catalog_if_empty", lambda: 0)
     from app.main import app
 
     with TestClient(app) as client:
         yield client
 
 
+def register_user(
+    api,
+    username: str = TEST_USERNAME,
+    password: str = TEST_PASSWORD,
+    display_name: str = "",
+) -> dict[str, str]:
+    """Register a profile through the API and return its Authorization headers.
+    The first profile registered in a test DB becomes the admin."""
+    resp = api.post(
+        "/api/auth/register",
+        json={"username": username, "password": password, "display_name": display_name},
+    )
+    assert resp.status_code == 200, resp.text
+    return {"Authorization": f"Bearer {resp.json()['token']}"}
+
+
 @pytest.fixture
 def auth_token(api) -> str:
-    resp = api.post("/api/auth/login", json={"password": TEST_PASSWORD})
+    """Token of the default test profile ('tester') — the first registered
+    user, and therefore this Forge's admin."""
+    resp = api.post(
+        "/api/auth/register",
+        json={"username": TEST_USERNAME, "password": TEST_PASSWORD},
+    )
     assert resp.status_code == 200, resp.text
     return resp.json()["token"]
 
@@ -192,6 +223,13 @@ def auth_token(api) -> str:
 @pytest.fixture
 def auth_headers(auth_token) -> dict[str, str]:
     return {"Authorization": f"Bearer {auth_token}"}
+
+
+@pytest.fixture
+def second_user_headers(api, auth_headers) -> dict[str, str]:
+    """A second, non-admin profile — registered after `auth_headers` so the
+    default user keeps the first-user-is-admin role."""
+    return register_user(api, username=SECOND_USERNAME, password=SECOND_PASSWORD)
 
 
 @pytest.fixture
