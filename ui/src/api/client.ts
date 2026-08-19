@@ -1,6 +1,12 @@
 import { announceUnauthorized, getToken } from "../lib/auth";
 import type {
+  AuthResult,
+  AuthStatus,
+  ChatDoneFrame,
+  ChatStatus,
   Connector,
+  Conversation,
+  ConversationDetail,
   CustomConnectorBody,
   EnginesStatus,
   FileResponse,
@@ -9,7 +15,10 @@ import type {
   GitStatus,
   Lease,
   ManualAddBody,
+  MemoryEntry,
+  MemoryKind,
   ModelEntry,
+  PublicUser,
   Session,
   SettingsPayload,
   Skill,
@@ -18,6 +27,8 @@ import type {
   Task,
   ThinkingDirectives,
   ThinkingLevel,
+  UploadMeta,
+  UserProfile,
 } from "./types";
 
 export class ApiError extends Error {
@@ -58,7 +69,12 @@ async function request<T>(
   const headers = new Headers(init.headers);
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  if (init.body != null && !headers.has("Content-Type")) {
+  // FormData bodies set their own multipart boundary — never override.
+  if (
+    init.body != null &&
+    !(init.body instanceof FormData) &&
+    !headers.has("Content-Type")
+  ) {
     headers.set("Content-Type", "application/json");
   }
 
@@ -107,13 +123,91 @@ const patch = <T>(path: string, body: unknown) =>
 const del = <T>(path: string) => request<T>(path, { method: "DELETE" });
 
 export const api = {
-  // auth
-  login: (password: string) =>
-    request<{ token: string }>("/api/auth/login", {
+  // auth (multi-user — routers/users.py)
+  authStatus: () =>
+    request<AuthStatus>("/api/auth/status", { skipAuthRedirect: true }),
+  login: (username: string, password: string) =>
+    request<AuthResult>("/api/auth/login", {
       method: "POST",
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ username, password }),
       skipAuthRedirect: true,
     }),
+  register: (username: string, password: string, display_name?: string) =>
+    request<AuthResult>("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ username, password, display_name: display_name ?? "" }),
+      skipAuthRedirect: true,
+    }),
+  authCheck: () => get<{ ok: boolean; user: UserProfile }>("/api/auth/check"),
+
+  // users
+  me: () => get<UserProfile>("/api/users/me"),
+  patchMe: (body: {
+    display_name?: string;
+    personal_instructions?: string;
+    memory_enabled?: boolean;
+    avatar_color?: string;
+  }) => patch<UserProfile>("/api/users/me", body),
+  changeMyPassword: (current_password: string, new_password: string) =>
+    post<{ ok: boolean }>("/api/users/me/password", {
+      current_password,
+      new_password,
+    }),
+  listUsers: () => get<PublicUser[]>("/api/users"),
+  setRegistration: (allow_registration: boolean) =>
+    post<{ allow_registration: boolean }>("/api/users/registration", {
+      allow_registration,
+    }),
+
+  // chat conversations
+  listConversations: (archived = false) =>
+    get<Conversation[]>(`/api/chat/conversations?archived=${archived}`),
+  createConversation: (body: {
+    title?: string;
+    model_slug?: string;
+    thinking?: ThinkingLevel;
+    memory_enabled?: boolean;
+  }) => post<Conversation>("/api/chat/conversations", body),
+  getConversation: (id: string) =>
+    get<ConversationDetail>(`/api/chat/conversations/${id}`),
+  patchConversation: (
+    id: string,
+    body: {
+      title?: string;
+      model_slug?: string;
+      thinking?: ThinkingLevel;
+      memory_enabled?: boolean;
+      archived?: boolean;
+    },
+  ) => patch<Conversation>(`/api/chat/conversations/${id}`, body),
+  deleteConversation: (id: string) =>
+    del<{ ok: boolean }>(`/api/chat/conversations/${id}`),
+  chatStatus: () => get<ChatStatus>("/api/chat/status"),
+
+  // files (chat attachments)
+  uploadFile: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<UploadMeta>("/api/files", { method: "POST", body: form });
+  },
+  deleteFile: (id: string) => del<{ ok: boolean }>(`/api/files/${id}`),
+
+  // memory
+  listMemories: () => get<MemoryEntry[]>("/api/memory"),
+  addMemory: (body: { content: string; kind?: MemoryKind; pinned?: boolean }) =>
+    post<MemoryEntry>("/api/memory", body),
+  patchMemory: (
+    id: number,
+    body: {
+      content?: string;
+      kind?: MemoryKind;
+      pinned?: boolean;
+      importance?: number;
+    },
+  ) => patch<MemoryEntry>(`/api/memory/${id}`, body),
+  deleteMemory: (id: number) => del<{ ok: boolean }>(`/api/memory/${id}`),
+  clearMemories: () => del<{ deleted: boolean }>("/api/memory"),
+  consolidateMemory: () => post<Record<string, unknown>>("/api/memory/consolidate"),
 
   // sessions
   listSessions: () => get<Session[]>("/api/sessions"),
@@ -222,12 +316,16 @@ export const api = {
     session_idle_min?: number;
     registry_cron?: string;
   }) => patch<SettingsPayload>("/api/settings", body),
-  changePassword: (current_password: string, new_password: string) =>
-    post<{ ok: boolean }>("/api/settings/password", {
-      current_password,
-      new_password,
-    }),
 };
+
+/**
+ * Direct URL for an uploaded file — used in <img> tags where auth headers are
+ * impossible, so the token rides along as a query parameter.
+ */
+export function fileUrl(id: string): string {
+  const token = getToken();
+  return `/api/files/${id}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+}
 
 // ── Thinking directives (cached per model+level) ────────────────────────────
 
@@ -271,15 +369,14 @@ export interface EngineChatOptions {
 }
 
 /**
- * Start a streaming chat completion against a loaded engine.
- * Returns the raw Response (text/event-stream of OpenAI chunk frames ending
- * with `data: [DONE]`) so callers can consume `response.body` incrementally.
- * Throws ApiError on HTTP failure — 409 means no engine lease is ready.
- * An AbortError from `opts.signal` is rethrown untouched.
+ * POST `body` to a streaming endpoint and return the raw Response so the
+ * caller can consume `response.body` incrementally.
+ * Throws ApiError on HTTP failure; AbortError is rethrown untouched.
  */
-export async function engineChatStream(
-  messages: ChatCompletionMessage[],
-  opts: EngineChatOptions = {},
+async function streamPost(
+  path: string,
+  body: unknown,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const headers = new Headers({ "Content-Type": "application/json" });
   const token = getToken();
@@ -287,19 +384,11 @@ export async function engineChatStream(
 
   let resp: Response;
   try {
-    resp = await fetch("/api/engines/chat", {
+    resp = await fetch(path, {
       method: "POST",
       headers,
-      signal: opts.signal,
-      body: JSON.stringify({
-        messages,
-        stream: true,
-        ...(opts.maxTokens != null ? { max_tokens: opts.maxTokens } : {}),
-        ...(opts.model ? { model: opts.model } : {}),
-        ...(opts.thinking && opts.thinking !== "auto"
-          ? { thinking: opts.thinking }
-          : {}),
-      }),
+      signal,
+      body: JSON.stringify(body),
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
@@ -327,4 +416,150 @@ export async function engineChatStream(
     throw new ApiError(resp.status, detail ?? `HTTP ${resp.status}`);
   }
   return resp;
+}
+
+/**
+ * Start a streaming chat completion against a loaded engine.
+ * Returns the raw Response (text/event-stream of OpenAI chunk frames ending
+ * with `data: [DONE]`) so callers can consume `response.body` incrementally.
+ * Throws ApiError on HTTP failure — 409 means no engine lease is ready.
+ * An AbortError from `opts.signal` is rethrown untouched.
+ */
+export function engineChatStream(
+  messages: ChatCompletionMessage[],
+  opts: EngineChatOptions = {},
+): Promise<Response> {
+  return streamPost(
+    "/api/engines/chat",
+    {
+      messages,
+      stream: true,
+      ...(opts.maxTokens != null ? { max_tokens: opts.maxTokens } : {}),
+      ...(opts.model ? { model: opts.model } : {}),
+      ...(opts.thinking && opts.thinking !== "auto"
+        ? { thinking: opts.thinking }
+        : {}),
+    },
+    opts.signal,
+  );
+}
+
+// ── Chat streaming (routers/chat.py, SSE over fetch — EventSource can't POST)
+
+/** POST /api/chat/conversations/{id}/messages — persisted chat turn. */
+export function conversationMessageStream(
+  conversationId: string,
+  body: {
+    content: string;
+    attachment_ids?: string[];
+    /** Overrides the conversation default; omit/auto = use it. */
+    thinking?: ThinkingLevel;
+  },
+  signal?: AbortSignal,
+): Promise<Response> {
+  return streamPost(
+    `/api/chat/conversations/${conversationId}/messages`,
+    {
+      content: body.content,
+      ...(body.attachment_ids?.length
+        ? { attachment_ids: body.attachment_ids }
+        : {}),
+      ...(body.thinking && body.thinking !== "auto"
+        ? { thinking: body.thinking }
+        : {}),
+    },
+    signal,
+  );
+}
+
+/** POST /api/chat/temporary — incognito turn; the client keeps the history. */
+export function temporaryChatStream(
+  body: {
+    messages: { role: string; content: string }[];
+    model_slug?: string;
+    thinking?: ThinkingLevel;
+    attachment_ids?: string[];
+  },
+  signal?: AbortSignal,
+): Promise<Response> {
+  return streamPost(
+    "/api/chat/temporary",
+    {
+      messages: body.messages,
+      ...(body.model_slug ? { model_slug: body.model_slug } : {}),
+      ...(body.thinking ? { thinking: body.thinking } : {}),
+      ...(body.attachment_ids?.length
+        ? { attachment_ids: body.attachment_ids }
+        : {}),
+    },
+    signal,
+  );
+}
+
+export interface ChatStreamHandlers {
+  /** A non-empty assistant content fragment arrived. */
+  onDelta: (fragment: string) => void;
+  /** An in-stream `data: {"error": "..."}` frame arrived. */
+  onError?: (message: string) => void;
+  /** The final `data: {"forge":"done", ...}` frame arrived. */
+  onDone?: (frame: ChatDoneFrame) => void;
+}
+
+/**
+ * Consume a Forge chat SSE body: OpenAI chunk frames, possible in-stream
+ * error frames, terminated by a {"forge":"done"} frame ("[DONE]" markers
+ * from the upstream engine are passed through and ignored here).
+ */
+export async function readChatStream(
+  body: ReadableStream<Uint8Array>,
+  handlers: ChatStreamHandlers,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const handleLine = (line: string): boolean => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) return false;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === "[DONE]") return false;
+    let frame: unknown;
+    try {
+      frame = JSON.parse(data);
+    } catch {
+      return false; // partial/non-JSON frame — never crash the chat
+    }
+    if (!frame || typeof frame !== "object") return false;
+    const obj = frame as Record<string, unknown>;
+    if (typeof obj.error === "string") {
+      handlers.onError?.(obj.error);
+      return false;
+    }
+    if (obj.forge === "done") {
+      handlers.onDone?.(obj as ChatDoneFrame);
+      return true;
+    }
+    const fragment = (
+      obj as { choices?: { delta?: { content?: unknown } }[] }
+    ).choices?.[0]?.delta?.content;
+    if (typeof fragment === "string" && fragment) handlers.onDelta(fragment);
+    return false;
+  };
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (handleLine(line)) return;
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer) handleLine(buffer);
+  } finally {
+    reader.releaseLock();
+  }
 }

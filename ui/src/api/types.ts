@@ -276,3 +276,125 @@ export interface DownloadProgress {
   total_gb: number | null;
   pct: number | null;
 }
+
+// ── Multi-user auth (orchestrator/app/routers/users.py) ─────────────────────
+
+/** GET /api/auth/status — public, drives setup wizard + register screen. */
+export interface AuthStatus {
+  setup_required: boolean;
+  allow_registration: boolean;
+  user_count: number;
+}
+
+/** services/user_service.py public_profile() — the current user's profile. */
+export interface UserProfile {
+  id: number;
+  username: string;
+  display_name: string;
+  is_admin: boolean;
+  avatar_color: string;
+  memory_enabled: boolean;
+  personal_instructions: string;
+  created_at: string;
+}
+
+/** GET /api/users — who else is on this Forge (public info only). */
+export interface PublicUser {
+  id: number;
+  username: string;
+  display_name: string;
+  is_admin: boolean;
+  avatar_color: string;
+}
+
+/** POST /api/auth/register and /api/auth/login. */
+export interface AuthResult {
+  token: string;
+  user: UserProfile;
+}
+
+// ── Chat (orchestrator/app/routers/chat.py) ─────────────────────────────────
+
+export interface Conversation {
+  id: string;
+  user_id: number;
+  title: string;
+  /** "" = whatever single model is serving. */
+  model_slug: string;
+  thinking: ThinkingLevel;
+  memory_enabled: boolean;
+  archived: boolean;
+  summarized_until: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type AttachmentKind = "image" | "text" | "pdf" | "other";
+
+/** Attachment metadata on chat messages (files_api Upload rows). */
+export interface AttachmentMeta {
+  id: string;
+  filename: string;
+  kind: AttachmentKind;
+  mime: string;
+  size_bytes: number;
+}
+
+export interface ChatMessage {
+  id: number;
+  conversation_id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  token_estimate: number;
+  created_at: string;
+  attachments: AttachmentMeta[];
+}
+
+/** GET /api/chat/conversations/{id} — conversation plus full history. */
+export interface ConversationDetail extends Conversation {
+  summary: string;
+  messages: ChatMessage[];
+}
+
+/** GET /api/chat/status — which models the composer can talk to. */
+export interface ChatStatus {
+  serving: Lease[];
+}
+
+/** data: {"forge":"done", ...} — final SSE frame of a chat stream. */
+export interface ChatDoneFrame {
+  conversation_id?: string;
+  assistant_message_id?: number | null;
+  temporary?: boolean;
+}
+
+// ── Files (orchestrator/app/routers/files_api.py) ───────────────────────────
+
+/** POST /api/files response. */
+export interface UploadMeta {
+  id: string;
+  filename: string;
+  mime: string;
+  kind: AttachmentKind;
+  size_bytes: number;
+  created_at: string;
+}
+
+// ── Memory (orchestrator/app/routers/memory_api.py) ─────────────────────────
+
+export type MemoryKind = "fact" | "preference" | "project" | "episode";
+
+export interface MemoryEntry {
+  id: number;
+  user_id: number;
+  kind: MemoryKind;
+  content: string;
+  /** 0.1–2.0; decays with age, boosted by use. */
+  importance: number;
+  pinned: boolean;
+  source_conversation_id: string;
+  use_count: number;
+  created_at: string;
+  updated_at: string;
+  last_used_at: string;
+}

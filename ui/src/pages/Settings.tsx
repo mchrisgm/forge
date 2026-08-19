@@ -1,8 +1,11 @@
+// System-wide settings: runtime knobs, budgets, and (admin only) whether new
+// profiles may register. Everything personal lives on /profile now.
+
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
-import { IconLogout } from "../components/icons";
+import { IconChevronRight, IconUser } from "../components/icons";
 import { PageHeader } from "../components/layout";
 import {
   Button,
@@ -10,77 +13,64 @@ import {
   Field,
   SkeletonList,
   TextInput,
+  Toggle,
 } from "../components/ui";
 import { useToast } from "../hooks/toast";
-import { clearToken } from "../lib/auth";
+import { useCurrentUser } from "../lib/auth";
 
-function PasswordForm() {
+function RegistrationCard() {
   const { toast } = useToast();
-  const [current, setCurrent] = useState("");
-  const [next, setNext] = useState("");
+  const queryClient = useQueryClient();
+  const status = useQuery({
+    queryKey: ["auth-status"],
+    queryFn: api.authStatus,
+    staleTime: 30_000,
+  });
 
-  const change = useMutation({
-    mutationFn: () => api.changePassword(current, next),
-    onSuccess: () => {
-      toast("success", "Password changed");
-      setCurrent("");
-      setNext("");
+  const toggle = useMutation({
+    mutationFn: (allow: boolean) => api.setRegistration(allow),
+    onSuccess: ({ allow_registration }) => {
+      void queryClient.invalidateQueries({ queryKey: ["auth-status"] });
+      toast(
+        "success",
+        allow_registration
+          ? "Registration is open"
+          : "Registration is closed",
+      );
     },
     onError: (err) => toast("error", errorMessage(err)),
   });
 
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
-    if (current && next.length >= 8) change.mutate();
-  };
-
   return (
-    <form
-      onSubmit={submit}
-      className="space-y-3 rounded-xl border border-border bg-surface p-4"
-    >
-      <h2 className="text-sm font-semibold text-text">Password</h2>
-      <Field label="Current password">
-        {(id) => (
-          <TextInput
-            id={id}
-            type="password"
-            autoComplete="current-password"
-            value={current}
-            onChange={(e) => setCurrent(e.target.value)}
-            required
-          />
-        )}
-      </Field>
-      <Field label="New password" helper="At least 8 characters.">
-        {(id) => (
-          <TextInput
-            id={id}
-            type="password"
-            autoComplete="new-password"
-            value={next}
-            onChange={(e) => setNext(e.target.value)}
-            minLength={8}
-            required
-          />
-        )}
-      </Field>
-      <Button
-        type="submit"
-        variant="primary"
-        loading={change.isPending}
-        disabled={!current || next.length < 8}
-      >
-        Change password
-      </Button>
-    </form>
+    <section className="rounded-xl border border-border bg-surface p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold text-text">Registration</h2>
+          <p className="mt-0.5 text-sm text-muted">
+            Let people on your network create their own profiles.
+          </p>
+        </div>
+        <Toggle
+          checked={status.data?.allow_registration ?? false}
+          onChange={(next) => toggle.mutate(next)}
+          label="Allow registration"
+          disabled={status.isLoading || toggle.isPending}
+        />
+      </div>
+      {status.data && (
+        <p className="mt-2 text-xs text-faint">
+          {status.data.user_count}{" "}
+          {status.data.user_count === 1 ? "profile" : "profiles"} on this Forge.
+        </p>
+      )}
+    </section>
   );
 }
 
 export default function Settings() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
+  const user = useCurrentUser();
 
   const settings = useQuery({
     queryKey: ["settings"],
@@ -110,14 +100,9 @@ export default function Settings() {
     onError: (err) => toast("error", errorMessage(err)),
   });
 
-  const logout = () => {
-    clearToken();
-    navigate("/login", { replace: true });
-  };
-
   return (
     <div>
-      <PageHeader title="Settings" subtitle="Runtime knobs and access" />
+      <PageHeader title="Settings" subtitle="System-wide runtime knobs" />
 
       {settings.isLoading && <SkeletonList rows={3} />}
       {settings.isError && (
@@ -131,6 +116,25 @@ export default function Settings() {
 
       {settings.data && (
         <div className="space-y-4">
+          {/* Personal bits moved to the profile */}
+          <Link
+            to="/profile"
+            className="flex min-h-14 items-center gap-3 rounded-xl border border-border bg-surface px-4 hover:bg-raised"
+          >
+            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-raised text-muted">
+              <IconUser size={18} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-medium text-text">
+                Your profile
+              </span>
+              <span className="block text-xs text-faint">
+                Display name, instructions, memory, password
+              </span>
+            </span>
+            <IconChevronRight size={16} className="text-faint" />
+          </Link>
+
           {/* Runtime */}
           <form
             onSubmit={(e) => {
@@ -179,7 +183,7 @@ export default function Settings() {
             </Button>
           </form>
 
-          <PasswordForm />
+          {user?.is_admin && <RegistrationCard />}
 
           {/* Budgets (read-only) */}
           <section className="rounded-xl border border-border bg-surface p-4">
@@ -206,11 +210,6 @@ export default function Settings() {
               Set via .env (FORGE_*) — restart the orchestrator to change.
             </p>
           </section>
-
-          <Button variant="danger" className="w-full" onClick={logout}>
-            <IconLogout size={16} />
-            Log out
-          </Button>
 
           <p className="pb-2 text-center text-xs text-faint">
             Forge v0.1.0 · self-hosted agentic coding platform
