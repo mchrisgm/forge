@@ -9,7 +9,9 @@ import type { ThinkingLevel, UploadMeta } from "../../api/types";
 import { useToast } from "../../hooks/toast";
 import { cx, formatBytes } from "../../lib/utils";
 import {
+  IconAlert,
   IconFile,
+  IconGlobe,
   IconImage,
   IconPaperclip,
   IconSend,
@@ -24,6 +26,15 @@ const MAX_ATTACHMENTS = 8; // mirrors the backend's per-message cap
 /** "/imagine <prompt>" routes the turn to image generation. */
 const IMAGINE_RE = /^\/imagine(\s|$)/;
 
+/** Hostname for a fetched-page chip label; falls back to the raw string. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host || url;
+  } catch {
+    return url;
+  }
+}
+
 /** An available image-generation backend: "local" or a connector kind. */
 export interface ImageProvider {
   id: string;
@@ -35,6 +46,8 @@ interface PendingAttachment {
   filename: string;
   uploading: boolean;
   meta?: UploadMeta;
+  /** Set for a "read this page" attachment — drives the fetched-page chip. */
+  page?: { host: string; mode_used: string; truncated: boolean };
 }
 
 function AttachmentChip({
@@ -44,7 +57,7 @@ function AttachmentChip({
   attachment: PendingAttachment;
   onRemove: () => void;
 }) {
-  const { meta } = attachment;
+  const { meta, page } = attachment;
   const isImage = meta?.kind === "image";
   return (
     <span
@@ -57,7 +70,7 @@ function AttachmentChip({
         <>
           <Spinner size={13} />
           <span className="max-w-32 truncate text-muted">
-            {attachment.filename}
+            {page ? `Reading ${attachment.filename}…` : attachment.filename}
           </span>
         </>
       ) : isImage && meta ? (
@@ -66,6 +79,22 @@ function AttachmentChip({
           alt={meta.filename}
           className="h-12 w-12 rounded-md object-cover"
         />
+      ) : page && meta ? (
+        <>
+          <IconGlobe size={13} className="shrink-0 text-info" />
+          <span className="max-w-40 truncate text-text">{page.host}</span>
+          <span className="rounded bg-overlay px-1 text-[10px] text-faint">
+            {page.mode_used}
+          </span>
+          {page.truncated && (
+            <span
+              title="Page was truncated at the ~150 KB cap"
+              className="inline-flex text-warn"
+            >
+              <IconAlert size={12} />
+            </span>
+          )}
+        </>
       ) : (
         <>
           <IconFile size={13} className="shrink-0 text-muted" />
@@ -125,6 +154,9 @@ export function Composer({
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [imageMode, setImageMode] = useState(false);
+  const [readMode, setReadMode] = useState(false);
+  const [pageUrl, setPageUrl] = useState("");
+  const [readingPage, setReadingPage] = useState(false);
   const [pickedProvider, setPickedProvider] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -218,6 +250,64 @@ export function Composer({
     if (a.meta) void api.deleteFile(a.meta.id).catch(() => undefined);
   };
 
+  // "Read this page": fetch a URL as a text attachment (Scrapling). The result
+  // rides the normal attachment plumbing, so it inlines into the next message.
+  const submitReadPage = () => {
+    const url = pageUrl.trim();
+    if (!url || readingPage) return;
+    if (attachments.length >= MAX_ATTACHMENTS) {
+      toast("info", `Up to ${MAX_ATTACHMENTS} attachments per message`);
+      return;
+    }
+    const localId = nextLocalId.current++;
+    const host = hostOf(url);
+    // A pending chip holds the spot — the stealth fetch can take 5-30s.
+    setAttachments((prev) => [
+      ...prev,
+      {
+        localId,
+        filename: host,
+        uploading: true,
+        page: { host, mode_used: "", truncated: false },
+      },
+    ]);
+    setReadingPage(true);
+    void api
+      .readPage(url)
+      .then((res) => {
+        setAttachments((prev) =>
+          prev.map((a) =>
+            a.localId === localId
+              ? {
+                  ...a,
+                  uploading: false,
+                  meta: {
+                    id: res.upload.id,
+                    filename: res.upload.filename,
+                    mime: res.upload.mime,
+                    kind: res.upload.kind,
+                    size_bytes: res.upload.size_bytes,
+                    created_at: new Date().toISOString(),
+                  },
+                  page: {
+                    host,
+                    mode_used: res.mode_used,
+                    truncated: res.truncated,
+                  },
+                }
+              : a,
+          ),
+        );
+        setPageUrl("");
+        setReadMode(false);
+      })
+      .catch((err: unknown) => {
+        setAttachments((prev) => prev.filter((a) => a.localId !== localId));
+        toast("error", `Couldn't read page: ${errorMessage(err)}`);
+      })
+      .finally(() => setReadingPage(false));
+  };
+
   return (
     <div className="border-t border-border bg-bg/95 pt-3 backdrop-blur">
       {attachments.length > 0 && (
@@ -293,6 +383,39 @@ export function Composer({
         </div>
       )}
 
+      {/* Read-a-page strip: paste a URL, fetch it as a text attachment */}
+      {readMode && !imageMode && (
+        <div className="flex flex-wrap items-center gap-2 pb-2.5">
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-info">
+            <IconGlobe size={13} className="shrink-0" />
+            Read a page
+          </span>
+          <input
+            type="url"
+            value={pageUrl}
+            onChange={(e) => setPageUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submitReadPage();
+              }
+            }}
+            placeholder="https://example.com/article"
+            disabled={readingPage}
+            aria-label="Page URL"
+            className="min-h-9 min-w-0 flex-1 basis-48 rounded-lg border border-edge bg-raised px-3 text-sm text-text placeholder:text-faint focus:border-accent focus:outline-none disabled:opacity-60"
+          />
+          <Button
+            size="sm"
+            onClick={submitReadPage}
+            loading={readingPage}
+            disabled={!pageUrl.trim()}
+          >
+            {readingPage ? "Reading…" : "Read"}
+          </Button>
+        </div>
+      )}
+
       <div className="flex items-end gap-2 pb-3">
         <input
           ref={fileInputRef}
@@ -325,7 +448,10 @@ export function Composer({
           aria-pressed={imageMode}
           title="Generate an image (or type /imagine …)"
           disabled={streaming || generatingImage}
-          onClick={() => setImageMode((m) => !m)}
+          onClick={() => {
+            setImageMode((m) => !m);
+            setReadMode(false);
+          }}
           className={cx(
             "flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-xl border text-sm transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50",
             imageMode
@@ -334,6 +460,24 @@ export function Composer({
           )}
         >
           <IconImage size={17} />
+        </button>
+        <button
+          type="button"
+          aria-label={readMode ? "Cancel reading a page" : "Read a web page"}
+          aria-pressed={readMode}
+          title="Read a web page into the chat"
+          disabled={
+            streaming || imageMode || attachments.length >= MAX_ATTACHMENTS
+          }
+          onClick={() => setReadMode((m) => !m)}
+          className={cx(
+            "flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-xl border text-sm transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50",
+            readMode
+              ? "border-info/50 bg-info/15 text-info"
+              : "border-edge bg-raised text-text hover:bg-overlay",
+          )}
+        >
+          <IconGlobe size={17} />
         </button>
         <label htmlFor="chat-composer" className="sr-only">
           Message

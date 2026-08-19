@@ -97,21 +97,52 @@ Different hardware? Adjust `FORGE_VRAM_BUDGET_GB` and
 
 ```bash
 git clone <your-forge-repo> forge && cd forge
-cp .env.example .env
-# optional: set FORGE_SECRET_KEY (openssl rand -hex 32)
 make up
 ```
 
-That's the whole setup: on first boot the orchestrator initializes the
-database, seeds the starter model catalog, and waits for you. Open
-`http://<host-ip>:8080` from any device on your LAN — the **setup wizard**
-asks you to create the first profile (it becomes the admin), and from then on
-anyone on the LAN can visit the same URL and register their own profile. On
-your phone, use the browser's **"Add to Home Screen" / "Install app"** — the
-UI is an installable PWA with a mobile-first layout.
+**No `make`?** A standalone first-run script does the identical bring-up on any
+host with Docker — the right choice on Windows or a bare server:
+
+```bash
+# Linux / macOS
+scripts/setup.sh                     # add --sandbox for the code-run lane
+```
+```powershell
+# Windows (PowerShell, Docker Desktop)
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+```
+
+Both scripts run the same steps as `make up` (preflight → `.env` + secrets →
+GPU-overlay detection → build/start → engine prefetch) and are re-runnable.
+
+That's the whole setup — no manual `.env` step. `make up` (and the setup
+scripts):
+
+1. runs a **preflight check** (`scripts/preflight.sh`): docker + compose v2
+   are hard requirements with actionable messages; no GPU, low disk, or no
+   KVM only warn;
+2. creates `.env` from `.env.example` on first run and generates
+   `SEARXNG_SECRET` into it (idempotent — an existing `.env` is left alone);
+3. auto-includes the **GPU overlay** (`docker-compose.gpu.yml`) when
+   `nvidia-smi` is present — on a **CPU-only box** the stack comes up cleanly
+   with plain compose and GPU stats simply show unavailable;
+4. builds the session-runner and locally-built engine images, and prefetches
+   the big llama.cpp/vLLM engine images (skip with `FORGE_SKIP_PULL=1`).
+
+On first boot the orchestrator initializes the database, **seeds the starter
+model catalog automatically** (`make seed` exists only for re-seeding), and
+waits for you. Open `http://<host-ip>:8080` from any device on your LAN — the
+**setup wizard** asks you to create the first profile (it becomes the admin),
+and from then on anyone on the LAN can visit the same URL and register their
+own profile. On your phone, use the browser's **"Add to Home Screen" /
+"Install app"** — the UI is an installable PWA with a mobile-first layout.
+
+The optional **sandbox lane** (hardware-isolated microVMs for the "run this
+code" tool) is not built by `make up`: it needs `/dev/kvm` on the host — run
+`make sandbox` to opt in.
 
 `make help` lists all targets (`up`, `down`, `logs`, `seed`, `smoke`, `test`,
-`dev`, `clean`).
+`dev`, `sandbox`, `clean`).
 
 ## First run
 
@@ -175,6 +206,27 @@ Notes:
   Images API for chat image generation. Like AirLLM it never powers coding
   sessions, and it is excluded from the `/v1` chat router. SDXL-Turbo ships
   in the seed catalog (1-4 step generation — seconds per image).
+
+### Context compression
+
+On a 12 GB card the scarcest resource is context (KV-cache VRAM). Forge chains
+all chat-completion traffic through
+[Headroom](https://github.com/headroomlabs-ai/headroom), a self-hosted
+compression proxy that shrinks tool outputs, logs, JSON, and code before they
+reach the model — so agent sessions overflow the window less and prefill
+faster. It runs offline (no model downloads) and is a toggle on the Settings
+page. If the proxy is down, traffic **automatically falls back** to the direct
+engine path, so a stopped container degrades to plain Forge rather than
+breaking chat.
+
+### Run code safely
+
+The optional **sandbox lane** ([smolvm](https://github.com/smol-machines/smolvm))
+boots hardware-isolated microVMs to run untrusted code — the Chat **run**
+button on a Python/JavaScript/Bash block executes it with **no network**, a
+hard timeout, and captured output. It needs `/dev/kvm` on the host and is
+opt-in: `make sandbox`. Its control API has no auth and stays strictly on the
+internal network.
 
 ## Profiles, chat & memory
 
@@ -247,6 +299,13 @@ support files.
 - **Install:** Skills page → install from a git URL (optionally a subdir), or
   `POST /api/skills/install {"git_url": "...", "subdir": "..."}`. Community
   repos following the anthropics/skills layout work as-is.
+- **Suggested skills:** the Skills page also offers a curated one-click catalog
+  of ~40 vetted skills from [ECC](https://github.com/affaan-m/ECC) (MIT) —
+  TDD, verification loops, security review, and language/framework patterns for
+  Python, TypeScript, React, Go, Rust, Docker and more — grouped by category.
+- **Import a skill pack:** point the importer at any git repo of skills, scan
+  it, and batch-install a selection. Bulk-imported skills arrive **disabled**
+  (so they don't flood the model's tool listing) — toggle on the ones you want.
 - **Use:** every session container gets a read-only `/skills` mount and a
   built-in skills MCP server exposing `list_skills` / `load_skill`. Models see
   only names and descriptions until a skill is loaded — the same progressive
@@ -260,10 +319,17 @@ page. Five **core** connectors ship with Forge:
 | Connector | What it does | Needs |
 |---|---|---|
 | `github` | Repo/issue/PR operations via github-mcp-server | A GitHub PAT (Connectors page). Off until one is set. |
-| `fetch` | Fetch/convert web pages | — |
+| `scrapling` | Stealth web fetching — TLS-fingerprint HTTP plus a Cloudflare-capable headless browser, returning markdown | — |
 | `searxng` | Web search via the bundled self-hosted SearXNG | — |
 | `playwright` | Browser automation (headless, shared service) | — |
 | `skills` | The skills server described above | — |
+
+The plain `fetch` connector still exists but ships **off** — `scrapling`
+([Scrapling](https://github.com/D4Vinci/Scrapling), a shared `mcp-scrapling`
+container) supersedes it on JS-heavy and bot-protected pages. The Chat
+composer's **read a page** button uses the same engine server-side: paste a
+URL and Forge fetches it (escalating to the stealth browser automatically),
+attaching the page as markdown to your next message.
 
 Beyond those, the catalog covers **80+ public integrations** — every
 officially hosted, publicly reachable remote MCP server we could verify
@@ -280,6 +346,11 @@ the custom-connector how-to.
 Tokens are stored in SQLite and injected into session containers as
 environment variables (never written into config files) — see the security
 model below before pasting broadly-scoped credentials.
+
+Forge folds in several open-source projects (Scrapling, ECC skills, Headroom
+compression, smolvm sandbox) rather than reinventing them — see
+[docs/integrations.md](docs/integrations.md) for what each does, how it's
+wired, and what was deliberately left out.
 
 ## Security model (v1 — LAN threat model)
 
@@ -312,6 +383,19 @@ service needs to change.
 
 ## Troubleshooting
 
+- **`make up` fails at preflight** — only missing docker / an unreachable
+  daemon / missing compose v2 abort the run, and each FAIL line names the
+  fix. A missing GPU or NVIDIA container runtime is a **warning**, not a
+  failure: the stack continues in CPU-only mode (engine loads need a GPU).
+  Re-run the checks any time with `./scripts/preflight.sh`.
+- **Sessions or engines fail with "image ... is not built"** — the
+  session-runner / airllm / imagegen images are built by `make up` (they hide
+  behind compose profiles, so a raw `docker compose up` skips them). Run
+  `make up`, or build them directly: `docker compose --profile build-only
+  build session-runner` and `docker compose --profile engines build airllm
+  imagegen`. The System page (and `GET /api/system/stats` →
+  `missing_images`) shows which are absent; the first llama.cpp/vLLM load
+  pulls its image automatically if the prefetch was skipped.
 - **Engine fails to load / VRAM OOM** — the healthwait treats an engine
   container exit as a failed load: the lease auto-releases and the engine's
   log tail surfaces in the UI (Models/System) and in `GET /api/engines` under
@@ -321,9 +405,10 @@ service needs to change.
   after `FORGE_SESSION_IDLE_MIN` (default 120) to free resources. Restart it:
   Sessions page → **Start** (or `POST /api/sessions/{id}/start`). The
   workspace volume persists, and OpenCode reloads its session state from it.
-- **`make smoke` says "no ready model"** — run `make seed`, download a model
-  (UI or `POST /api/models/{id}/download`), and re-run. `SMOKE_SKIP_MODEL=1
-  ./scripts/smoke.sh` accepts an infra-only pass.
+- **`make smoke` says "no ready model"** — download a model (UI or `POST
+  /api/models/{id}/download`) and re-run; the catalog is seeded automatically
+  on first boot, so `make seed` is only needed after wiping the DB.
+  `SMOKE_SKIP_MODEL=1 ./scripts/smoke.sh` accepts an infra-only pass.
 - **Tool calls are flaky** — open the model's detail view: each catalog entry
   records a `tool_call_format` and a tool-reliability note. Prefer the seeded
   Qwen coder models for agentic work; gpt-oss-20b is seeded chat-only.
@@ -342,8 +427,10 @@ make smoke   # full end-to-end gate (needs GPU + a downloaded model)
 
 Layout: `orchestrator/` (FastAPI + SQLModel + APScheduler + docker-py),
 `ui/` (React 18 + TS + Vite PWA), `session-runner/` (OpenCode session image),
-`engines/` (llama.cpp/vLLM wrappers + AirLLM server), `mcp/skills-server/`
-(skills MCP), `gateway/` (Caddy), `scripts/` (smoke + seed). `PLAN.md` is the
+`engines/` (llama.cpp/vLLM wrappers + AirLLM + imagegen servers),
+`sandbox/smolvm/` (microVM sandbox image), `skills-bundled/` (vendored agent
+skills seeded on first boot), `mcp/skills-server/` (skills MCP), `gateway/`
+(Caddy), `scripts/` (preflight + smoke + seed). `PLAN.md` is the
 authoritative spec. CI (GitHub Actions) runs ruff, pytest, and the UI
 typecheck/build — no GPU steps; GPU paths are covered by `make smoke` on the
 real host.
@@ -356,8 +443,10 @@ pinned (and checksum-verified where applicable) in
 is the single source of truth recording the M5 research: `opencode-ai`,
 `github-mcp-server`, `uv`/`uvx`, `mcp-server-fetch`, and `mcp-searxng`. Engine
 images (`vllm/vllm-openai`, `mcr.microsoft.com/playwright/mcp`, `searxng`) are
-pinned in `docker-compose.yml` / `.env.example`. Bump deliberately: OpenCode
-API drift is the main integration risk (PLAN §14), and
+pinned in `docker-compose.yml` / `.env.example` — including the wave-5
+services `ghcr.io/d4vinci/scrapling` (web scraper), `headroom` (compression
+proxy), and the `smolvm` sandbox build. Bump deliberately: OpenCode API drift
+is the main integration risk (PLAN §14), and
 `orchestrator/app/services/opencode_client.py` is the single integration
 point to re-verify after an upgrade.
 

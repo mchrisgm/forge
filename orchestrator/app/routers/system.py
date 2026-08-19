@@ -4,7 +4,7 @@ import psutil
 from fastapi import APIRouter
 
 from ..config import get_settings
-from ..services import docker_util
+from ..services import bootstrap, docker_util
 from ..services.engine_manager import engine_manager
 from ..services.session_manager import SESSION_LABEL
 
@@ -97,6 +97,9 @@ def stats() -> dict:
         "engine": engine_manager.status(),
         "session_containers": session_containers,
         "docker_ok": docker_ok,
+        # Locally-built images that were absent at boot (see bootstrap.
+        # check_required_images) — non-empty means "run make up" setup warning.
+        "missing_images": list(bootstrap.missing_images),
         "budgets": {
             "vram_gb": settings.vram_budget_gb,
             "ram_offload_gb": settings.ram_offload_budget_gb,

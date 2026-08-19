@@ -6,10 +6,11 @@
 #       → create session → run a task → assert the file the agent created
 #       → cleanup (delete session, unload engine).
 #
-# Requirements: docker (compose v2), curl, jq, a .env at the repo root, and a
-# model already downloaded (status=ready) — run `make seed`, then download one
-# from the Models page. Set SMOKE_SKIP_MODEL=1 to pass with infra-only checks
-# when no model is downloaded yet (the engine/session/task steps are skipped).
+# Requirements: docker (compose v2), curl, jq, a .env at the repo root (run
+# `make up` once — it creates it), and a model already downloaded
+# (status=ready) — the catalog is seeded automatically on first boot; download
+# one from the Models page. Set SMOKE_SKIP_MODEL=1 to pass with infra-only
+# checks when no model is downloaded yet (engine/session/task steps skipped).
 #
 # Re-runnable: every run uses a fresh session; the engine is (re)loaded only
 # when the picked model isn't already serving. On any failure the tail of the
@@ -115,6 +116,12 @@ docker compose up -d --build
 STACK_UP=1
 info "building session-runner image (used for per-session containers)"
 docker compose --profile build-only build session-runner
+# Align with `make up`: the engine profile also gates locally-built lane
+# images (airllm, imagegen). The smoke flow itself exercises the pull-based
+# lanes (llamacpp/vllm — see the model filter in step 5), but building here
+# keeps a smoke-tested box identical to one set up via `make up`.
+info "building engine lane images (airllm, imagegen) — matches make up"
+docker compose --profile engines build airllm imagegen
 
 # ── Step 3: gateway health ──────────────────────────────────────────────────
 
@@ -147,12 +154,13 @@ info "authenticated as profile '$SMOKE_USER'"
 
 banner "5/9 Picking a ready model"
 models_json=$(api_get "/models")
-# AirLLM is chat-only (PLAN §6.2) and cannot power a session — exclude it.
-MODEL_ID=$(jq -r '[.[] | select(.status == "ready" and .engine != "airllm")] | sort_by(.size_gb) | .[0].id // empty' <<<"$models_json")
+# AirLLM is chat-only and imagegen is images-only (PLAN §6.2) — neither can
+# power a coding session, so exclude both from the pick.
+MODEL_ID=$(jq -r '[.[] | select(.status == "ready" and .engine != "airllm" and .engine != "imagegen")] | sort_by(.size_gb) | .[0].id // empty' <<<"$models_json")
 if [ -z "$MODEL_ID" ]; then
   echo
   echo "No downloaded model available (need status=ready, engine llamacpp/vllm)."
-  echo "Fix: run 'make seed', then download a model:"
+  echo "Fix: download a model (the catalog is seeded automatically on first boot):"
   echo "  - UI:  open ${BASE_URL} -> Models -> Download"
   echo "  - API: curl -X POST -H \"Authorization: Bearer \$TOKEN\" ${API}/models/<id>/download"
   if [ "${SMOKE_SKIP_MODEL:-0}" = 1 ]; then

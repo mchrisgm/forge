@@ -1,0 +1,21 @@
+# GPU overlay — included automatically by `make up` when nvidia-smi is
+# present on the host. Grants the orchestrator NVML-only GPU visibility for
+# /system/stats and multi-GPU lease planning (no compute libraries; engine
+# containers get their GPUs separately via the docker API device requests).
+#
+# CPU-only boxes simply omit this file: the stack comes up, and GPU stats
+# show as unavailable.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
+services:
+  orchestrator:
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all   # NVML must see every GPU for multi-GPU stats/leases
+              capabilities: [gpu]

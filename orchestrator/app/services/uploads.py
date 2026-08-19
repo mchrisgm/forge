@@ -147,6 +147,45 @@ def save_generated(
         return db.get(Upload, upload_id)
 
 
+def save_generated_text(user_id: int, text: str, source_url: str) -> Upload:
+    """Persist Forge-generated text (web page reads etc.) as a markdown Upload
+    row so it inlines into prompts, serves, attaches, and deletes exactly like
+    a user-uploaded .md file. The source URL is stored as the `prompt` (same
+    slot save_generated uses for the generation prompt)."""
+    settings = get_settings()
+    if not text.strip():
+        raise HTTPException(502, "generation returned no text")
+    data = text.encode("utf-8")
+    if len(data) > settings.upload_max_mb * 1024 * 1024:
+        raise HTTPException(
+            502, f"generated file exceeds the {settings.upload_max_mb} MB limit"
+        )
+    bare = re.sub(r"^https?://", "", source_url.lower())
+    stem = re.sub(r"[^\w]+", "-", bare).strip("-")[:48] or "page"
+    upload_id = str(uuid.uuid4())
+    user_dir = Path(settings.uploads_dir) / str(user_id)
+    user_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{stem}.md"
+    dest = user_dir / f"{upload_id}-{filename}"
+    dest.write_bytes(data)
+
+    upload = Upload(
+        id=upload_id,
+        user_id=user_id,
+        filename=filename,
+        mime="text/markdown",
+        kind="text",
+        size_bytes=len(data),
+        path=str(dest),
+        generated=True,
+        prompt=source_url[:2000],
+    )
+    with write_session() as db:
+        db.add(upload)
+    with read_session() as db:
+        return db.get(Upload, upload_id)
+
+
 def get_owned(upload_id: str, user_id: int) -> Upload:
     with read_session() as db:
         upload = db.get(Upload, upload_id)

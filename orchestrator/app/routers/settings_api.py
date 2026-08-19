@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from ..config import get_settings
 from ..db import get_setting, set_setting
+from ..services import routing
 
 router = APIRouter(prefix="/settings")
 
@@ -26,11 +27,11 @@ def effective_registry_cron() -> str:
 class PatchBody(BaseModel):
     session_idle_min: int | None = None
     registry_cron: str | None = None
-
+    headroom_enabled: bool | None = None
 
 
 @router.get("")
-def get_all() -> dict:
+async def get_all() -> dict:
     settings = get_settings()
     return {
         "session_idle_min": effective_session_idle_min(),
@@ -39,11 +40,12 @@ def get_all() -> dict:
         "vram_budget_gb": settings.vram_budget_gb,
         "ram_offload_budget_gb": settings.ram_offload_budget_gb,
         "llamacpp_slots": settings.llamacpp_slots,
+        "headroom": await routing.status(),
     }
 
 
 @router.patch("")
-def patch(body: PatchBody, request: Request) -> dict:
+async def patch(body: PatchBody, request: Request) -> dict:
     if body.session_idle_min is not None:
         if body.session_idle_min < 5:
             raise HTTPException(400, "idle timeout must be at least 5 minutes")
@@ -57,5 +59,8 @@ def patch(body: PatchBody, request: Request) -> dict:
         scheduler = getattr(request.app.state, "scheduler", None)
         if scheduler and scheduler.get_job("registry_scan"):
             scheduler.reschedule_job("registry_scan", trigger=trigger)
-    return get_all()
+    if body.headroom_enabled is not None:
+        set_setting("headroom_enabled", "true" if body.headroom_enabled else "false")
+        routing.reset_probe()  # re-probe immediately on next call
+    return await get_all()
 

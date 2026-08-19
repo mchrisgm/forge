@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { api, errorMessage } from "../api/client";
-import { IconAlert } from "../components/icons";
+import { IconAlert, IconX } from "../components/icons";
 import { PageHeader } from "../components/layout";
 import {
   Button,
@@ -101,6 +102,7 @@ function Semicircle({
 }
 
 export default function System() {
+  const [imagesDismissed, setImagesDismissed] = useState(false);
   const stats = useQuery({
     queryKey: ["system"],
     queryFn: api.systemStats,
@@ -134,10 +136,37 @@ export default function System() {
   const gpus = s.gpus ?? [];
   const leases = s.engine.leases ?? (s.engine.lease ? [s.engine.lease] : []);
   const gpuCount = Math.max(s.engine.gpu_count ?? 1, gpus.length, 1);
+  const missingImages = s.missing_images ?? [];
 
   return (
     <div>
       <PageHeader title="System" subtitle="Host resources and containers" />
+
+      {missingImages.length > 0 && !imagesDismissed && (
+        <div
+          role="alert"
+          className="mb-4 flex items-start gap-2 rounded-xl border border-warn/40 bg-warn/10 px-4 py-3 text-sm text-warn"
+        >
+          <IconAlert size={16} className="mt-0.5 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="font-medium">
+              Some images aren't built —{" "}
+              <code className="font-mono">run make up</code>
+            </p>
+            <p className="mt-0.5 font-mono text-xs break-words text-warn/80">
+              {missingImages.join(", ")}
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            onClick={() => setImagesDismissed(true)}
+            className="-m-1.5 shrink-0 cursor-pointer rounded-md p-1.5 text-warn/70 hover:text-warn"
+          >
+            <IconX size={16} />
+          </button>
+        </div>
+      )}
 
       {!s.docker_ok && (
         <div

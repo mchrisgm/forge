@@ -56,6 +56,10 @@ def isolated_env(tmp_path, monkeypatch):
     engine_manager_module.engine_manager._load_tasks = {}
     engine_manager_module.engine_manager._generations = {}
     engine_manager_module.engine_manager._gpu_count = None
+    # Boot-time image check result is process-global too.
+    from app.services import bootstrap as bootstrap_module
+
+    bootstrap_module.missing_images.clear()
 
     yield
 
@@ -143,9 +147,38 @@ class FakeContainers:
         return out
 
 
+class FakeImages:
+    """In-memory stand-in for docker-py's ImageCollection.
+
+    `present=None` (the default) means every image exists — the friendly
+    default so lifecycle tests don't care about image checks. Set `present`
+    to a set of names to make everything else raise ImageNotFound; pull()
+    records the request and adds the name to `present`."""
+
+    def __init__(self) -> None:
+        self.present: set[str] | None = None
+        self.pulled: list[str] = []
+        self.fail_pull: Exception | None = None
+
+    def get(self, name: str) -> dict:
+        if self.present is not None and name not in self.present:
+            raise docker.errors.ImageNotFound(f"no such image: {name}")
+        return {"name": name}
+
+    def pull(self, repository: str, tag: str | None = None) -> dict:
+        name = repository if tag is None else f"{repository}:{tag}"
+        if self.fail_pull is not None:
+            raise self.fail_pull
+        self.pulled.append(name)
+        if self.present is not None:
+            self.present.add(name)
+        return {"name": name}
+
+
 class FakeDockerClient:
     def __init__(self) -> None:
         self.containers = FakeContainers()
+        self.images = FakeImages()
 
 
 @pytest.fixture

@@ -9,6 +9,7 @@ from ..auth import current_user
 from ..connector_catalog import CATALOG
 from ..db import read_session, write_session
 from ..models import Connector, User
+from ..services import user_service
 
 router = APIRouter(prefix="/connectors")
 
@@ -86,6 +87,9 @@ class CustomBody(BaseModel):
 
 @router.get("")
 def list_connectors(user: User = Depends(current_user)) -> list[dict]:
+    # Registration seeds the catalog as of that moment — backfill any entries
+    # added to the catalog since (idempotent; no-op on the common path).
+    user_service.ensure_catalog_connectors(user.id)
     with read_session() as db:
         rows = db.exec(select(Connector).where(Connector.user_id == user.id)).all()
     views = [_public_view(row) for row in rows]

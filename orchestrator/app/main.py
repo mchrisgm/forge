@@ -23,6 +23,7 @@ from .routers import (
     memory_api,
     models_api,
     openai_router,
+    sandbox_api,
     sessions,
     settings_api,
     skills,
@@ -158,6 +159,7 @@ def create_app() -> FastAPI:
     protected.include_router(sessions.router)
     protected.include_router(skills.router)
     protected.include_router(connectors.router)
+    protected.include_router(sandbox_api.router)
     protected.include_router(settings_api.router)
     protected.include_router(events.router)
     api.include_router(protected)
@@ -166,7 +168,10 @@ def create_app() -> FastAPI:
     # OpenAI-compatible model router for session containers. Unauthenticated
     # by design and unreachable from outside forge-internal: the gateway only
     # forwards /api/* and the orchestrator publishes no host ports.
+    # /v1 chains through the headroom compression proxy when active;
+    # /v1-direct is headroom's loop-free upstream.
     app.include_router(openai_router.router)
+    app.include_router(openai_router.direct_router)
     return app
 
 

@@ -456,6 +456,31 @@ class EngineManager:
     def _generation_stale(self, snapshot: dict[int, int]) -> bool:
         return any(self._generations.get(gpu, 0) != gen for gpu, gen in snapshot.items())
 
+    def _ensure_image(self, image: str, lease: Lease) -> None:
+        """Pull the engine image when it is absent, so first-run pulls are
+        visible (bus event) instead of hiding inside containers.run — and so
+        the healthwait timeout starts AFTER the pull completes (this runs in
+        _create_container, before the deadline is computed)."""
+        client = docker_util.client()
+        try:
+            client.images.get(image)
+            return
+        except docker.errors.ImageNotFound:
+            pass
+        log.info("engine image %s missing — pulling (lane=%s)", image, lease.engine.value)
+        bus.publish(
+            "engine.pulling",
+            {"lane": lease.engine.value, "image": image, "gpu_index": lease.gpu_index},
+        )
+        try:
+            client.images.pull(image)
+        except Exception as exc:
+            raise RuntimeError(
+                f"engine image '{image}' is missing and could not be pulled "
+                f"({exc}) — for the locally-built lanes run `make up` (or: "
+                "docker compose --profile engines build airllm imagegen)"
+            ) from exc
+
     def _create_container(
         self, model: ModelEntry, lease: Lease, snapshot: dict[int, int]
     ) -> Any:
@@ -509,6 +534,7 @@ class EngineManager:
             command = None
             env.update(build_airllm_env(model, settings))
 
+        self._ensure_image(image, lease)
         log.info(
             "starting engine %s on gpu(s) %s: %s",
             name, lease.gpu_ids, shlex.join(command) if command else "(env-configured)",

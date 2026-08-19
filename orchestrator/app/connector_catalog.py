@@ -2,8 +2,9 @@
 
 Two tiers share one framework and one DB table:
 
-- **Core** (PLAN §1.8): github, fetch, searxng, playwright, skills — the
-  built-ins that ship enabled (github off until a PAT is set).
+- **Core** (PLAN §1.8): github, fetch, searxng, playwright, skills, plus the
+  scrapling web scraper — the built-ins that ship enabled (github off until a
+  PAT is set; fetch off by default now that scrapling supersedes it).
 - **Integrations**: every officially hosted, publicly reachable remote MCP
   server we could verify (Claude's connector directory and beyond), plus a
   handful of high-value official local servers. Remote entries authenticate
@@ -92,7 +93,25 @@ CORE: tuple[CatalogEntry, ...] = (
         category="core",
         mcp_type="local",
         command=("uvx", "mcp-server-fetch"),
+        auth_note=(
+            "Superseded as a default by the Web scraper (scrapling) connector, "
+            "which handles JS-heavy and bot-protected pages; enable this if you "
+            "prefer the simpler fetcher."
+        ),
         docs_url="https://pypi.org/project/mcp-server-fetch/",
+    ),
+    CatalogEntry(
+        id="scrapling",
+        name="Web scraper",
+        description=(
+            "Read web pages as markdown via Scrapling: stealthy HTTP fetches "
+            "plus a Cloudflare-capable headless browser for JS-heavy or "
+            "bot-protected sites."
+        ),
+        category="core",
+        mcp_type="remote",
+        url="http://mcp-scrapling:8000/mcp",
+        docs_url="https://github.com/D4Vinci/Scrapling",
     ),
     CatalogEntry(
         id="searxng",
@@ -1380,10 +1399,11 @@ CATALOG: dict[str, CatalogEntry] = {entry.id: entry for entry in (*CORE, *INTEGR
 # Enabled out of the box; everything else starts disabled.
 DEFAULT_ENABLED: dict[str, bool] = {
     "github": False,  # off until a PAT is configured
-    "fetch": True,
+    "fetch": False,  # superseded by scrapling; kept for users who want it
     "searxng": True,
     "playwright": True,
     "skills": True,
+    "scrapling": True,
 }
 
 
