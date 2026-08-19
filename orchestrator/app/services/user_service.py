@@ -35,26 +35,57 @@ def on_user_created(user_id: int, adopt_legacy: bool = False) -> None:
                     adopted,
                 )
 
+        _seed_missing_connectors(db, user_id)
+
+        user = db.get(User, user_id)
+        if user and not user.avatar_color:
+            user.avatar_color = AVATAR_COLORS[(user_id - 1) % len(AVATAR_COLORS)]
+            db.add(user)
+
+
+def _seed_missing_connectors(db, user_id: int) -> int:
+    """Insert a Connector row for every catalog entry this user is missing
+    (existing rows — and any user edits on them — are left untouched)."""
+    existing = {
+        c.kind
+        for c in db.exec(
+            select(Connector).where(Connector.user_id == user_id)
+        ).all()
+    }
+    added = 0
+    for kind in CATALOG:
+        if kind not in existing:
+            db.add(
+                Connector(
+                    user_id=user_id,
+                    kind=kind,
+                    enabled=DEFAULT_ENABLED.get(kind, False),
+                )
+            )
+            added += 1
+    return added
+
+
+def ensure_catalog_connectors(user_id: int) -> int:
+    """Idempotent per-user backfill: registration seeds the catalog as of that
+    moment, so entries added in a later Forge upgrade (e.g. scrapling) are
+    missing from existing profiles. Called from connector listing; returns the
+    number of rows added (0 on the common already-complete path, which takes
+    no write lock)."""
+    with read_session() as db:
         existing = {
             c.kind
             for c in db.exec(
                 select(Connector).where(Connector.user_id == user_id)
             ).all()
         }
-        for kind in CATALOG:
-            if kind not in existing:
-                db.add(
-                    Connector(
-                        user_id=user_id,
-                        kind=kind,
-                        enabled=DEFAULT_ENABLED.get(kind, False),
-                    )
-                )
-
-        user = db.get(User, user_id)
-        if user and not user.avatar_color:
-            user.avatar_color = AVATAR_COLORS[(user_id - 1) % len(AVATAR_COLORS)]
-            db.add(user)
+    if not (set(CATALOG) - existing):
+        return 0
+    with write_session() as db:
+        added = _seed_missing_connectors(db, user_id)
+    if added:
+        log.info("backfilled %d catalog connector rows for user %d", added, user_id)
+    return added
 
 
 def user_connectors(user_id: int | None) -> list[Connector]:

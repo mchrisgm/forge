@@ -21,7 +21,7 @@ from ..models import (
     Upload,
     User,
 )
-from ..services import chat_service, image_service, memory, uploads
+from ..services import chat_service, image_service, memory, uploads, web_reader
 from ..services.engine_manager import engine_manager
 
 log = logging.getLogger(__name__)
@@ -478,6 +478,52 @@ async def generate_image(body: ImageBody, user: User = Depends(current_user)) ->
         "conversation_id": conversation.id if conversation else None,
         "user_message_id": user_message_id,
         "assistant_message_id": assistant_message_id,
+    }
+
+
+class ReadPageBody(BaseModel):
+    url: str
+    mode: str = "auto"  # auto | fast | stealth
+
+
+@router.post("/read_page")
+async def read_page(body: ReadPageBody, user: User = Depends(current_user)) -> dict:
+    """Read a web page as markdown (Scrapling MCP) and save it as a text
+    attachment the composer can attach to messages.
+
+    Request: ``{"url": "https://…", "mode": "auto"}`` — mode "auto" (default)
+    tries the fast HTTP fetch and escalates to the stealth browser on failure
+    or JS-empty content; "fast" and "stealth" force one lane.
+
+    Response::
+
+        {
+          "upload": {id, filename, kind: "text", mime: "text/markdown",
+                     size_bytes, generated: true, prompt: <source url>},
+          "url": <requested url>,
+          "mode_used": "fast" | "stealth",
+          "truncated": bool           # content was cut at ~150 KB
+        }
+
+    The ``upload`` object matches the attachment-meta shape used across chat
+    (pass its ``id`` in a message's ``attachment_ids``). Errors: 400 for a
+    bad url/mode, 502 when the scrapling service is unreachable or fails.
+    """
+    result = await web_reader.read_page(body.url, body.mode)
+    upload = uploads.save_generated_text(user.id, result["markdown"], result["url"])
+    return {
+        "upload": {
+            "id": upload.id,
+            "filename": upload.filename,
+            "kind": upload.kind,
+            "mime": upload.mime,
+            "size_bytes": upload.size_bytes,
+            "generated": True,
+            "prompt": upload.prompt,
+        },
+        "url": result["url"],
+        "mode_used": result["mode_used"],
+        "truncated": result["truncated"],
     }
 
 

@@ -103,5 +103,8 @@ def first_run_banner() -> None:
 
 def run() -> None:
     seed_model_catalog_if_empty()
+    from .bundled_skills import seed_bundled_skills
+
+    seed_bundled_skills()
     check_required_images()
     first_run_banner()

@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     # (forge-internal DNS name of the compose service).
     orchestrator_internal_url: str = "http://orchestrator:8000"
 
+    # Scrapling MCP service (compose service mcp-scrapling) — chat "read page".
+    scrapling_mcp_url: str = "http://mcp-scrapling:8000/mcp"
+
     # Headroom context-compression proxy (compose service `headroom`). When
     # enabled AND healthy, ALL chat-completion traffic chains through it; the
     # Setting-table key "headroom_enabled" overrides the default at runtime.

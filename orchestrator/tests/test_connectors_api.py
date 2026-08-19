@@ -1,7 +1,13 @@
-"""Connectors API: per-user rows seeded on registration, per-user config and
-secrets (masked in responses), and per-user custom MCP servers."""
+"""Connectors API: per-user rows seeded on registration, catalog backfill for
+profiles predating a catalog addition, per-user config and secrets (masked in
+responses), and per-user custom MCP servers. Plus the scrapling/fetch catalog
+invariants (scrapling is core + default-on; fetch is superseded/default-off)."""
 
-from app.connector_catalog import CATALOG
+from sqlmodel import select
+
+from app import db as db_module
+from app.connector_catalog import CATALOG, CORE, DEFAULT_ENABLED
+from app.models import Connector
 from app.routers.connectors import MASK
 
 
@@ -16,7 +22,9 @@ class TestPerUserConnectors:
         assert {r["kind"] for r in rows} == set(CATALOG)
         github = connector_of(api, auth_headers, "github")
         assert github["enabled"] is False  # off until a PAT is configured
-        assert connector_of(api, auth_headers, "fetch")["enabled"] is True
+        # scrapling supersedes fetch as the default page reader.
+        assert connector_of(api, auth_headers, "scrapling")["enabled"] is True
+        assert connector_of(api, auth_headers, "fetch")["enabled"] is False
 
     def test_each_user_gets_their_own_seeded_rows(
         self, api, auth_headers, second_user_headers
@@ -54,6 +62,56 @@ class TestPerUserConnectors:
             headers=auth_headers,
         )
         assert resp.status_code == 404
+
+
+class TestScraplingCatalogInvariants:
+    def test_scrapling_is_a_core_entry_with_the_compose_endpoint(self):
+        entry = next(e for e in CORE if e.id == "scrapling")
+        assert entry.category == "core"
+        assert entry.mcp_type == "remote"
+        assert entry.url == "http://mcp-scrapling:8000/mcp"
+        assert entry.auth_fields == ()  # internal network, no auth
+        assert entry.docs_url == "https://github.com/D4Vinci/Scrapling"
+
+    def test_scrapling_defaults_on_and_fetch_defaults_off(self):
+        assert DEFAULT_ENABLED["scrapling"] is True
+        assert DEFAULT_ENABLED["fetch"] is False
+        # fetch stays in the catalog for users who want it, and says why it's
+        # no longer a default.
+        assert "fetch" in CATALOG
+        assert "supersede" in CATALOG["fetch"].auth_note.lower()
+
+
+class TestCatalogBackfill:
+    def _delete_row(self, api, headers, kind: str) -> None:
+        rows = api.get("/api/connectors", headers=headers).json()
+        assert kind in {r["kind"] for r in rows}
+        with db_module.write_session() as db:
+            row = db.exec(select(Connector).where(Connector.kind == kind)).one()
+            db.delete(row)
+
+    def test_listing_backfills_entries_missing_from_older_profiles(
+        self, api, auth_headers
+    ):
+        # Simulate a profile registered before scrapling entered the catalog.
+        self._delete_row(api, auth_headers, "scrapling")
+
+        row = connector_of(api, auth_headers, "scrapling")
+        assert row["enabled"] is True  # seeded with its catalog default
+
+    def test_backfill_is_idempotent_and_keeps_user_edits(self, api, auth_headers):
+        self._delete_row(api, auth_headers, "scrapling")
+        connector_of(api, auth_headers, "scrapling")
+        api.patch(
+            "/api/connectors/scrapling",
+            json={"enabled": False},
+            headers=auth_headers,
+        )
+
+        rows = api.get("/api/connectors", headers=auth_headers).json()
+        scrapling_rows = [r for r in rows if r["kind"] == "scrapling"]
+        assert len(scrapling_rows) == 1  # no duplicates from repeated listings
+        assert scrapling_rows[0]["enabled"] is False  # user's toggle survives
 
 
 class TestCustomConnectors:

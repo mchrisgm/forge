@@ -244,9 +244,11 @@ class TestSeeding:
             }
 
         assert set(rows) == set(CATALOG)
-        # Core defaults: github off until a PAT is set, the other four on.
+        # Core defaults: github off until a PAT is set, fetch off (superseded
+        # by scrapling), the rest on.
         assert rows["github"].enabled is False
-        for name in ("fetch", "searxng", "playwright", "skills"):
+        assert rows["fetch"].enabled is False
+        for name in ("searxng", "playwright", "skills", "scrapling"):
             assert rows[name].enabled is True, name
         # Integrations exist but start disabled until configured.
         for entry in INTEGRATIONS:

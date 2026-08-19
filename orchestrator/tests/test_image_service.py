@@ -279,9 +279,9 @@ class TestConnectorEndpoint:
         assert headers == {"Authorization": "Bearer tok-123"}
 
     def test_local_catalog_entry_is_409(self, api, auth_headers):
-        # fetch is a local stdio server and seeded enabled.
+        # searxng is a local stdio server and seeded enabled.
         with pytest.raises(HTTPException) as excinfo:
-            image_service._connector_endpoint(user_id_of(api, auth_headers), "fetch")
+            image_service._connector_endpoint(user_id_of(api, auth_headers), "searxng")
         assert excinfo.value.status_code == 409
         assert "local MCP server" in excinfo.value.detail
 
