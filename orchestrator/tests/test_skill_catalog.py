@@ -143,6 +143,22 @@ class TestCatalogApi:
         assert resp.status_code == 409
         assert "already installed" in resp.json()["detail"]
 
+    def test_slug_collision_is_rejected_not_clobbered(
+        self, api, auth_headers, monkeypatch
+    ):
+        # Two differently-named skills that slugify to the same dir must not
+        # share on-disk storage — the second install is a 409, not a silent
+        # rmtree of the first.
+        from app.services import skills_service
+
+        fake_clone(monkeypatch, {"": skill_md("Web Search")})
+        first = skills_service.install("https://github.com/x/a")
+        assert first.name == "Web Search"
+        fake_clone(monkeypatch, {"": skill_md("web-search")})
+        with pytest.raises(skills_service.SkillError) as exc:
+            skills_service.install("https://github.com/x/b")
+        assert exc.value.status_code == 409
+
 
 # ── pack scan ───────────────────────────────────────────────────────────────
 

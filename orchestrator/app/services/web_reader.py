@@ -19,9 +19,11 @@ Failures surface as HTTPException (400 for caller mistakes, 502 when the
 scrapling service is unreachable or errors), mirroring image_service.
 """
 
+import ipaddress
 import json
 import logging
 import re
+import socket
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -46,6 +48,35 @@ STEALTH_TIMEOUT = 240.0  # browser start + render + possible Cloudflare solve
 _TITLE_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
 
 
+def _is_internal_host(host: str) -> bool:
+    """True when `host` names a loopback/private/link-local address or an
+    unqualified name (a compose service like ``orchestrator``/``smolvm``).
+    Every A/AAAA record must be public — one internal answer rejects the host,
+    closing DNS-rebinding to a public name that resolves internally."""
+    host = host.strip("[]").lower()  # strip IPv6 brackets
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        return not literal.is_global
+    # A bare label with no dot is a container/service name on forge-internal.
+    if "." not in host or host.endswith((".internal", ".local", ".localhost")):
+        return True
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return True  # unresolvable → treat as unreachable/suspect
+    for info in infos:
+        addr = info[4][0].split("%")[0]  # drop any zone id
+        try:
+            if not ipaddress.ip_address(addr).is_global:
+                return True
+        except ValueError:
+            return True
+    return False
+
+
 def _validate_url(url: str) -> str:
     url = (url or "").strip()
     if not url:
@@ -53,8 +84,13 @@ def _validate_url(url: str) -> str:
     if len(url) > MAX_URL_CHARS:
         raise HTTPException(400, f"url exceeds {MAX_URL_CHARS} characters")
     parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.netloc:
+    if parts.scheme not in ("http", "https") or not parts.hostname:
         raise HTTPException(400, "url must be http(s)")
+    # SSRF guard: the fetch runs inside the mcp-scrapling container on
+    # forge-internal, so an internal URL would let a user probe/read the
+    # orchestrator, engines, or sibling containers. Refuse non-public hosts.
+    if _is_internal_host(parts.hostname):
+        raise HTTPException(400, "refusing to fetch an internal or private address")
     return url
 
 

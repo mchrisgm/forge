@@ -122,6 +122,47 @@ class TestRouterChaining:
         )
 
 
+class TestHeadroomFallback:
+    def test_v1_falls_back_to_direct_when_headroom_dies_mid_ttl(
+        self, api, monkeypatch
+    ):
+        # Headroom passed the health probe (active) but its connection now
+        # fails: the request must degrade to the direct engine, not 502.
+        from app.routers import openai_router
+
+        async def fake_active() -> bool:
+            return True
+
+        reset_calls: list[int] = []
+        monkeypatch.setattr(openai_router.routing, "active", fake_active)
+        monkeypatch.setattr(
+            openai_router.routing, "reset_probe", lambda: reset_calls.append(1)
+        )
+
+        # Direct path needs a lease to resolve — install a real fake one.
+        from .test_openai_router import install_leases, make_lease
+
+        lease = make_lease("m")
+        install_leases(lease)
+
+        calls: list[str] = []
+
+        async def flaky_proxy(base_url: str, path: str, body: bytes):
+            calls.append(base_url)
+            if base_url == "http://headroom:8787/v1":
+                raise openai_router.HTTPException(502, "engine unreachable")
+            return {"ok": base_url}
+
+        monkeypatch.setattr(openai_router, "proxy_openai_request", flaky_proxy)
+
+        resp = api.post("/v1/chat/completions", json={"model": "m"})
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": lease.base_url}
+        # Tried headroom first, then the direct engine, and re-armed the probe.
+        assert calls == ["http://headroom:8787/v1", lease.base_url]
+        assert reset_calls == [1]
+
+
 class TestSettingsSurface:
     def test_get_reports_headroom_status(self, api, auth_headers):
         body = api.get("/api/settings", headers=auth_headers).json()

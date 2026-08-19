@@ -76,19 +76,32 @@ def resolve_lease(model_slug: str | None):
     )
 
 
-async def _route(request: Request, path: str, chain_headroom: bool):
-    body = await request.body()
-    if chain_headroom and await routing.active():
-        # Compression hop: headroom forwards to /v1-direct, which resolves
-        # the slug below. A downed proxy fails the health probe and traffic
-        # degrades to the direct path automatically.
-        return await proxy_openai_request(get_settings().headroom_url, path, body)
+async def _route_direct(path: str, body: bytes):
     try:
         model_slug = json.loads(body or b"{}").get("model")
     except json.JSONDecodeError:
         model_slug = None
     lease = resolve_lease(model_slug)
     return await proxy_openai_request(lease.base_url, path, body)
+
+
+async def _route(request: Request, path: str, chain_headroom: bool):
+    body = await request.body()
+    if chain_headroom and await routing.active():
+        # Compression hop: headroom forwards to /v1-direct, which resolves
+        # the slug there. proxy_openai_request raises BEFORE any bytes stream
+        # when the connection fails, so a proxy that died inside the health
+        # probe's TTL is caught here and the request degrades to the direct
+        # engine path instead of failing the chat — the resilience the
+        # routing docstring promises, made per-request.
+        try:
+            return await proxy_openai_request(get_settings().headroom_url, path, body)
+        except HTTPException as exc:
+            if exc.status_code != 502:
+                raise
+            routing.reset_probe()  # re-probe on the next request
+        return await _route_direct(path, body)
+    return await _route_direct(path, body)
 
 
 @router.post("/chat/completions")

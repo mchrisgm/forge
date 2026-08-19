@@ -154,14 +154,8 @@ def _truncate(text: str) -> str:
     return clipped + _TRUNCATION_MARKER
 
 
-async def _ensure_runner(client: httpx.AsyncClient) -> None:
-    """Idempotently create the shared network-less runner host machine.
-
-    ``network: false`` is the load-bearing security control — it denies the
-    guest all egress. A 409 means the machine already exists (a prior call made
-    it); any other non-2xx is an unexpected smolvm-side failure.
-    """
-    resp = await client.post(
+async def _create_runner(client: httpx.AsyncClient) -> httpx.Response:
+    return await client.post(
         "/api/v1/machines",
         json={
             "name": RUNNER_NAME,
@@ -170,12 +164,39 @@ async def _ensure_runner(client: httpx.AsyncClient) -> None:
             "memoryMb": 1024,
         },
     )
-    if resp.status_code in (200, 201) or resp.status_code == 409:
+
+
+async def _ensure_runner(client: httpx.AsyncClient) -> None:
+    """Idempotently ensure the shared runner exists AND has egress denied.
+
+    ``network: false`` is the load-bearing security control — the /run overlay
+    has no network field of its own, so it inherits the runner's setting
+    (smolvm RunRequest carries only image/command/env/timeout). A 409 means the
+    machine already exists; we then VERIFY its network is off (something could
+    have created a `forge-sandbox-runner` with egress on) and rebuild it if
+    not, rather than trusting it.
+    """
+    resp = await _create_runner(client)
+    if resp.status_code in (200, 201):
         return
-    raise SandboxError(
-        f"smolvm could not provision the sandbox runner (HTTP {resp.status_code})",
-        status=502,
-    )
+    if resp.status_code != 409:
+        raise SandboxError(
+            f"smolvm could not provision the sandbox runner (HTTP {resp.status_code})",
+            status=502,
+        )
+    # Runner already exists — confirm it denies egress.
+    info = await client.get(f"/api/v1/machines/{RUNNER_NAME}")
+    if info.status_code == 200 and info.json().get("network") is False:
+        return
+    # Wrong (or unreadable) network posture: delete and recreate network-off.
+    await client.delete(f"/api/v1/machines/{RUNNER_NAME}")
+    rebuilt = await _create_runner(client)
+    if rebuilt.status_code not in (200, 201):
+        raise SandboxError(
+            "smolvm sandbox runner exists with the wrong network posture and "
+            "could not be rebuilt",
+            status=502,
+        )
 
 
 async def run_code(

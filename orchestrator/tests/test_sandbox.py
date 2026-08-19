@@ -188,17 +188,51 @@ async def test_run_code_smolvm_failure_is_502(httpx_mock):
     assert excinfo.value.status == 502
 
 
-async def test_run_code_provision_conflict_is_ok(httpx_mock):
-    """A 409 on create means the runner already exists — not an error."""
+async def test_run_code_provision_conflict_reuses_a_network_off_runner(httpx_mock):
+    """A 409 on create means the runner exists — reused once verified egress-off."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v1/machines":
+        if request.url.path == "/api/v1/machines" and request.method == "POST":
             return httpx.Response(409, json={"error": "already exists"})
+        if request.method == "GET" and request.url.path.endswith(RUNNER_NAME):
+            return httpx.Response(200, json={"name": RUNNER_NAME, "network": False})
         return _exec_response(stdout="ok\n")
 
     httpx_mock.set_handler(handler)
     result = await sandbox.run_code("python", "print('ok')")
     assert result["stdout"] == "ok\n"
+
+
+async def test_run_code_rebuilds_a_runner_with_egress_on(httpx_mock):
+    """A pre-existing runner with network on is deleted and recreated
+    network-off — the /run overlay has no network field of its own, so the
+    runner's setting is the only egress control."""
+    events: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path, method = request.url.path, request.method
+        events.append((method, path))
+        if path == "/api/v1/machines" and method == "POST":
+            # First create 409s (exists); the post-delete recreate succeeds.
+            posts = sum(1 for m, p in events if m == "POST" and p == path)
+            return (
+                httpx.Response(409, json={"error": "exists"})
+                if posts == 1
+                else httpx.Response(201, json={"name": RUNNER_NAME})
+            )
+        if method == "GET" and path.endswith(RUNNER_NAME):
+            return httpx.Response(200, json={"name": RUNNER_NAME, "network": True})
+        if method == "DELETE":
+            return httpx.Response(200, json={"ok": True})
+        return _exec_response(stdout="ok\n")
+
+    httpx_mock.set_handler(handler)
+    result = await sandbox.run_code("python", "print('ok')")
+    assert result["stdout"] == "ok\n"
+    assert (
+        "DELETE",
+        f"/api/v1/machines/{RUNNER_NAME}",
+    ) in events  # the egress-on runner was torn down
 
 
 # ── available() ─────────────────────────────────────────────────────────────

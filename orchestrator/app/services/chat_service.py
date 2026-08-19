@@ -169,33 +169,55 @@ async def stream_completion(
     from . import routing
 
     # Chain through the headroom compression proxy when it is up (the model
-    # slug in the body survives the hop and resolves at /v1-direct).
-    base_url = await routing.completion_base_url(base_url)
+    # slug in the body survives the hop and resolves at /v1-direct). If the
+    # proxy died within the health-probe TTL, the connect fails before any
+    # token streams — fall back to the direct engine URL once so a stopped
+    # headroom degrades to plain Forge instead of erroring the chat.
+    proxied = await routing.completion_base_url(base_url)
     body = {"model": model_slug, "messages": messages, "stream": True}
     timeout = httpx.Timeout(connect=10, read=None, write=30, pool=10)
     async with httpx.AsyncClient(timeout=timeout) as http:
-        async with http.stream(
-            "POST", f"{base_url}/chat/completions", json=body
-        ) as resp:
-            if resp.status_code != 200:
-                detail = (await resp.aread()).decode(errors="replace")[:400]
+        for attempt_url in (proxied, base_url):
+            try:
+                stream_cm = http.stream(
+                    "POST", f"{attempt_url}/chat/completions", json=body
+                )
+                resp = await stream_cm.__aenter__()
+            except httpx.HTTPError:
+                if attempt_url is proxied and proxied != base_url:
+                    routing.reset_probe()
+                    continue  # retry once on the direct engine
                 yield (
                     "data: "
-                    + json.dumps({"error": f"engine error {resp.status_code}: {detail}"})
+                    + json.dumps({"error": "engine unreachable"})
                     + "\n\n"
                 )
                 return
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                yield f"data: {payload}\n\n"
-                if payload == "[DONE]":
-                    break
-                try:
-                    delta = json.loads(payload)["choices"][0].get("delta", {})
-                    piece = delta.get("content")
-                    if piece:
-                        collected.append(piece)
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
+            try:
+                if resp.status_code != 200:
+                    detail = (await resp.aread()).decode(errors="replace")[:400]
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {"error": f"engine error {resp.status_code}: {detail}"}
+                        )
+                        + "\n\n"
+                    )
+                    return
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    yield f"data: {payload}\n\n"
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        delta = json.loads(payload)["choices"][0].get("delta", {})
+                        piece = delta.get("content")
+                        if piece:
+                            collected.append(piece)
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+                return
+            finally:
+                await stream_cm.__aexit__(None, None, None)

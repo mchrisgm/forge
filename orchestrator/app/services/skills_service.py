@@ -99,7 +99,7 @@ def _reject_escaping_symlinks(skill_dir: Path, clone_root: Path) -> None:
 def _find_skill_dir(repo_root: Path, subdir: str | None) -> Path:
     if subdir:
         candidate = (repo_root / subdir).resolve()
-        if not str(candidate).startswith(str(repo_root.resolve())):
+        if not candidate.is_relative_to(repo_root.resolve()):
             raise SkillError("subdir escapes the repository")
         if not (candidate / "SKILL.md").is_file():
             raise SkillError(f"no SKILL.md in subdir '{subdir}'")
@@ -137,8 +137,18 @@ def _install_skill_dir(
     description = str(meta.get("description") or "")
     slug = slugify(name)
 
+    # Reject on name OR slug collision: the on-disk destination is keyed by
+    # slug, so two differently-named skills that slugify identically (e.g.
+    # "Web Search" and "web-search") would otherwise share one directory and
+    # the second install would rmtree the first's files.
     with read_session() as db:
-        if db.exec(select(Skill).where(Skill.name == name)).first():
+        existing = db.exec(select(Skill).where(Skill.name == name)).first()
+        if existing is None:
+            for row in db.exec(select(Skill)).all():
+                if slugify(row.name) == slug:
+                    existing = row
+                    break
+        if existing is not None:
             raise SkillError(f"skill '{name}' is already installed", 409)
 
     dest = skills_root / slug

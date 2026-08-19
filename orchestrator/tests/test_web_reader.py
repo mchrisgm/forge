@@ -11,6 +11,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.services import web_reader
+from app.services import web_reader as _wr
 from app.services.web_reader import (
     MAX_CONTENT_CHARS,
     MAX_URL_CHARS,
@@ -18,6 +19,48 @@ from app.services.web_reader import (
     read_page,
 )
 from tests.test_mcp_client import FakeMCPServer
+
+
+class TestUrlSsrfGuard:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://orchestrator:8000/v1-direct/models",  # bare service name
+            "http://smolvm:9000/api/v1/machines",
+            "http://localhost/x",
+            "http://127.0.0.1:8000/api/health",
+            "http://169.254.169.254/latest/meta-data/",  # cloud IMDS
+            "http://192.168.1.10/admin",
+            "http://10.0.0.5/x",
+            "http://[::1]/x",
+            "http://host.internal/x",
+        ],
+    )
+    def test_internal_and_private_hosts_are_refused(self, url):
+        with pytest.raises(HTTPException) as exc:
+            _wr._validate_url(url)
+        assert exc.value.status_code == 400
+
+    def test_public_hosts_pass(self, monkeypatch):
+        # Stub DNS so the test doesn't hit the network; 93.184.216.34 is public.
+        monkeypatch.setattr(
+            _wr.socket,
+            "getaddrinfo",
+            lambda host, port: [(2, 1, 6, "", ("93.184.216.34", 0))],
+        )
+        assert _wr._validate_url("https://example.com/page") == (
+            "https://example.com/page"
+        )
+
+    def test_public_name_resolving_internally_is_refused(self, monkeypatch):
+        # DNS-rebinding: a public-looking name whose A record is private.
+        monkeypatch.setattr(
+            _wr.socket,
+            "getaddrinfo",
+            lambda host, port: [(2, 1, 6, "", ("192.168.0.9", 0))],
+        )
+        with pytest.raises(HTTPException):
+            _wr._validate_url("https://sneaky.example.com/x")
 
 URL = "https://example.com/article"
 LONG_MD = "# Example Domain\n\n" + "This paragraph carries real page content. " * 20
