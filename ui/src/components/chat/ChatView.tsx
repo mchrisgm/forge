@@ -30,6 +30,7 @@ import {
 import { Button, EmptyState, LaneBadge, Spinner } from "../ui";
 import { Composer, type ImageProvider } from "./Composer";
 import { MessageBubble, type UiMessage } from "./messages";
+import { SandboxContext, type SandboxRunner } from "./sandbox-context";
 
 const THINKING_STORAGE_KEY = "forge.thinking.chats";
 
@@ -107,6 +108,21 @@ export function ChatView({
   const serving = status.data?.serving ?? [];
   const nothingServing = status.data != null && serving.length === 0;
   const imageLease = status.data?.image ?? null;
+
+  // ── sandbox lane: fetched once, cached; drives the code-block Run button ──
+  const sandbox = useQuery({
+    queryKey: ["sandbox-status"],
+    queryFn: api.sandboxStatus,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const sandboxRunner = useMemo<SandboxRunner | null>(
+    () =>
+      sandbox.data?.healthy
+        ? { run: (language, code) => api.sandboxRun({ language, code }) }
+        : null,
+    [sandbox.data?.healthy],
+  );
 
   // ── image providers: the local imagegen lane plus enabled remote
   //    connectors that advertise image generation (e.g. Higgsfield) ─────────
@@ -504,6 +520,7 @@ export function ChatView({
     streaming && lastMessage?.role === "assistant" && !lastMessage.content;
 
   return (
+    <SandboxContext.Provider value={sandboxRunner}>
     <div className="flex min-h-dvh flex-col px-4 md:px-6">
       {/* Header */}
       <header className="sticky top-0 z-10 -mx-4 border-b border-border bg-bg/95 px-4 pt-safe backdrop-blur md:-mx-6 md:px-6">
@@ -795,5 +812,6 @@ export function ChatView({
         </div>
       )}
     </div>
+    </SandboxContext.Provider>
   );
 }

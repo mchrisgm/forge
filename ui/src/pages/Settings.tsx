@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
+import type { HeadroomStatus } from "../api/types";
 import { IconChevronRight, IconUser } from "../components/icons";
 import { PageHeader } from "../components/layout";
 import {
@@ -17,6 +18,69 @@ import {
 } from "../components/ui";
 import { useToast } from "../hooks/toast";
 import { useCurrentUser } from "../lib/auth";
+import { cx } from "../lib/utils";
+
+function HeadroomCard({ headroom }: { headroom: HeadroomStatus }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const toggle = useMutation({
+    mutationFn: (enabled: boolean) =>
+      api.patchSettings({ headroom_enabled: enabled }),
+    onSuccess: (data) => {
+      // PATCH returns the full settings payload with a freshly re-probed
+      // headroom status — swap it in so the status line updates at once.
+      queryClient.setQueryData(["settings"], data);
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+    onError: (err) => toast("error", errorMessage(err)),
+  });
+
+  const active = headroom.enabled && headroom.healthy === true;
+  const degraded = headroom.enabled && !headroom.healthy;
+
+  return (
+    <section className="rounded-xl border border-border bg-surface p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold text-text">
+            Context compression (Headroom)
+          </h2>
+          <p className="mt-0.5 text-sm text-muted">
+            Compresses tool outputs and context before the model to save VRAM.
+          </p>
+        </div>
+        <Toggle
+          checked={headroom.enabled}
+          onChange={(next) => toggle.mutate(next)}
+          label="Context compression"
+          disabled={toggle.isPending}
+        />
+      </div>
+      <p className="mt-2 flex items-center gap-1.5 text-xs">
+        <span
+          aria-hidden
+          className={cx(
+            "h-1.5 w-1.5 rounded-full",
+            active ? "bg-ok" : degraded ? "bg-warn" : "bg-faint",
+          )}
+        />
+        <span
+          className={cx(
+            "font-medium",
+            active ? "text-ok" : degraded ? "text-warn" : "text-faint",
+          )}
+        >
+          {active
+            ? "Active"
+            : degraded
+              ? "Enabled, proxy unreachable — using direct path"
+              : "Off"}
+        </span>
+      </p>
+    </section>
+  );
+}
 
 function RegistrationCard() {
   const { toast } = useToast();
@@ -182,6 +246,8 @@ export default function Settings() {
               Save
             </Button>
           </form>
+
+          <HeadroomCard headroom={settings.data.headroom} />
 
           {user?.is_admin && <RegistrationCard />}
 

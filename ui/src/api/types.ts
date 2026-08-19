@@ -107,6 +107,39 @@ export interface Skill {
   enabled: boolean;
 }
 
+/** One curated suggestion from GET /api/skills/catalog. */
+export type SkillCategory =
+  | "workflow"
+  | "languages"
+  | "quality"
+  | "research"
+  | "other";
+
+export interface CatalogSkill {
+  name: string;
+  description: string;
+  category: SkillCategory;
+  repo: string;
+  subdir: string;
+  installed: boolean;
+}
+
+/** One installable entry from POST /api/skills/pack/scan. */
+export interface PackSkill {
+  name: string;
+  description: string;
+  subdir: string;
+  /** Present when the skill's SKILL.md frontmatter was missing/malformed. */
+  note?: string;
+}
+
+/** POST /api/skills/pack/install result — bulk import outcome. */
+export interface PackInstallResult {
+  installed: string[];
+  skipped: { subdir: string; reason: string }[];
+  note: string;
+}
+
 /** One credential/config field a connector needs (GET /api/connectors). */
 export interface ConnectorAuthField {
   key: string;
@@ -188,7 +221,17 @@ export interface SystemStats {
   engine: EnginesStatus;
   session_containers: { name: string; status: string; session_id: string }[];
   docker_ok: boolean;
+  /** Locally-built compose images absent at boot — non-empty ⇒ "run make up". */
+  missing_images: string[];
   budgets: { vram_gb: number; ram_offload_gb: number };
+}
+
+/** GET /api/settings "headroom" — the context-compression proxy's state.
+ *  `healthy` is null while the toggle is off (nothing probed). */
+export interface HeadroomStatus {
+  enabled: boolean;
+  healthy: boolean | null;
+  url: string;
 }
 
 export interface SettingsPayload {
@@ -198,6 +241,26 @@ export interface SettingsPayload {
   vram_budget_gb: number;
   ram_offload_budget_gb: number;
   llamacpp_slots: number;
+  headroom: HeadroomStatus;
+}
+
+// ── Sandbox (orchestrator/app/routers/sandbox_api.py) ───────────────────────
+
+/** GET /api/sandbox/status — reachability of the "run this code" lane. */
+export interface SandboxStatus {
+  enabled: boolean;
+  healthy: boolean;
+  detail: string;
+  url: string;
+}
+
+/** POST /api/sandbox/run — one snippet's result from the microVM. */
+export interface SandboxRunResult {
+  stdout: string;
+  stderr: string;
+  exit_code: number;
+  timed_out: boolean;
+  duration_ms: number;
 }
 
 export interface DirEntry {
@@ -401,6 +464,18 @@ export interface ImageGenerationResult {
   conversation_id: string | null;
   user_message_id: number | null;
   assistant_message_id: number | null;
+}
+
+/** POST /api/chat/read_page — a fetched web page saved as a text attachment.
+ *  The `upload` matches the attachment-meta shape; pass its id in a message's
+ *  attachment_ids to inline the page into the next turn. */
+export interface ReadPageResult {
+  upload: AttachmentMeta;
+  url: string;
+  /** Lane that actually served the fetch. */
+  mode_used: "fast" | "stealth";
+  /** Content was cut at the ~150 KB cap. */
+  truncated: boolean;
 }
 
 /** data: {"forge":"done", ...} — final SSE frame of a chat stream. */

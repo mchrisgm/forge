@@ -349,6 +349,7 @@ const systemStats = {
     { name: "forge-session-g7h8i9", status: "exited", session_id: "sess-3" },
   ],
   docker_ok: true,
+  missing_images: [], // all built — no "run make up" banner in screenshots
   budgets: { vram_gb: 15, ram_offload_gb: 32 },
 };
 
@@ -667,6 +668,45 @@ const skills = [
   },
 ];
 
+// ── Suggested-skills catalog + pack importer (routers/skills.py) ────────────
+
+const ECC_REPO = "https://github.com/affaan-m/ECC";
+const cat = (name, description, category, installed = false) => ({
+  name,
+  description,
+  category,
+  repo: ECC_REPO,
+  subdir: `skills/${name}`,
+  installed,
+});
+const skillCatalog = [
+  cat("tdd-workflow", "Test-driven development loop: failing test first, then implement, with coverage goals.", "workflow", true),
+  cat("verification-loop", "Verify a coding session's work (build, tests, lint, claims) before declaring it done.", "workflow"),
+  cat("git-workflow", "Branching strategies, commit conventions, merge vs rebase, and conflict resolution.", "workflow"),
+  cat("blueprint", "Turn a one-line objective into a stepwise plan with self-contained context briefs.", "workflow"),
+  cat("python-patterns", "Pythonic idioms, PEP 8, type hints, and structure for maintainable Python.", "languages"),
+  cat("fastapi-patterns", "FastAPI structure, Pydantic v2 schemas, dependency injection, and async handlers.", "languages"),
+  cat("react-patterns", "React 18/19: hooks discipline, server/client boundaries, Suspense, and state.", "languages"),
+  cat("rust-patterns", "Idiomatic Rust: ownership, error handling, traits, and concurrency.", "languages"),
+  cat("security-review", "Security checklist for auth, user input, secrets, API endpoints, and sensitive features.", "quality"),
+  cat("api-design", "REST API design: resource naming, status codes, pagination, and versioning.", "quality"),
+  cat("accessibility", "Build and audit UI against WCAG 2.2 AA: keyboard, contrast, and screen-reader support.", "quality"),
+  cat("market-research", "Market sizing, competitive analysis, and industry intelligence with source attribution.", "research"),
+  cat("article-writing", "Long-form articles, guides, and tutorials in a consistent voice with solid structure.", "research"),
+  cat("mcp-server-patterns", "Build MCP servers with the Node/TypeScript SDK: tools, resources, validation, transports.", "other"),
+  cat("context-budget", "Audit what is eating the context window (agents, skills, MCP servers) and trim it.", "other"),
+];
+
+// A believable multi-skill monorepo for the pack-importer scan.
+const packScan = [
+  { name: "commit-craft", description: "Conventional-commit messages and changelog discipline.", subdir: "skills/commit-craft" },
+  { name: "pr-review", description: "Structured pull-request review checklist.", subdir: "skills/pr-review" },
+  { name: "sql-tuning", description: "Diagnose and fix slow SQL queries with EXPLAIN.", subdir: "skills/sql-tuning" },
+  { name: "terraform-modules", description: "Reusable Terraform module patterns and state hygiene.", subdir: "skills/terraform-modules" },
+  { name: "incident-response", description: "On-call runbook: triage, mitigate, and write the postmortem.", subdir: "skills/incident-response" },
+  { name: "legacy-notes", description: "", subdir: "skills/legacy-notes", note: "SKILL.md frontmatter missing or malformed" },
+];
+
 const settings = {
   session_idle_min: 30,
   registry_cron: "0 6 * * 1",
@@ -674,6 +714,11 @@ const settings = {
   vram_budget_gb: 15,
   ram_offload_budget_gb: 32,
   llamacpp_slots: 2,
+  headroom: {
+    enabled: true,
+    healthy: true,
+    url: "http://forge-headroom:8088",
+  },
 };
 
 const connectors = JSON.parse(
@@ -1092,6 +1137,36 @@ function sendJson(res, body, status = 200) {
   res.end(data);
 }
 
+/** Collect a JSON request body, then invoke cb (best-effort parse). */
+function readBody(req, cb) {
+  const chunks = [];
+  req.on("data", (c) => chunks.push(c));
+  req.on("end", () => {
+    let body = {};
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
+    } catch {
+      /* body optional in the mock */
+    }
+    cb(body);
+  });
+}
+
+/** Reply after `ms` (simulating a slow lane); no-op if the client left. */
+function sendJsonAfter(_req, res, ms, body) {
+  setTimeout(() => {
+    if (!res.writableEnded && !res.destroyed) sendJson(res, body);
+  }, ms);
+}
+
+const hostFromUrl = (u) => {
+  try {
+    return new URL(u).host || "page";
+  } catch {
+    return "page";
+  }
+};
+
 function sendSse(res, { events = [] } = {}) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -1143,37 +1218,48 @@ function handleApi(req, res, url) {
 
   // chat
   if (p === "/api/chat/status") return sendJson(res, chatStatus);
+  if (p === "/api/chat/read_page" && req.method === "POST") {
+    // Stealth fetches take 5-30s live; a short pause shows the pending chip.
+    return readBody(req, (body) => {
+      const url = body.url || "https://example.com/article";
+      sendJsonAfter(req, res, 1500, {
+        upload: {
+          id: "up-page-1",
+          filename: `${hostFromUrl(url)}.md`,
+          kind: "text",
+          mime: "text/markdown",
+          size_bytes: 18244,
+          generated: true,
+          prompt: url,
+        },
+        url,
+        mode_used: "stealth",
+        truncated: false,
+      });
+    });
+  }
   if (p === "/api/chat/image" && req.method === "POST") {
     // Happy path after a believable "diffusion" pause; the pending bubble
     // shows meanwhile. Serves the demo garden PNG like every other upload —
     // or inline as a data URI when the body asks for a temporary generation.
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => {
-      let temporary = false;
-      try {
-        temporary = JSON.parse(Buffer.concat(chunks).toString()).temporary === true;
-      } catch {
-        /* body optional in the mock */
-      }
-      const payload = temporary
-        ? {
-            upload: null,
-            image_data_uri: `data:image/png;base64,${gardenPngBuffer.toString("base64")}`,
-            conversation_id: null,
-            user_message_id: null,
-            assistant_message_id: null,
-          }
-        : {
-            upload: generatedAttachment,
-            conversation_id: null,
-            user_message_id: null,
-            assistant_message_id: null,
-          };
-      const timer = setTimeout(() => sendJson(res, payload), 1500);
-      req.on("close", () => clearTimeout(timer));
+    return readBody(req, (body) => {
+      const payload =
+        body.temporary === true
+          ? {
+              upload: null,
+              image_data_uri: `data:image/png;base64,${gardenPngBuffer.toString("base64")}`,
+              conversation_id: null,
+              user_message_id: null,
+              assistant_message_id: null,
+            }
+          : {
+              upload: generatedAttachment,
+              conversation_id: null,
+              user_message_id: null,
+              assistant_message_id: null,
+            };
+      sendJsonAfter(req, res, 1500, payload);
     });
-    return;
   }
   if (p === "/api/chat/conversations") {
     if (req.method === "POST") return sendJson(res, conversations[0]);
@@ -1300,8 +1386,79 @@ function handleApi(req, res, url) {
 
   if (p === "/api/tasks") return sendJson(res, tasks);
   if (p === "/api/skills") return sendJson(res, skills);
+  if (p === "/api/skills/catalog") return sendJson(res, skillCatalog);
+  if (p === "/api/skills/catalog/install" && req.method === "POST") {
+    return readBody(req, (body) => {
+      const entry = skillCatalog.find((s) => s.name === body.name);
+      sendJson(res, {
+        id: 900 + Math.floor(Math.random() * 90),
+        name: body.name || "installed-skill",
+        description: entry?.description ?? "",
+        source_url: ECC_REPO,
+        path: `/skills/${body.name}`,
+        installed_at: new Date().toISOString(),
+        enabled: true,
+      });
+    });
+  }
+  if (p === "/api/skills/pack/scan" && req.method === "POST") {
+    return sendJsonAfter(req, res, 900, packScan); // git clone + scan is slow
+  }
+  if (p === "/api/skills/pack/install" && req.method === "POST") {
+    return readBody(req, (body) => {
+      const subdirs = Array.isArray(body.subdirs) ? body.subdirs : [];
+      sendJsonAfter(req, res, 1200, {
+        installed: subdirs.map((s) => String(s).split("/").pop()),
+        skipped: [],
+        note: "bulk-imported skills start disabled — enable the ones you want sessions to load",
+      });
+    });
+  }
+  if (p === "/api/sandbox/status") {
+    return sendJson(res, {
+      enabled: true,
+      healthy: true,
+      detail: "ok",
+      url: "http://forge-smolvm:8080",
+    });
+  }
+  if (p === "/api/sandbox/run" && req.method === "POST") {
+    return readBody(req, (body) => {
+      const lang = String(body.language || "").toLowerCase();
+      const result = lang.startsWith("py")
+        ? {
+            stdout: "Hello from the sandbox!\nsquares: [0, 1, 4, 9, 16]\n",
+            stderr: "",
+            exit_code: 0,
+            timed_out: false,
+            duration_ms: 812,
+          }
+        : {
+            stdout: "ok\n",
+            stderr: "",
+            exit_code: 0,
+            timed_out: false,
+            duration_ms: 640,
+          };
+      sendJsonAfter(req, res, 700, result);
+    });
+  }
   if (p === "/api/connectors") return sendJson(res, connectors);
-  if (p === "/api/settings") return sendJson(res, settings);
+  if (p === "/api/settings") {
+    if (req.method === "PATCH") {
+      return readBody(req, (body) => {
+        if (typeof body.headroom_enabled === "boolean") {
+          settings.headroom = {
+            ...settings.headroom,
+            enabled: body.headroom_enabled,
+            healthy: body.headroom_enabled ? true : null,
+          };
+        }
+        sendJson(res, settings);
+      });
+    }
+    return sendJson(res, settings);
+  }
   if (p === "/api/health") return sendJson(res, { ok: true });
 
   // benign default so no page ever shows an error state during capture

@@ -2,6 +2,7 @@ import { announceUnauthorized, getToken } from "../lib/auth";
 import type {
   AuthResult,
   AuthStatus,
+  CatalogSkill,
   ChatDoneFrame,
   ChatStatus,
   Connector,
@@ -21,7 +22,12 @@ import type {
   ModelEntry,
   ModelSearchKind,
   ModelSearchResult,
+  PackInstallResult,
+  PackSkill,
   PublicUser,
+  ReadPageResult,
+  SandboxRunResult,
+  SandboxStatus,
   SearchAddBody,
   Session,
   SettingsPayload,
@@ -199,6 +205,13 @@ export const api = {
      *  inline as image_data_uri. */
     temporary?: boolean;
   }) => post<ImageGenerationResult>("/api/chat/image", body),
+  /** Fetch a web page as a text attachment (Scrapling). Slow: 5-30s on the
+   *  stealth lane. Returns an upload whose id inlines like any attachment. */
+  readPage: (url: string, mode?: "auto" | "fast" | "stealth") =>
+    post<ReadPageResult>("/api/chat/read_page", {
+      url,
+      ...(mode ? { mode } : {}),
+    }),
 
   // files (chat attachments)
   uploadFile: (file: File) => {
@@ -320,6 +333,23 @@ export const api = {
   deleteSkill: (id: number) => del<{ ok: boolean }>(`/api/skills/${id}`),
   patchSkill: (id: number, enabled: boolean) =>
     patch<Skill>(`/api/skills/${id}`, { enabled }),
+  // curated ECC catalog + generic skill-pack importer
+  skillCatalog: () => get<CatalogSkill[]>("/api/skills/catalog"),
+  installCatalogSkill: (name: string) =>
+    post<Skill>("/api/skills/catalog/install", { name }),
+  scanSkillPack: (git_url: string) =>
+    post<PackSkill[]>("/api/skills/pack/scan", { git_url }),
+  installSkillPack: (git_url: string, subdirs: string[]) =>
+    post<PackInstallResult>("/api/skills/pack/install", { git_url, subdirs }),
+
+  // sandbox — the chat "run this code" lane
+  sandboxStatus: () => get<SandboxStatus>("/api/sandbox/status"),
+  sandboxRun: (body: {
+    language: string;
+    code: string;
+    stdin?: string;
+    timeout_s?: number;
+  }) => post<SandboxRunResult>("/api/sandbox/run", body),
 
   // connectors
   listConnectors: () => get<Connector[]>("/api/connectors"),
@@ -337,6 +367,7 @@ export const api = {
   patchSettings: (body: {
     session_idle_min?: number;
     registry_cron?: string;
+    headroom_enabled?: boolean;
   }) => patch<SettingsPayload>("/api/settings", body),
 };
 
