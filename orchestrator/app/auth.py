@@ -9,7 +9,7 @@
 """
 
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 from argon2 import PasswordHasher
@@ -55,7 +55,7 @@ def change_password(new_password: str) -> None:
 
 
 def issue_token() -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {"sub": "owner", "iat": now, "exp": now + timedelta(days=TOKEN_TTL_DAYS)}
     return jwt.encode(payload, _signing_key(), algorithm="HS256")
 

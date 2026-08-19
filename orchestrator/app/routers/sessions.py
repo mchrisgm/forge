@@ -111,7 +111,7 @@ async def delete_session(session_id: str) -> dict:
     methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
 )
 async def opencode_proxy(session_id: str, path: str, request: Request):
-    session = _get_session(session_id)
+    _get_session(session_id)
     session_manager.touch(session_id)
     base = opencode_base_url(session_id)
     url = f"{base}/{path}"

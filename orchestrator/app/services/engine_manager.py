@@ -11,7 +11,7 @@ import asyncio
 import logging
 import shlex
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import docker
@@ -45,7 +45,7 @@ class Lease:
     base_url: str = ""
     error: str = ""
     acquired_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
 
     def as_dict(self) -> dict[str, Any]:
@@ -121,8 +121,9 @@ def build_vllm_command(model: ModelEntry, settings: Settings) -> list[str]:
 
 
 def build_airllm_env(model: ModelEntry, settings: Settings) -> dict[str, str]:
+    path = f"/data/models/{model.file_path}" if model.file_path else model.hf_repo
     return {
-        "AIRLLM_MODEL_PATH": f"/data/models/{model.file_path}" if model.file_path else model.hf_repo,
+        "AIRLLM_MODEL_PATH": path,
         "AIRLLM_MODEL_NAME": model.display_name,
         "AIRLLM_PORT": str(settings.airllm_port),
         "AIRLLM_MAX_TOKENS": "512",

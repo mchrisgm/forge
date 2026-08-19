@@ -9,7 +9,7 @@ subdirectory is bound via the volume's host mountpoint.
 import json
 import logging
 import shutil
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -112,7 +112,7 @@ class SessionManager:
                 if session:
                     session.container_id = container.id
                     session.state = SessionState.running
-                    session.last_active_at = datetime.now(timezone.utc)
+                    session.last_active_at = datetime.now(UTC)
                     db.add(session)
             with read_session() as db:
                 session = db.get(Session, session_id)
@@ -232,7 +232,7 @@ class SessionManager:
             with write_session() as db:
                 session = db.get(Session, session_id)
                 session.state = SessionState.running
-                session.last_active_at = datetime.now(timezone.utc)
+                session.last_active_at = datetime.now(UTC)
                 db.add(session)
             with read_session() as db:
                 session = db.get(Session, session_id)
@@ -261,7 +261,8 @@ class SessionManager:
         if local_ws.exists():
             await asyncio.to_thread(shutil.rmtree, local_ws, True)
         with write_session() as db:
-            from sqlmodel import col, delete as sql_delete
+            from sqlmodel import col
+            from sqlmodel import delete as sql_delete
 
             from ..models import Task
 
@@ -275,7 +276,7 @@ class SessionManager:
         with write_session() as db:
             session = db.get(Session, session_id)
             if session:
-                session.last_active_at = datetime.now(timezone.utc)
+                session.last_active_at = datetime.now(UTC)
                 db.add(session)
 
     async def reap_idle(self) -> int:
@@ -286,7 +287,7 @@ class SessionManager:
         settings = get_settings()
         override = get_setting("session_idle_min")
         idle_min = int(override) if override.isdigit() else settings.session_idle_min
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=idle_min)
+        cutoff = datetime.now(UTC) - timedelta(minutes=idle_min)
         with read_session() as db:
             from sqlmodel import select
 
@@ -297,7 +298,7 @@ class SessionManager:
         for session in sessions:
             last = session.last_active_at
             if last.tzinfo is None:
-                last = last.replace(tzinfo=timezone.utc)
+                last = last.replace(tzinfo=UTC)
             if last < cutoff:
                 try:
                     await self.stop(session.id, reaped=True)

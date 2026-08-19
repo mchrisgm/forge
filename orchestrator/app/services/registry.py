@@ -9,7 +9,7 @@ import json
 import logging
 import math
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlmodel import select
@@ -44,9 +44,9 @@ def trend_rank_norm(rank: int, total: int) -> float:
 def recency_decay(
     created_at: datetime, now: datetime | None = None, half_life_days: float = 60
 ) -> float:
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
+        created_at = created_at.replace(tzinfo=UTC)
     age_days = max(0.0, (now - created_at).total_seconds() / 86400)
     return math.pow(0.5, age_days / half_life_days)
 
@@ -198,7 +198,7 @@ def scan(limit: int | None = None) -> dict[str, Any]:
         if lane is None or (lane == "airllm" and params_b > 70):
             continue
 
-        created_at = getattr(m, "created_at", None) or datetime.now(timezone.utc)
+        created_at = getattr(m, "created_at", None) or datetime.now(UTC)
         breakdown = score_candidate(
             rank=entry["best_rank"],
             total=entry["total"],

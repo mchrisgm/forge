@@ -7,7 +7,7 @@ published on the event bus for the parallel-runs view.
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..db import read_session, write_session
 from ..models import ModelEntry, Session, SessionState, Task, TaskState
@@ -111,7 +111,7 @@ async def _run(task_id: int) -> None:
             task_id,
             TaskState.done,
             result=text[:4000],
-            finished_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(UTC),
         )
         session_manager.touch(session.id)
     except Exception as exc:
@@ -120,7 +120,7 @@ async def _run(task_id: int) -> None:
             task_id,
             TaskState.failed,
             result=str(exc)[:2000],
-            finished_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(UTC),
         )
     finally:
         _running.pop(task_id, None)

@@ -8,10 +8,11 @@ from dataclasses import dataclass
 
 GB = 1024**3
 
-# Bytes of KV cache per token per layer at fp16 (k+v), for a typical
-# ~5120-dim 40-head model; scaled by a per-size factor below. This is a
-# planning estimate, not an exact figure — llama.cpp will tell us the truth.
-_KV_BYTES_PER_TOKEN_PER_LAYER = 2 * 2 * 4096  # 2 tensors * fp16 * head_dim*n_kv_heads≈4096
+# Bytes of KV cache per token per layer at fp16 (k+v). Modern models use GQA
+# with n_kv_heads*head_dim ≈ 1024 (e.g. 8 kv-heads × 128), so:
+# 2 tensors × 2 bytes × 1024 dims = 4 KiB/token/layer. Planning estimate —
+# the engine reports the truth at load time.
+_KV_BYTES_PER_TOKEN_PER_LAYER = 2 * 2 * 1024
 
 
 @dataclass(frozen=True)
@@ -81,13 +82,10 @@ def fits_llamacpp(file_size_gb: float, budgets: Budgets) -> bool:
     return 0 < file_size_gb <= budgets.vram_gb + budgets.ram_offload_gb
 
 
-def fits_llamacpp_full_gpu(
-    file_size_gb: float, n_layers: int, ctx: int, budgets: Budgets
-) -> bool:
-    return (
-        fits_llamacpp(file_size_gb, budgets)
-        and compute_ngl(file_size_gb, n_layers, ctx, budgets.vram_gb) >= n_layers
-    )
+def fits_llamacpp_full_gpu(file_size_gb: float, budgets: Budgets) -> bool:
+    """PLAN §9: full-GPU lane ⇔ GGUF file ≤ ~10 GB (VRAM budget minus ~1 GB
+    for KV + compute buffers). compute_ngl() does the precise math at load."""
+    return 0 < file_size_gb <= budgets.vram_gb - 1.0
 
 
 def fits_vllm(params_b: float, ctx: int, budgets: Budgets) -> bool:
@@ -96,7 +94,7 @@ def fits_vllm(params_b: float, ctx: int, budgets: Budgets) -> bool:
         return False
     weights_gb = params_b * 0.55  # ~4.4 bits/param incl. scales/zeros
     kv_gb = kv_cache_gb(estimate_n_layers(params_b), ctx)
-    overhead_gb = 1.5  # CUDA graphs, activation workspace
+    overhead_gb = 0.6  # CUDA graphs, activation workspace
     return weights_gb + kv_gb + overhead_gb <= budgets.vram_gb
 
 
@@ -122,8 +120,7 @@ def assign_lane(
     if has_awq and fits_vllm(params_b, ctx, budgets):
         return "vllm"
     if gguf_size_gb and fits_llamacpp(gguf_size_gb, budgets):
-        n_layers = estimate_n_layers(params_b)
-        if fits_llamacpp_full_gpu(gguf_size_gb, n_layers, ctx, budgets):
+        if fits_llamacpp_full_gpu(gguf_size_gb, budgets):
             return "llamacpp-full-gpu"
         # Offloaded models are only pleasant when active params are small (MoE)
         # but dense offload is still allowed — the scorer ranks it lower.

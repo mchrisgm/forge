@@ -69,5 +69,5 @@ async def sse_stream(
         try:
             event = await asyncio.wait_for(queue.get(), timeout=heartbeat_s)
             yield sse_format(event)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             yield ": keepalive\n\n"

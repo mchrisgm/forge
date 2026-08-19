@@ -36,7 +36,10 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
-ignore = ["B008"]  # FastAPI Depends() in defaults is idiomatic
+ignore = [
+    "B008",   # FastAPI Depends() in defaults is idiomatic
+    "UP042",  # (str, Enum) kept for SQLModel/pydantic string-enum behavior
+]
 
 [build-system]
 requires = ["hatchling"]
