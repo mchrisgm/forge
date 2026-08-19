@@ -87,6 +87,8 @@ class Settings(BaseSettings):
     headroom_url: str = "http://headroom:8787/v1"
     headroom_enabled: bool = True
 
+    sandbox_url: str = "http://smolvm:9000"  # smolvm sandbox lane (compose profile "sandbox")
+
     # Optional integrations (no FORGE_ prefix, PLAN §8)
     hf_token: str = Field("", validation_alias=AliasChoices("HF_TOKEN", "FORGE_HF_TOKEN"))
     github_pat: str = Field("", validation_alias=AliasChoices("GITHUB_PAT", "FORGE_GITHUB_PAT"))

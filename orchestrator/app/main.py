@@ -23,6 +23,7 @@ from .routers import (
     memory_api,
     models_api,
     openai_router,
+    sandbox_api,
     sessions,
     settings_api,
     skills,
@@ -158,6 +159,7 @@ def create_app() -> FastAPI:
     protected.include_router(sessions.router)
     protected.include_router(skills.router)
     protected.include_router(connectors.router)
+    protected.include_router(sandbox_api.router)
     protected.include_router(settings_api.router)
     protected.include_router(events.router)
     api.include_router(protected)
