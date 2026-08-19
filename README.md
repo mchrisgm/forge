@@ -53,6 +53,8 @@ guard everything.
 
 | | |
 |---|---|
+| **Chat** — every profile gets its own conversations: history, attachments, temporary mode | **Memory** — what Forge has learned about you: per-user, inspectable, pinnable |
+| <img src="docs/screenshots/chat-desktop.png" alt="Chat section with the conversation list beside an open garden-irrigation conversation showing an image attachment, a markdown table, a schedule code block, and the composer with attachment and thinking controls"> | <img src="docs/screenshots/memory-desktop.png" alt="Memory page listing what Forge remembers about the user, grouped into facts, preferences and projects, with pinned entries starred and importance dots"> |
 | **Sessions** — one sandboxed OpenCode container per task | **Session chat** — streamed tool calls: read, edit, test |
 | <img src="docs/screenshots/sessions-desktop.png" alt="Sessions list showing three coding sessions in running, idle and stopped states, each with its model, engine lane and repository"> | <img src="docs/screenshots/session-chat-desktop.png" alt="Session chat where the agent diagnoses a flaky test, shows an expanded file-edit tool call with arguments and result, and posts a markdown summary"> |
 | **Models** — registry suggestions and per-GPU engine leases | **System** — live gauges for every GPU, RAM, disk and CPU |
@@ -63,10 +65,16 @@ integrations (Notion, Linear, Sentry, Stripe, Figma, …) and custom MCP servers
 
 <img src="docs/screenshots/connectors-desktop.png" alt="Connectors page listing the five enabled core MCP connectors with toggles and credential forms, grouped by category">
 
+On first boot a setup wizard creates the admin profile; everyone else on the
+LAN registers from the login screen:
+
+<img src="docs/screenshots/setup-desktop.png" width="420" alt="First-run setup wizard asking for a username, display name and password to create the admin profile">
+
 On a phone the same PWA installs from the browser and gets a bottom tab bar:
 
 <p>
-  <img src="docs/screenshots/sessions-mobile.png" width="220" alt="Mobile sessions list with bottom tab bar">
+  <img src="docs/screenshots/chat-mobile.png" width="220" alt="Mobile chat conversation with an image attachment, a markdown table and code block, and the composer pinned at the bottom">
+  <img src="docs/screenshots/sessions-mobile.png" width="220" alt="Mobile sessions list with the bottom tab bar: Chat, Sessions, Models, System, More">
   <img src="docs/screenshots/session-chat-mobile.png" width="220" alt="Mobile session chat with the agent's diagnosis and tool calls">
   <img src="docs/screenshots/models-mobile.png" width="220" alt="Mobile model load sheet offering auto, per-GPU or vLLM tensor-parallel placement across two GPUs">
   <img src="docs/screenshots/system-mobile.png" width="220" alt="Mobile system page with GPU VRAM gauges and lease list">
