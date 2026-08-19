@@ -1,16 +1,34 @@
 // Chat composer: auto-growing textarea, attachment upload chips, thinking
-// selector, send/stop. Enter sends; Shift+Enter adds a newline.
+// selector, image-generation mode (toggle or "/imagine <prompt>"), send/stop.
+// Enter sends; Shift+Enter adds a newline.
 
 import { useRef, useState, type KeyboardEvent } from "react";
+import { Link } from "react-router-dom";
 import { api, errorMessage, fileUrl } from "../../api/client";
 import type { ThinkingLevel, UploadMeta } from "../../api/types";
 import { useToast } from "../../hooks/toast";
 import { cx, formatBytes } from "../../lib/utils";
-import { IconFile, IconPaperclip, IconSend, IconStop, IconX } from "../icons";
+import {
+  IconFile,
+  IconImage,
+  IconPaperclip,
+  IconSend,
+  IconStop,
+  IconX,
+} from "../icons";
 import { ThinkingSelect } from "../ThinkingSelect";
 import { Button, Spinner } from "../ui";
 
 const MAX_ATTACHMENTS = 8; // mirrors the backend's per-message cap
+
+/** "/imagine <prompt>" routes the turn to image generation. */
+const IMAGINE_RE = /^\/imagine(\s|$)/;
+
+/** An available image-generation backend: "local" or a connector kind. */
+export interface ImageProvider {
+  id: string;
+  label: string;
+}
 
 interface PendingAttachment {
   localId: number;
@@ -79,7 +97,10 @@ function AttachmentChip({
 export function Composer({
   onSend,
   onStop,
+  onGenerateImage,
+  imageProviders,
   streaming,
+  generatingImage = false,
   disabled = false,
   thinking,
   onThinking,
@@ -87,7 +108,13 @@ export function Composer({
 }: {
   onSend: (content: string, uploads: UploadMeta[]) => void;
   onStop: () => void;
+  /** An image turn — from the image toggle or "/imagine <prompt>". */
+  onGenerateImage: (prompt: string, provider: string) => void;
+  /** Image backends on offer; empty = generation isn't set up yet. */
+  imageProviders: ImageProvider[];
   streaming: boolean;
+  /** An image request is in flight — sends stay disabled meanwhile. */
+  generatingImage?: boolean;
   /** Nothing is serving — typing allowed, sending is not. */
   disabled?: boolean;
   thinking: ThinkingLevel;
@@ -97,24 +124,49 @@ export function Composer({
   const { toast } = useToast();
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [imageMode, setImageMode] = useState(false);
+  const [pickedProvider, setPickedProvider] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const nextLocalId = useRef(1);
 
   const uploading = attachments.some((a) => a.uploading);
   const ready = attachments.filter((a) => a.meta);
+
+  // "local" first, then connectors; a stale pick falls back to the first.
+  const provider =
+    imageProviders.find((p) => p.id === pickedProvider) ??
+    imageProviders[0] ??
+    null;
+
+  const trimmed = draft.trim();
+  const isImagine = IMAGINE_RE.test(trimmed);
+  const imageIntent = imageMode || isImagine;
+  const imagePrompt = isImagine
+    ? trimmed.replace(IMAGINE_RE, "").trim()
+    : imageMode
+      ? trimmed
+      : "";
+
   const canSend =
-    !disabled &&
     !streaming &&
+    !generatingImage &&
     !uploading &&
-    (draft.trim().length > 0 || ready.length > 0);
+    (imageIntent
+      ? imagePrompt.length > 0 && provider != null
+      : !disabled && (trimmed.length > 0 || ready.length > 0));
 
   const doSend = () => {
     if (!canSend) return;
-    const uploads = ready.map((a) => a.meta as UploadMeta);
-    onSend(draft.trim(), uploads);
+    if (imageIntent) {
+      if (!provider) return;
+      onGenerateImage(imagePrompt, provider.id);
+    } else {
+      const uploads = ready.map((a) => a.meta as UploadMeta);
+      onSend(trimmed, uploads);
+      setAttachments([]);
+    }
     setDraft("");
-    setAttachments([]);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
   };
 
@@ -179,6 +231,68 @@ export function Composer({
           ))}
         </div>
       )}
+
+      {/* Image strip (toggle on, or "/imagine" typed): provider pick, or how
+          to set generation up when nothing can generate yet */}
+      {imageIntent && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 pb-2.5">
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-accent">
+            <IconImage size={13} className="shrink-0" />
+            Image generation
+          </span>
+          {imageProviders.length > 1 && (
+            <div
+              role="radiogroup"
+              aria-label="Image provider"
+              className="flex flex-wrap gap-1.5"
+            >
+              {imageProviders.map((p) => {
+                const active = provider?.id === p.id;
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    onClick={() => setPickedProvider(p.id)}
+                    className={cx(
+                      "inline-flex min-h-7 cursor-pointer items-center rounded-full border px-2.5 text-xs font-medium transition-colors duration-150",
+                      active
+                        ? "border-accent/50 bg-accent/15 text-accent"
+                        : "border-border bg-raised text-muted hover:text-text",
+                    )}
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {imageProviders.length === 1 && (
+            <span className="text-xs text-muted">via {provider?.label}</span>
+          )}
+          {imageProviders.length === 0 && (
+            <span className="text-xs text-muted">
+              Not set up —{" "}
+              <Link
+                to="/models"
+                className="text-info underline underline-offset-2"
+              >
+                load an image model
+              </Link>{" "}
+              or{" "}
+              <Link
+                to="/connectors"
+                className="text-info underline underline-offset-2"
+              >
+                enable an image connector
+              </Link>{" "}
+              like Higgsfield.
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="flex items-end gap-2 pb-3">
         <input
           ref={fileInputRef}
@@ -196,11 +310,31 @@ export function Composer({
           aria-label="Attach files"
           title="Attach files"
           onClick={() => fileInputRef.current?.click()}
-          disabled={streaming || attachments.length >= MAX_ATTACHMENTS}
+          disabled={
+            streaming || imageMode || attachments.length >= MAX_ATTACHMENTS
+          }
           className="h-11 w-11 shrink-0 rounded-xl p-0"
         >
           <IconPaperclip size={17} />
         </Button>
+        <button
+          type="button"
+          aria-label={
+            imageMode ? "Switch back to text" : "Generate an image"
+          }
+          aria-pressed={imageMode}
+          title="Generate an image (or type /imagine …)"
+          disabled={streaming || generatingImage}
+          onClick={() => setImageMode((m) => !m)}
+          className={cx(
+            "flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-xl border text-sm transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50",
+            imageMode
+              ? "border-accent/50 bg-accent/15 text-accent"
+              : "border-edge bg-raised text-text hover:bg-overlay",
+          )}
+        >
+          <IconImage size={17} />
+        </button>
         <label htmlFor="chat-composer" className="sr-only">
           Message
         </label>
@@ -209,7 +343,7 @@ export function Composer({
           ref={textareaRef}
           rows={1}
           value={draft}
-          placeholder={placeholder}
+          placeholder={imageMode ? "Describe the image to generate…" : placeholder}
           onChange={(e) => {
             setDraft(e.target.value);
             autoGrow();
@@ -230,12 +364,12 @@ export function Composer({
         ) : (
           <Button
             variant="primary"
-            aria-label="Send message"
+            aria-label={imageIntent ? "Generate image" : "Send message"}
             onClick={doSend}
             disabled={!canSend}
             className="h-11 w-11 shrink-0 rounded-xl p-0"
           >
-            <IconSend size={18} />
+            {generatingImage ? <Spinner size={18} /> : <IconSend size={18} />}
           </Button>
         )}
       </div>

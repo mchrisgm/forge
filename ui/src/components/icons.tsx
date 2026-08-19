@@ -264,6 +264,20 @@ export const IconGhost = (p: IconProps) => (
   </Icon>
 );
 
+export const IconImage = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+    <circle cx="9" cy="9.6" r="1.7" />
+    <path d="m5.2 18.5 4.9-4.9a1.5 1.5 0 0 1 2.1 0l5.6 5.6M14.5 16l1.9-1.9a1.5 1.5 0 0 1 2.1 0l2 2" />
+  </Icon>
+);
+
+export const IconHeart = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M12 20.2 4.9 13a4.5 4.5 0 0 1 6.4-6.4l.7.7.7-.7A4.5 4.5 0 0 1 19.1 13L12 20.2Z" />
+  </Icon>
+);
+
 export const IconPaperclip = (p: IconProps) => (
   <Icon {...p}>
     <path d="m20.6 11.4-8.8 8.8a5.6 5.6 0 0 1-7.9-8L12.4 3.7a3.7 3.7 0 0 1 5.3 5.2l-8.5 8.5a1.9 1.9 0 0 1-2.7-2.7l8.1-8" />

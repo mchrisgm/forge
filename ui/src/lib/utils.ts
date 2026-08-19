@@ -8,6 +8,15 @@ export function formatGb(gb: number | null | undefined, digits = 1): string {
   return `${gb.toFixed(digits)} GB`;
 }
 
+/** Compact count for downloads/likes: 942, 4.1k, 87k, 1.3M. */
+export function formatCount(n: number): string {
+  const compact = (value: number, unit: string) =>
+    `${value >= 100 ? Math.round(value) : value.toFixed(1).replace(/\.0$/, "")}${unit}`;
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return compact(n / 1000, "k");
+  return compact(n / 1_000_000, "M");
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;

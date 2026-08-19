@@ -537,6 +537,28 @@
     "has_token": false
   },
   {
+    "kind": "higgsfield",
+    "name": "Higgsfield",
+    "description": "Generate images, video, and audio with Higgsfield's AI models.",
+    "category": "design",
+    "mcp_type": "remote",
+    "enabled": true,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Access token",
+        "secret": true,
+        "placeholder": "",
+        "value": "••••••",
+        "configured": true
+      }
+    ],
+    "auth_note": "OAuth-only — the hosted MCP signs in with your Higgsfield account (OAuth 2.1 + PKCE, no API-key path); paste an OAuth access token. Generations spend your Higgsfield plan credits.",
+    "docs_url": "https://higgsfield.ai/mcp",
+    "is_custom": false,
+    "has_token": true
+  },
+  {
     "kind": "figma",
     "name": "Figma",
     "description": "Read designs, components, and variables from Figma files.",

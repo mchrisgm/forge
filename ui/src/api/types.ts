@@ -1,7 +1,7 @@
 // Mirrors orchestrator/app/models.py + router response shapes exactly.
 
-export type EngineKind = "llamacpp" | "vllm" | "airllm";
-export type Quant = "gguf-q4_k_m" | "awq" | "fp16-airllm";
+export type EngineKind = "llamacpp" | "vllm" | "airllm" | "imagegen";
+export type Quant = "gguf-q4_k_m" | "awq" | "fp16-airllm" | "fp16-diffusers";
 export type ToolCallFormat = "hermes" | "qwen" | "llama3" | "none";
 export type ModelStatus =
   | "suggested"
@@ -239,6 +239,30 @@ export interface ManualAddBody {
   auto_download: boolean;
 }
 
+// ── Hub search (GET /api/models/search) ─────────────────────────────────────
+
+/** Which Hub pipeline to search: chat/code models or text-to-image. */
+export type ModelSearchKind = "text" | "image";
+
+export interface ModelSearchResult {
+  hf_repo: string;
+  downloads: number;
+  likes: number;
+  tags: string[];
+  gated: boolean;
+  created_at: string | null;
+  /** Estimated size; 0 = unknown (always 0 for image models). */
+  params_b: number;
+  in_catalog: boolean;
+}
+
+/** POST /api/models/search/add body. */
+export interface SearchAddBody {
+  hf_repo: string;
+  kind: ModelSearchKind;
+  auto_download: boolean;
+}
+
 // ── Global SSE events (orchestrator/app/services/events.py publishers) ──────
 
 export interface ForgeEvent {
@@ -338,6 +362,10 @@ export interface AttachmentMeta {
   kind: AttachmentKind;
   mime: string;
   size_bytes: number;
+  /** True when Forge generated this file (image generation). */
+  generated?: boolean;
+  /** The generation prompt — caption/alt text for generated images. */
+  prompt?: string;
 }
 
 export interface ChatMessage {
@@ -359,6 +387,17 @@ export interface ConversationDetail extends Conversation {
 /** GET /api/chat/status — which models the composer can talk to. */
 export interface ChatStatus {
   serving: Lease[];
+  /** Ready imagegen-lane lease, or null when no image model is serving. */
+  image: Lease | null;
+}
+
+/** POST /api/chat/image response — the generated file plus, for a saved
+ *  conversation, the recorded exchange's message ids. */
+export interface ImageGenerationResult {
+  upload: AttachmentMeta;
+  conversation_id: string | null;
+  user_message_id: number | null;
+  assistant_message_id: number | null;
 }
 
 /** data: {"forge":"done", ...} — final SSE frame of a chat stream. */
