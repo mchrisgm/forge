@@ -51,12 +51,16 @@ async def send_prompt(
     text: str,
     provider_id: str,
     model_id: str,
+    system: str | None = None,
 ) -> dict[str, Any]:
-    """Send a prompt and wait for the agent turn to finish (long poll)."""
-    body = {
+    """Send a prompt and wait for the agent turn to finish (long poll).
+    `system` (PromptInput.system) carries e.g. thinking-level directives."""
+    body: dict[str, Any] = {
         "model": {"providerID": provider_id, "modelID": model_id},
         "parts": [{"type": "text", "text": text}],
     }
+    if system:
+        body["system"] = system
     async with httpx.AsyncClient(timeout=PROMPT_TIMEOUT_S) as http:
         resp = await http.post(f"{base_url}/session/{oc_session_id}/message", json=body)
         resp.raise_for_status()

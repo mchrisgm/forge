@@ -10,10 +10,20 @@ import re
 from typing import Any
 
 from .config import Settings, get_settings
-from .models import Connector, ConnectorKind, EngineKind, ModelEntry
+from .connector_catalog import CATALOG, SKILLS_MCP_PATH, render_block
+from .models import Connector, EngineKind, ModelEntry
 
 OPENCODE_PROVIDER = "forge-local"
-SKILLS_MCP_PATH = "/opt/forge/skills_mcp.py"
+
+__all__ = [
+    "OPENCODE_PROVIDER",
+    "SKILLS_MCP_PATH",
+    "airllm_blocked",
+    "opencode_model_id",
+    "render_mcp_block",
+    "render_opencode_config",
+    "render_opencode_config_json",
+]
 
 
 def opencode_model_id(model: ModelEntry) -> str:
@@ -22,46 +32,31 @@ def opencode_model_id(model: ModelEntry) -> str:
 
 
 def engine_base_url_for(model: ModelEntry, settings: Settings | None = None) -> str:
-    # Local import to keep this module import-light for tests.
-    from .services.engine_manager import engine_base_url
-
-    return engine_base_url(model.engine, settings or get_settings())
+    """Sessions talk to the orchestrator's /v1 model router, never to engine
+    containers directly — the router resolves the request's model slug to
+    whichever GPU lease serves it, so engine placement (and multi-GPU) is
+    invisible to OpenCode."""
+    settings = settings or get_settings()
+    return f"{settings.orchestrator_internal_url}/v1"
 
 
 def render_mcp_block(connectors: list[Connector]) -> dict[str, Any]:
-    enabled = {c.kind: c.enabled for c in connectors}
+    """One MCP entry per connector row: catalog entries (core + integrations)
+    render from their templates with {env:...} secret indirection; custom rows
+    carry their own MCP block in config_json."""
     mcp: dict[str, Any] = {}
-
-    mcp["github"] = {
-        "type": "local",
-        "command": ["github-mcp-server", "stdio"],
-        "environment": {"GITHUB_PERSONAL_ACCESS_TOKEN": "{env:GITHUB_PAT}"},
-        "enabled": bool(enabled.get(ConnectorKind.github, False)),
-    }
-    mcp["fetch"] = {
-        "type": "local",
-        "command": ["uvx", "mcp-server-fetch"],
-        "enabled": bool(enabled.get(ConnectorKind.fetch, True)),
-    }
-    mcp["searxng"] = {
-        "type": "local",
-        "command": ["uvx", "mcp-searxng"],
-        "environment": {"SEARXNG_URL": "http://searxng:8080"},
-        "enabled": bool(enabled.get(ConnectorKind.searxng, True)),
-    }
-    mcp["playwright"] = {
-        "type": "remote",
-        "url": "http://mcp-playwright:8931/mcp",
-        "enabled": bool(enabled.get(ConnectorKind.playwright, True)),
-    }
-    mcp["skills"] = {
-        "type": "local",
-        "command": ["python3", SKILLS_MCP_PATH],
-        # Same {env:...} passthrough pattern as GITHUB_PAT: the value reaches
-        # the stdio subprocess from the container env set at spawn time.
-        "environment": {"FORGE_DISABLED_SKILLS": "{env:FORGE_DISABLED_SKILLS}"},
-        "enabled": bool(enabled.get(ConnectorKind.skills, True)),
-    }
+    for connector in connectors:
+        try:
+            config = json.loads(connector.config_json or "{}")
+        except json.JSONDecodeError:
+            config = {}
+        entry = CATALOG.get(connector.kind)
+        if entry is not None:
+            mcp[connector.kind] = render_block(entry, connector.enabled, config)
+        elif connector.kind.startswith("custom-") and isinstance(config.get("mcp"), dict):
+            block = dict(config["mcp"])
+            block["enabled"] = bool(connector.enabled)
+            mcp[connector.kind] = block
     return mcp
 
 

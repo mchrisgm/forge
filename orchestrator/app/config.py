@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     engine_load_timeout_s: int = 900
     default_ctx: int = 16384
 
+    # GPUs: 0 = auto-detect via NVML at startup (falls back to 1).
+    # vram_budget_gb stays PER GPU.
+    gpu_count: int = 0
+
     # Docker plumbing
     docker_network: str = "forge-internal"
     models_volume: str = "forge-models"
@@ -58,6 +62,10 @@ class Settings(BaseSettings):
     llamacpp_port: int = 8081
     vllm_port: int = 8082
     airllm_port: int = 8083
+
+    # Where session containers reach the orchestrator's /v1 model router
+    # (forge-internal DNS name of the compose service).
+    orchestrator_internal_url: str = "http://orchestrator:8000"
 
     # Optional integrations (no FORGE_ prefix, PLAN §8)
     hf_token: str = Field("", validation_alias=AliasChoices("HF_TOKEN", "FORGE_HF_TOKEN"))

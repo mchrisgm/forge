@@ -15,25 +15,32 @@ router = APIRouter(prefix="/system")
 _nvml_warned = False
 
 
-def _gpu_stats() -> dict | None:
+def _gpu_stats() -> list[dict] | None:
+    """Per-GPU stats for every device NVML can see (multi-GPU aware)."""
     global _nvml_warned
     try:
         import pynvml
 
         pynvml.nvmlInit()
         try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-            name = pynvml.nvmlDeviceGetName(handle)
-            if isinstance(name, bytes):
-                name = name.decode()
-            return {
-                "name": name,
-                "vram_total_gb": round(mem.total / 1024**3, 2),
-                "vram_used_gb": round(mem.used / 1024**3, 2),
-                "utilization_pct": util.gpu,
-            }
+            gpus = []
+            for index in range(pynvml.nvmlDeviceGetCount()):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+                mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                name = pynvml.nvmlDeviceGetName(handle)
+                if isinstance(name, bytes):
+                    name = name.decode()
+                gpus.append(
+                    {
+                        "index": index,
+                        "name": name,
+                        "vram_total_gb": round(mem.total / 1024**3, 2),
+                        "vram_used_gb": round(mem.used / 1024**3, 2),
+                        "utilization_pct": util.gpu,
+                    }
+                )
+            return gpus
         finally:
             pynvml.nvmlShutdown()
     except Exception as exc:
@@ -76,8 +83,10 @@ def stats() -> dict:
         session_containers = []
         docker_ok = False
 
+    gpus = _gpu_stats()
     return {
-        "gpu": _gpu_stats(),
+        "gpu": gpus[0] if gpus else None,  # backcompat single-GPU view
+        "gpus": gpus,
         "ram": {
             "total_gb": round(ram.total / 1024**3, 1),
             "used_gb": round(ram.used / 1024**3, 1),

@@ -13,7 +13,7 @@ from sqlmodel import select
 
 from .auth import ensure_auth_seeded, require_auth
 from .db import get_setting, init_db, write_session
-from .models import Connector, ConnectorKind
+from .models import Connector
 from .routers import (
     auth,
     connectors,
@@ -21,6 +21,7 @@ from .routers import (
     events,
     health,
     models_api,
+    openai_router,
     sessions,
     settings_api,
     skills,
@@ -35,22 +36,16 @@ logging.basicConfig(
 )
 log = logging.getLogger("forge")
 
-# Connectors present by default; github stays off until a PAT is configured.
-DEFAULT_CONNECTORS: dict[ConnectorKind, bool] = {
-    ConnectorKind.github: False,
-    ConnectorKind.fetch: True,
-    ConnectorKind.searxng: True,
-    ConnectorKind.playwright: True,
-    ConnectorKind.skills: True,
-}
-
-
 def seed_connectors() -> None:
+    """One row per catalog entry: core connectors keep their defaults,
+    integrations start disabled until configured from the Connectors page."""
+    from .connector_catalog import CATALOG, DEFAULT_ENABLED
+
     with write_session() as db:
         existing = {c.kind for c in db.exec(select(Connector)).all()}
-        for kind, enabled in DEFAULT_CONNECTORS.items():
+        for kind in CATALOG:
             if kind not in existing:
-                db.add(Connector(kind=kind, enabled=enabled))
+                db.add(Connector(kind=kind, enabled=DEFAULT_ENABLED.get(kind, False)))
 
 
 def reconcile_interrupted_work() -> None:
@@ -158,6 +153,10 @@ def create_app() -> FastAPI:
     api.include_router(protected)
 
     app.include_router(api)
+    # OpenAI-compatible model router for session containers. Unauthenticated
+    # by design and unreachable from outside forge-internal: the gateway only
+    # forwards /api/* and the orchestrator publishes no host ports.
+    app.include_router(openai_router.router)
     return app
 
 
