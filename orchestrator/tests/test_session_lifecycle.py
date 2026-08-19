@@ -27,6 +27,7 @@ from app.models import (
     Session,
     SessionState,
     Task,
+    User,
 )
 from app.services.session_manager import (
     SessionError,
@@ -61,11 +62,14 @@ def get_session_row(session_id: str) -> Session | None:
 
 
 async def spawn_session(
-    model_id: int, repo_url: str | None = None, name: str = "spawned"
+    model_id: int,
+    repo_url: str | None = None,
+    name: str = "spawned",
+    user_id: int | None = None,
 ) -> Session:
     """Seed a Session row the way create() does, then run the real spawn path."""
     settings = get_settings()
-    session = Session(name=name, model_id=model_id, repo_url=repo_url)
+    session = Session(name=name, model_id=model_id, repo_url=repo_url, user_id=user_id)
     session.workspace_path = str(Path(settings.workspaces_dir) / session.id)
     with write_session() as db:
         db.add(session)
@@ -171,6 +175,66 @@ class TestCreateAndSpawn:
             "environment"
         ]
         assert "GITHUB_PAT" not in env
+
+    async def test_spawn_uses_the_session_owners_connectors(self, fake_docker):
+        """Connectors are per-user now: a session owned by alice must ride
+        alice's github token — never bob's, never the legacy NULL row's."""
+        with write_session() as db:
+            alice = User(username="alice")
+            bob = User(username="bob")
+            db.add(alice)
+            db.add(bob)
+            db.flush()
+            alice_id = alice.id
+            for owner, token in [
+                (alice_id, "ghp_alice_token"),
+                (bob.id, "ghp_bob_token"),
+                (None, "ghp_legacy_token"),
+            ]:
+                db.add(
+                    Connector(
+                        user_id=owner,
+                        kind=ConnectorKind.github,
+                        enabled=True,
+                        config_json=json.dumps({"token": token}),
+                    )
+                )
+        model_id = add_model()
+        final = await spawn_session(model_id, user_id=alice_id)
+        assert final.state == SessionState.running, final.last_error
+        env = fake_docker.containers.get(container_name(final.id)).run_kwargs[
+            "environment"
+        ]
+        assert env["GITHUB_PAT"] == "ghp_alice_token"
+
+    async def test_ownerless_session_uses_legacy_null_connectors(self, fake_docker):
+        with write_session() as db:
+            owner = User(username="someone")
+            db.add(owner)
+            db.flush()
+            db.add(
+                Connector(
+                    user_id=owner.id,
+                    kind=ConnectorKind.github,
+                    enabled=True,
+                    config_json=json.dumps({"token": "ghp_owned_token"}),
+                )
+            )
+            db.add(
+                Connector(
+                    user_id=None,
+                    kind=ConnectorKind.github,
+                    enabled=True,
+                    config_json=json.dumps({"token": "ghp_legacy_token"}),
+                )
+            )
+        model_id = add_model()
+        final = await spawn_session(model_id, user_id=None)
+        assert final.state == SessionState.running, final.last_error
+        env = fake_docker.containers.get(container_name(final.id)).run_kwargs[
+            "environment"
+        ]
+        assert env["GITHUB_PAT"] == "ghp_legacy_token"
 
     async def test_spawn_failure_marks_session_error(self, fake_docker):
         fake_docker.containers.fail_run = RuntimeError("image not found")

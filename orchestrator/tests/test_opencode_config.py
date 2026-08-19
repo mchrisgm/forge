@@ -212,19 +212,36 @@ class TestMcpFramework:
         assert render_mcp_block(rows) == {}
 
 
-# ── seeding: one row per catalog entry ──────────────────────────────────────
+# ── seeding: one row per catalog entry, per user ────────────────────────────
+
+
+def _make_user(username: str) -> int:
+    from app.db import write_session
+    from app.models import User
+
+    with write_session() as db:
+        user = User(username=username)
+        db.add(user)
+        db.flush()
+        return user.id
 
 
 class TestSeeding:
-    def test_seed_creates_a_row_for_every_catalog_entry(self, db_ready):
+    def test_on_user_created_seeds_every_catalog_entry(self, db_ready):
         from sqlmodel import select
 
-        from app import main
         from app.db import read_session
+        from app.services.user_service import on_user_created
 
-        main.seed_connectors()
+        user_id = _make_user("seedy")
+        on_user_created(user_id)
         with read_session() as db:
-            rows = {row.kind: row for row in db.exec(select(Connector)).all()}
+            rows = {
+                row.kind: row
+                for row in db.exec(
+                    select(Connector).where(Connector.user_id == user_id)
+                ).all()
+            }
 
         assert set(rows) == set(CATALOG)
         # Core defaults: github off until a PAT is set, the other four on.
@@ -238,23 +255,48 @@ class TestSeeding:
     def test_seed_is_idempotent_and_keeps_user_edits(self, db_ready):
         from sqlmodel import select
 
-        from app import main
         from app.db import read_session, write_session
+        from app.services.user_service import on_user_created
 
-        main.seed_connectors()
+        user_id = _make_user("seedy")
+        on_user_created(user_id)
         with write_session() as db:
             row = db.exec(
-                select(Connector).where(Connector.kind == "github")
+                select(Connector).where(
+                    Connector.kind == "github", Connector.user_id == user_id
+                )
             ).one()
             row.enabled = True
             db.add(row)
 
-        main.seed_connectors()
+        on_user_created(user_id)
         with read_session() as db:
-            rows = db.exec(select(Connector)).all()
+            rows = db.exec(
+                select(Connector).where(Connector.user_id == user_id)
+            ).all()
             github = [r for r in rows if r.kind == "github"]
         assert len(rows) == len(CATALOG)  # no duplicates
         assert len(github) == 1 and github[0].enabled is True
+
+    def test_each_user_gets_their_own_rows(self, db_ready):
+        """Connectors are per-user now: two users hold the same kinds side by
+        side (the old UNIQUE(kind) constraint is gone)."""
+        from sqlmodel import select
+
+        from app.db import read_session
+        from app.services.user_service import on_user_created
+
+        first = _make_user("first")
+        second = _make_user("second")
+        on_user_created(first)
+        on_user_created(second)
+        with read_session() as db:
+            rows = db.exec(select(Connector)).all()
+        by_user: dict[int, set[str]] = {}
+        for row in rows:
+            by_user.setdefault(row.user_id, set()).add(row.kind)
+        assert by_user[first] == set(CATALOG)
+        assert by_user[second] == set(CATALOG)
 
 
 # ── secrets: env indirection only, never literals ───────────────────────────
