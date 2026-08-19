@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+dist/
+dev-dist/
+*.tsbuildinfo
+
+# Env & secrets
+.env
+*.local
+
+# Data volumes (when using bind mounts in dev)
+data/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store

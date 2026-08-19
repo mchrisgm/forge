@@ -1,0 +1,15 @@
+# Minimal SearXNG settings for Forge.
+# `use_default_settings: true` inherits everything else from the image's
+# defaults; we only need the JSON API (for mcp-searxng) and a secret key.
+use_default_settings: true
+
+server:
+  # Overridden by SEARXNG_SECRET env var if set; fine for LAN-only v1.
+  secret_key: "forge-searxng-secret-change-me"
+  limiter: false
+  public_instance: false
+
+search:
+  formats:
+    - html
+    - json

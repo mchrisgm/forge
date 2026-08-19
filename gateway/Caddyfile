@@ -1,0 +1,31 @@
+# Forge gateway — LAN-only, plain HTTP in v1 (PLAN §6.7, §7).
+#
+# Future WAN/VPN slot: put a WireGuard/Tailscale sidecar on forge-edge and
+# swap the site address for a TLS one, e.g.:
+#
+#   forge.example.com {
+#     tls internal            # or your ACME config
+#     ...same handle blocks...
+#   }
+
+:8080 {
+	encode zstd gzip
+
+	handle /api/* {
+		# SSE-friendly: stream responses immediately, no buffering.
+		reverse_proxy orchestrator:8000 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		root * /srv/ui
+		try_files {path} /index.html
+		file_server
+	}
+
+	# Never cache the service-worker shell entrypoints.
+	header /index.html Cache-Control "no-cache"
+	header /sw.js Cache-Control "no-cache"
+	header /manifest.webmanifest Cache-Control "no-cache"
+}
