@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 import { api, ApiError, errorMessage } from "../api/client";
 import type {
   EngineKind,
@@ -9,6 +10,7 @@ import type {
   ToolCallFormat,
 } from "../api/types";
 import {
+  IconChat,
   IconChevronDown,
   IconChevronRight,
   IconDownload,
@@ -100,6 +102,19 @@ function LeaseBanner() {
             {lease.state === "failed" && "Engine failed to load"}
           </p>
         </div>
+        {lease.state === "ready" && (
+          <Link
+            to="/chat"
+            aria-label={`Chat with ${lease.model_name}`}
+            className="shrink-0"
+          >
+            <Button size="sm" variant="primary">
+              <IconChat size={14} />
+              <span className="sm:hidden">Chat</span>
+              <span className="hidden sm:inline">Chat with model</span>
+            </Button>
+          </Link>
+        )}
         <Button
           size="sm"
           variant="secondary"

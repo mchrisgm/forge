@@ -118,8 +118,9 @@ Notes:
 - **vLLM** is the fast lane for ≤14B AWQ models, with
   `--enable-auto-tool-choice` and a per-model tool-call parser.
 - **AirLLM** is the slow lane for over-VRAM models: seconds-to-minutes per
-  token, no tool calling, chat page only — it never appears in the session
-  model picker.
+  token, no tool calling, chat only — it never appears in the session model
+  picker. Talk to it (or any loaded model) via **Chat with model** on the
+  Models page once its lease is ready.
 
 ## Adding models
 

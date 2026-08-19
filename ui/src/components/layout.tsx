@@ -46,8 +46,11 @@ function ConnectionBanner() {
 
 export function AppLayout() {
   const location = useLocation();
-  // The chat composer manages its own bottom spacing inside session detail.
-  const inSessionDetail = /^\/sessions\/[^/]+/.test(location.pathname);
+  // Chat surfaces (session detail + model chat) pin their own composer to the
+  // bottom edge, so they manage bottom spacing and hide the tab bar.
+  const inChatSurface =
+    /^\/sessions\/[^/]+/.test(location.pathname) ||
+    location.pathname === "/chat";
 
   return (
     <div className="min-h-dvh bg-bg">
@@ -91,7 +94,7 @@ export function AppLayout() {
         <main
           className={cx(
             "mx-auto w-full max-w-4xl px-4 pt-safe md:px-8",
-            inSessionDetail ? "pb-4" : "pb-tabbar md:pb-10",
+            inChatSurface ? "pb-4" : "pb-tabbar md:pb-10",
           )}
         >
           <Outlet />
@@ -103,7 +106,7 @@ export function AppLayout() {
         aria-label="Main"
         className={cx(
           "fixed inset-x-0 bottom-0 z-20 border-t border-border bg-surface/95 backdrop-blur md:hidden",
-          inSessionDetail && "hidden",
+          inChatSurface && "hidden",
         )}
       >
         <div className="flex pb-safe">

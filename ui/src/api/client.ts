@@ -207,3 +207,66 @@ export const api = {
       new_password,
     }),
 };
+
+// ── Engine scratch chat (POST /api/engines/chat, OpenAI-compatible) ─────────
+
+export interface ChatCompletionMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+/**
+ * Start a streaming chat completion against the currently loaded engine.
+ * Returns the raw Response (text/event-stream of OpenAI chunk frames ending
+ * with `data: [DONE]`) so callers can consume `response.body` incrementally.
+ * Throws ApiError on HTTP failure — 409 means no engine lease is ready.
+ * An AbortError from `signal` is rethrown untouched.
+ */
+export async function engineChatStream(
+  messages: ChatCompletionMessage[],
+  signal?: AbortSignal,
+  maxTokens?: number,
+): Promise<Response> {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+
+  let resp: Response;
+  try {
+    resp = await fetch("/api/engines/chat", {
+      method: "POST",
+      headers,
+      signal,
+      body: JSON.stringify({
+        messages,
+        stream: true,
+        ...(maxTokens != null ? { max_tokens: maxTokens } : {}),
+      }),
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new ApiError(0, "Network error — is the orchestrator reachable?");
+  }
+
+  if (resp.status === 401) {
+    announceUnauthorized();
+    throw new ApiError(401, "Not authenticated");
+  }
+  if (!resp.ok) {
+    let detail: unknown = null;
+    const text = await resp.text().catch(() => "");
+    if (text) {
+      try {
+        const parsed: unknown = JSON.parse(text);
+        detail =
+          parsed && typeof parsed === "object" && "detail" in (parsed as object)
+            ? (parsed as { detail: unknown }).detail
+            : parsed;
+      } catch {
+        detail = text;
+      }
+    }
+    throw new ApiError(resp.status, detail ?? `HTTP ${resp.status}`);
+  }
+  return resp;
+}

@@ -13,6 +13,7 @@ import { ToastProvider } from "./hooks/toast";
 import { getToken, UNAUTHORIZED_EVENT } from "./lib/auth";
 import Connectors from "./pages/Connectors";
 import Login from "./pages/Login";
+import ModelChat from "./pages/ModelChat";
 import Models from "./pages/Models";
 import More from "./pages/More";
 import SessionDetail from "./pages/SessionDetail";
@@ -69,6 +70,7 @@ const router = createBrowserRouter([
       { path: "sessions", element: <Sessions /> },
       { path: "sessions/:sessionId", element: <SessionDetail /> },
       { path: "models", element: <Models /> },
+      { path: "chat", element: <ModelChat /> },
       { path: "skills", element: <Skills /> },
       { path: "connectors", element: <Connectors /> },
       { path: "system", element: <System /> },

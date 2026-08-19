@@ -12,7 +12,9 @@ import { api, errorMessage } from "../../api/client";
 import {
   eventMessageInfo,
   eventPart,
+  eventPartDelta,
   eventPermission,
+  eventPermissionRemovalId,
   mostRecentOcSession,
   opencode,
   type OcEvent,
@@ -44,7 +46,14 @@ interface ChatState {
 type ChatAction =
   | { type: "reset"; messages: { info: OcMessageInfo; parts: OcPart[] }[] }
   | { type: "info"; info: OcMessageInfo }
-  | { type: "part"; part: OcPart };
+  | { type: "part"; part: OcPart }
+  | {
+      type: "delta";
+      messageID: string;
+      partID: string;
+      field: string;
+      delta: string;
+    };
 
 function partKey(part: OcPart, fallbackIndex: number): string {
   return part.id ?? part.callID ?? `part-${fallbackIndex}`;
@@ -90,11 +99,39 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
       const msg: ChatMessage = {
         ...base,
         partOrder: key in base.parts ? base.partOrder : [...base.partOrder, key],
+        // Spread order matters: a full part.updated snapshot REPLACES any
+        // delta-accumulated fields, so snapshot-then-delta ordering issues
+        // self-heal on the next snapshot.
         parts: { ...base.parts, [key]: { ...base.parts[key], ...action.part } },
       };
       return {
         order: existing ? state.order : [...state.order, messageId],
         byId: { ...state.byId, [messageId]: msg },
+      };
+    }
+    case "delta": {
+      // message.part.delta: append `delta` to the named string field of an
+      // existing part. If the message or part is unknown, drop the fragment —
+      // a later message.part.updated snapshot reconciles the full state.
+      const msg = state.byId[action.messageID];
+      if (!msg) return state;
+      const key =
+        action.partID in msg.parts
+          ? action.partID
+          : msg.partOrder.find((k) => msg.parts[k]?.id === action.partID);
+      if (!key) return state;
+      const part = msg.parts[key];
+      const prev = part[action.field];
+      const next: OcPart = {
+        ...part,
+        [action.field]: (typeof prev === "string" ? prev : "") + action.delta,
+      };
+      return {
+        ...state,
+        byId: {
+          ...state.byId,
+          [action.messageID]: { ...msg, parts: { ...msg.parts, [key]: next } },
+        },
       };
     }
   }
@@ -348,6 +385,11 @@ export default function ChatTab({
 
     const matchesSession = (sid: unknown) => sid == null || sid === ocId;
 
+    // An aborted turn silently drops its pending permission requests, so any
+    // turn-boundary signal clears every card still on screen.
+    const clearAllPermissions = () =>
+      setPermissions((prev) => (Object.keys(prev).length ? {} : prev));
+
     const handleEvent = (event: OcEvent) => {
       const type = typeof event.type === "string" ? event.type : "";
       if (type === "forge.disconnected") {
@@ -355,17 +397,53 @@ export default function ChatTab({
         return;
       }
       if (type.includes("permission")) {
-        const perm = eventPermission(event);
-        if (!perm || !matchesSession(perm.sessionID)) return;
         if (type.includes("replied") || type.includes("removed")) {
+          // permission.replied properties = {sessionID, requestID, reply} —
+          // there is no full permission object to parse here.
+          const props = (event.properties ?? {}) as Record<string, unknown>;
+          if (!matchesSession(props.sessionID)) return;
+          const removedId = eventPermissionRemovalId(event);
+          if (!removedId) return;
           setPermissions((prev) => {
+            if (!(removedId in prev)) return prev;
             const next = { ...prev };
-            delete next[perm.id];
+            delete next[removedId];
             return next;
           });
         } else {
+          const perm = eventPermission(event);
+          if (!perm || !matchesSession(perm.sessionID)) return;
           setPermissions((prev) => ({ ...prev, [perm.id]: perm }));
         }
+        return;
+      }
+      if (type === "message.part.delta") {
+        // Streamed fragment: {sessionID, messageID, partID, field, delta}.
+        const delta = eventPartDelta(event);
+        if (delta && matchesSession(delta.sessionID)) {
+          dispatch({
+            type: "delta",
+            messageID: delta.messageID,
+            partID: delta.partID,
+            field: delta.field,
+            delta: delta.delta,
+          });
+        }
+        return;
+      }
+      if (type.startsWith("session.")) {
+        // Session lifecycle events carry a session (not message) payload —
+        // never let them fall through to the message handlers below.
+        const props = (event.properties ?? {}) as Record<string, unknown>;
+        const info = props.info as Record<string, unknown> | undefined;
+        const sid =
+          props.sessionID ??
+          (info && typeof info.id === "string" ? info.id : undefined);
+        const turnEnded =
+          type === "session.idle" ||
+          type === "session.status" ||
+          type === "session.error";
+        if (turnEnded && matchesSession(sid)) clearAllPermissions();
         return;
       }
       const part = eventPart(event);
@@ -376,6 +454,9 @@ export default function ChatTab({
       const info = eventMessageInfo(event);
       if (info && matchesSession(info.sessionID)) {
         dispatch({ type: "info", info });
+        if (info.role === "assistant" && info.time?.completed != null) {
+          clearAllPermissions();
+        }
       }
     };
 

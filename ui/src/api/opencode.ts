@@ -187,6 +187,36 @@ export function eventPart(event: OcEvent): OcPart | null {
   return part as OcPart;
 }
 
+export interface OcPartDelta {
+  sessionID?: string;
+  messageID: string;
+  partID: string;
+  field: string;
+  delta: string;
+}
+
+/**
+ * Parse a `message.part.delta` event: properties = {sessionID, messageID,
+ * partID, field, delta} where `field` names a string field on the part
+ * (usually "text") and `delta` is the fragment appended to it.
+ */
+export function eventPartDelta(event: OcEvent): OcPartDelta | null {
+  const props = event.properties;
+  if (!props || typeof props !== "object") return null;
+  const p = props as Record<string, unknown>;
+  if (typeof p.messageID !== "string" || typeof p.partID !== "string") {
+    return null;
+  }
+  if (typeof p.delta !== "string") return null;
+  return {
+    sessionID: typeof p.sessionID === "string" ? p.sessionID : undefined,
+    messageID: p.messageID,
+    partID: p.partID,
+    field: typeof p.field === "string" && p.field ? p.field : "text",
+    delta: p.delta,
+  };
+}
+
 export function eventMessageInfo(event: OcEvent): OcMessageInfo | null {
   const props = event.properties;
   if (!props || typeof props !== "object") return null;
@@ -207,9 +237,31 @@ export function eventPermission(event: OcEvent): OcPermission | null {
   return null;
 }
 
-/** Pick the most recently used OpenCode session from a listing. */
+/**
+ * The id of the permission request cleared by a `permission.replied` (or
+ * removed) event. OpenCode 1.18.x sends {sessionID, requestID, reply}; older
+ * builds used {permissionID} or a full nested permission object.
+ */
+export function eventPermissionRemovalId(event: OcEvent): string | null {
+  const props = event.properties;
+  if (props && typeof props === "object") {
+    const p = props as Record<string, unknown>;
+    if (typeof p.requestID === "string") return p.requestID;
+    if (typeof p.permissionID === "string") return p.permissionID;
+  }
+  return eventPermission(event)?.id ?? null;
+}
+
+/**
+ * Pick the most recently used OpenCode session from a listing. Background
+ * tasks run through OpenCode sessions titled exactly "task-<id>" (see
+ * orchestrator task_runner) — those must never hijack the interactive chat.
+ */
 export function mostRecentOcSession(list: OcSession[]): OcSession | null {
-  if (!list.length) return null;
+  const interactive = list.filter(
+    (s) => !(typeof s.title === "string" && s.title.startsWith("task-")),
+  );
+  if (!interactive.length) return null;
   const stamp = (s: OcSession) => s.time?.updated ?? s.time?.created ?? 0;
-  return [...list].sort((a, b) => stamp(b) - stamp(a))[0] ?? null;
+  return [...interactive].sort((a, b) => stamp(b) - stamp(a))[0] ?? null;
 }

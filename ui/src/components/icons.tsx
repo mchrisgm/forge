@@ -242,6 +242,12 @@ export const IconEdit = (p: IconProps) => (
   </Icon>
 );
 
+export const IconChat = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.4-4.6a8 8 0 1 1 15.1-3.9Z" />
+  </Icon>
+);
+
 export const IconFlame = (p: IconProps) => (
   <Icon {...p}>
     <path d="M12 3c1 3-3.5 5-3.5 9a3.5 3.5 0 0 0 7 0c0-1.3-.5-2.3-1-3.2 2.4 1 4 3.3 4 6.2a6.5 6.5 0 0 1-13 0C5.5 8.8 10.5 7.5 12 3Z" />
