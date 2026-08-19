@@ -19,6 +19,16 @@ from .session_manager import opencode_base_url, session_manager
 log = logging.getLogger(__name__)
 
 _running: dict[int, asyncio.Task] = {}
+_task_sessions: dict[int, str] = {}  # task_id -> session_id, for the reaper
+
+
+def inflight_session_ids() -> set[str]:
+    """Sessions with a task currently queued/running — the reaper skips them."""
+    return {
+        _task_sessions[task_id]
+        for task_id, task in _running.items()
+        if not task.done() and task_id in _task_sessions
+    }
 
 
 def _publish(task: Task) -> None:
@@ -63,6 +73,7 @@ async def create_task(session_id: str, prompt: str) -> Task:
     with read_session() as db:
         task = db.get(Task, task_id)
     _publish(task)
+    _task_sessions[task_id] = session_id
     _running[task_id] = asyncio.create_task(_run(task_id))
     return task
 
@@ -124,6 +135,7 @@ async def _run(task_id: int) -> None:
         )
     finally:
         _running.pop(task_id, None)
+        _task_sessions.pop(task_id, None)
 
 
 async def _retry_create(base_url: str, title: str, attempts: int = 10) -> str:

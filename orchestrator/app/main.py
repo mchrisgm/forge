@@ -53,6 +53,30 @@ def seed_connectors() -> None:
                 db.add(Connector(kind=kind, enabled=enabled))
 
 
+def reconcile_interrupted_work() -> None:
+    """An orchestrator restart kills in-flight downloads and tasks; without
+    this, ModelEntry rows sit in 'downloading' and Task rows in 'running'
+    forever. Downloads resume from partial files on the next Download press."""
+    from datetime import UTC, datetime
+
+    from .models import ModelEntry, ModelStatus, Task, TaskState
+
+    with write_session() as db:
+        for entry in db.exec(
+            select(ModelEntry).where(ModelEntry.status == ModelStatus.downloading)
+        ).all():
+            entry.status = ModelStatus.failed
+            entry.note = "orchestrator restarted mid-download — press Download to resume"
+            db.add(entry)
+        for task in db.exec(
+            select(Task).where(Task.state.in_([TaskState.queued, TaskState.running]))  # type: ignore[attr-defined]
+        ).all():
+            task.state = TaskState.failed
+            task.result = "orchestrator restarted while this task was in flight"
+            task.finished_at = datetime.now(UTC)
+            db.add(task)
+
+
 def _registry_trigger() -> CronTrigger:
     from .config import get_settings
 
@@ -86,6 +110,7 @@ async def lifespan(app: FastAPI):
     init_db()
     ensure_auth_seeded()
     seed_connectors()
+    reconcile_interrupted_work()
     bus.bind_loop(asyncio.get_running_loop())
 
     await asyncio.to_thread(engine_manager.reconcile_on_boot)

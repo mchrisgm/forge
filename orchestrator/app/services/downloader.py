@@ -76,13 +76,19 @@ async def _download(model: ModelEntry) -> None:
     model_id = model.id or 0
 
     if model.engine == EngineKind.llamacpp:
-        filename = model.file_path.rsplit("/", 1)[-1] if model.file_path else ""
+        # file_path is the repo-relative GGUF path (subfolders allowed). After
+        # a prior download it may already carry our gguf/<slug>/ prefix —
+        # strip it so re-downloads stay idempotent.
+        prefix = f"gguf/{repo_slug(model.hf_repo)}/"
+        filename = model.file_path or ""
+        if filename.startswith(prefix):
+            filename = filename[len(prefix):]
         if not filename.endswith(".gguf"):
             _set_status(model_id, ModelStatus.failed, note="no GGUF filename set")
             bus.publish("download.failed", {"model_id": model_id, "error": "no GGUF filename"})
             return
         rel_dir = Path("gguf") / repo_slug(model.hf_repo)
-        rel_path = rel_dir / filename
+        rel_path = rel_dir / filename  # hf_hub_download preserves subdirs under local_dir
         expected_filename: str | None = filename
     else:
         rel_dir = Path("hf") / repo_slug(model.hf_repo)

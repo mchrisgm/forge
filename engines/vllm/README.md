@@ -13,7 +13,7 @@ params at 4-bit AWQ with 16k context.
 
 ```
 --model <local /data/models path, or HF repo id> \
---served-model-name <display_name> --host 0.0.0.0 --port 8082 \
+--served-model-name <model-slug> <display_name> --host 0.0.0.0 --port 8082 \
 --quantization awq --max-model-len <ctx, capped at 16384> \
 --gpu-memory-utilization 0.90 \
 --enable-auto-tool-choice --tool-call-parser <parser>   # unless tool_call_format=none

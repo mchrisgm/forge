@@ -143,6 +143,7 @@ async def opencode_proxy(session_id: str, path: str, request: Request):
             finally:
                 await upstream.aclose()
                 await client.aclose()
+                session_manager.touch(session_id)
 
         return StreamingResponse(
             stream(), status_code=upstream.status_code, headers=response_headers,
@@ -154,6 +155,9 @@ async def opencode_proxy(session_id: str, path: str, request: Request):
     finally:
         await upstream.aclose()
         await client.aclose()
+    # Touch again on completion: a long blocking agent turn must count as
+    # activity right up to its end, or the idle reaper undercounts.
+    session_manager.touch(session_id)
     return Response(
         content=content, status_code=upstream.status_code, headers=response_headers,
     )

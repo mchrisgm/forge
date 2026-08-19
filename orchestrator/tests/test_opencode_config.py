@@ -50,7 +50,7 @@ class TestProviderBlock:
         assert set(provider["models"]) == {model_key}
         assert provider["models"][model_key] == {
             "name": "Qwen2.5 Coder 14B Instruct",
-            "tools": True,
+            "tool_call": True,
         }
         assert config["model"] == f"{OPENCODE_PROVIDER}/{model_key}"
 
@@ -78,7 +78,9 @@ class TestProviderBlock:
             make_model(tool_call_format=ToolCallFormat.none), settings=Settings()
         )
         models = config["provider"][OPENCODE_PROVIDER]["models"]
-        assert all(entry["tools"] is False for entry in models.values())
+        assert all(entry["tool_call"] is False for entry in models.values())
+        # And OpenCode's enforced ruleset strips every tool for no-tool models.
+        assert config["tools"] == {"*": False}
 
     @pytest.mark.parametrize(
         "fmt", [ToolCallFormat.hermes, ToolCallFormat.qwen, ToolCallFormat.llama3]
@@ -86,7 +88,8 @@ class TestProviderBlock:
     def test_tools_true_for_real_tool_formats(self, fmt):
         config = render_opencode_config(make_model(tool_call_format=fmt), settings=Settings())
         (entry,) = config["provider"][OPENCODE_PROVIDER]["models"].values()
-        assert entry["tools"] is True
+        assert entry["tool_call"] is True
+        assert "tools" not in config
 
     def test_no_mcp_block_when_connectors_not_provided(self):
         config = render_opencode_config(make_model(), settings=Settings())

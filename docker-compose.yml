@@ -40,6 +40,11 @@ services:
       FORGE_MODELS_VOLUME: ${FORGE_MODELS_VOLUME:-forge-models}
       FORGE_SKILLS_VOLUME: ${FORGE_SKILLS_VOLUME:-forge-skills}
       FORGE_WORKSPACES_VOLUME: ${FORGE_WORKSPACES_VOLUME:-forge-workspaces}
+      # NVML-only GPU visibility for /system/stats (no compute libraries).
+      # Non-exclusive: does not conflict with the engine containers' GPU use.
+      # On a host WITHOUT the NVIDIA toolkit, remove this and the deploy block
+      # below — the UI then shows GPU stats as unavailable.
+      NVIDIA_DRIVER_CAPABILITIES: utility
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock   # ONLY here — sessions never get it (PLAN §1.5)
       - models:/data/models
@@ -47,6 +52,13 @@ services:
       - skills:/data/skills
       - workspaces:/data/workspaces
     networks: [forge-edge, forge-internal]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
       interval: 15s

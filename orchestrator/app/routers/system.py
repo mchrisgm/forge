@@ -12,7 +12,11 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/system")
 
 
+_nvml_warned = False
+
+
 def _gpu_stats() -> dict | None:
+    global _nvml_warned
     try:
         import pynvml
 
@@ -32,7 +36,14 @@ def _gpu_stats() -> dict | None:
             }
         finally:
             pynvml.nvmlShutdown()
-    except Exception:
+    except Exception as exc:
+        if not _nvml_warned:
+            _nvml_warned = True
+            log.warning(
+                "NVML unavailable — GPU stats will be null. On the GPU box the "
+                "orchestrator needs the nvidia runtime with driver capability "
+                "'utility' (see docker-compose.yml). Cause: %s", exc,
+            )
         return None
 
 

@@ -126,6 +126,13 @@ def parse_frontmatter(text: str) -> dict:
     return meta
 
 
+def disabled_skills() -> set:
+    """Skill directory names disabled from the Forge UI — passed by the
+    orchestrator as a comma-separated env var at session spawn."""
+    raw = os.environ.get("FORGE_DISABLED_SKILLS", "")
+    return {name.strip() for name in raw.split(",") if name.strip()}
+
+
 def scan_skills() -> list[dict]:
     """One entry per <skills_root>/<dir>/SKILL.md; never raises."""
     root = skills_root()
@@ -135,8 +142,9 @@ def scan_skills() -> list[dict]:
     except OSError as exc:
         log(f"cannot read skills dir {root}: {exc}")
         return skills
+    disabled = disabled_skills()
     for entry in entries:
-        if entry in (".git",) or entry.startswith("."):
+        if entry in (".git",) or entry.startswith(".") or entry in disabled:
             continue
         skill_dir = os.path.join(root, entry)
         skill_md = os.path.join(skill_dir, "SKILL.md")

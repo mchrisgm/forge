@@ -29,6 +29,13 @@ ENGINE_LABEL = "forge.engine"
 ENGINE_CONTAINER_PREFIX = "forge-engine-"
 
 
+def opencode_model_id_for(model: ModelEntry) -> str:
+    """The model id OpenCode sends in requests — engines must serve it."""
+    from ..opencode_config import opencode_model_id  # lazy: avoids import cycle
+
+    return opencode_model_id(model)
+
+
 class LeaseHeldError(Exception):
     def __init__(self, holder: dict[str, Any]):
         self.holder = holder
@@ -82,6 +89,11 @@ def build_llamacpp_command(model: ModelEntry, settings: Settings) -> list[str]:
     n_layers = model.n_layers or estimate_n_layers(model.params_b)
     ctx = min(model.ctx_max or settings.default_ctx, settings.default_ctx)
     ngl = compute_ngl(model.size_gb, n_layers, ctx, settings.vram_budget_gb)
+    # No --flash-attn flag: llama.cpp changed it from a bare switch to a
+    # value-taking option ([on|off|auto], default auto) in Aug 2025, and the
+    # compose file tracks the rolling server-cuda tag — omitting the flag is
+    # the only form valid on both generations, and the modern default (auto)
+    # already enables FA where supported.
     return [
         "-m", f"/data/models/{model.file_path}",
         "--host", "0.0.0.0",
@@ -90,8 +102,7 @@ def build_llamacpp_command(model: ModelEntry, settings: Settings) -> list[str]:
         "--n-gpu-layers", str(ngl),
         "--parallel", str(settings.llamacpp_slots),
         "--jinja",
-        "--flash-attn",
-        "--alias", model.display_name,
+        "--alias", opencode_model_id_for(model),
     ]
 
 
@@ -106,9 +117,13 @@ def _vllm_parser(model: ModelEntry) -> str:
 def build_vllm_command(model: ModelEntry, settings: Settings) -> list[str]:
     model_path = f"/data/models/{model.file_path}" if model.file_path else model.hf_repo
     ctx = min(model.ctx_max or 16384, 16384)
+    # Serve the slug FIRST: OpenCode sends the provider models-map key (the
+    # slug from opencode_model_id) as the request's model field, and vLLM
+    # 404s any name it does not serve. The display name rides along as an
+    # alias for humans.
     cmd = [
         "--model", model_path,
-        "--served-model-name", model.display_name,
+        "--served-model-name", opencode_model_id_for(model), model.display_name,
         "--host", "0.0.0.0",
         "--port", str(settings.vllm_port),
         "--quantization", "awq",
@@ -135,6 +150,12 @@ class EngineManager:
         self._lease: Lease | None = None
         self._lock = asyncio.Lock()
         self._load_task: asyncio.Task | None = None
+        # Bumped on every load/unload. The blocking container-create thread
+        # checks it after docker returns: if stale (an unload/force-load won
+        # the race while docker was working), it removes its own container —
+        # asyncio.to_thread cancellation cannot stop the thread itself, so
+        # without this a cancelled load leaks a GPU-resident engine.
+        self._generation = 0
 
     @property
     def lease(self) -> Lease | None:
@@ -195,8 +216,12 @@ class EngineManager:
                 base_url=engine_base_url(model.engine, settings),
             )
             self._lease = lease
+            self._generation += 1
+            generation = self._generation
             bus.publish("engine.state", {"lease": lease.as_dict()})
-            self._load_task = asyncio.create_task(self._start_and_healthwait(model, lease))
+            self._load_task = asyncio.create_task(
+                self._start_and_healthwait(model, lease, generation)
+            )
             return lease
 
     async def unload(self) -> None:
@@ -204,6 +229,7 @@ class EngineManager:
             await self._unload_locked()
 
     async def _unload_locked(self) -> None:
+        self._generation += 1
         if self._load_task and not self._load_task.done():
             self._load_task.cancel()
             try:
@@ -219,7 +245,7 @@ class EngineManager:
         for container in docker_util.find_by_label(ENGINE_LABEL):
             docker_util.remove_container(container)
 
-    def _create_container(self, model: ModelEntry) -> Any:
+    def _create_container(self, model: ModelEntry, generation: int) -> Any:
         settings = get_settings()
         self._remove_engine_containers()
         name = engine_container_name(model.engine)
@@ -262,14 +288,22 @@ class EngineManager:
         log.info(
             "starting engine %s: %s", name, shlex.join(command) if command else "(env-configured)"
         )
-        return docker_util.client().containers.run(
+        container = docker_util.client().containers.run(
             image, command=command, environment=env, **common
         )
+        if generation != self._generation:
+            # An unload/force-load superseded this load while docker was
+            # creating the container — clean up our own orphan.
+            docker_util.remove_container(container)
+            raise RuntimeError("engine load superseded by a newer load/unload")
+        return container
 
-    async def _start_and_healthwait(self, model: ModelEntry, lease: Lease) -> None:
+    async def _start_and_healthwait(
+        self, model: ModelEntry, lease: Lease, generation: int
+    ) -> None:
         settings = get_settings()
         try:
-            container = await asyncio.to_thread(self._create_container, model)
+            container = await asyncio.to_thread(self._create_container, model, generation)
         except Exception as exc:
             lease.state = "failed"
             lease.error = f"container start failed: {exc}"

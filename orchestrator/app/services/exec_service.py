@@ -6,9 +6,10 @@ is never interpolated into a shell string: paths are shlex-quoted and file
 contents travel base64-encoded.
 """
 
-import base64
+import io
 import posixpath
-import shlex
+import tarfile
+import time
 from dataclasses import dataclass
 
 from ..models import Session
@@ -17,6 +18,7 @@ from .session_manager import container_name
 
 WORKSPACE = "/workspace"
 MAX_FILE_BYTES = 2 * 1024 * 1024
+SESSION_UID = 1000  # the "forge" user inside session-runner containers
 
 
 class ExecError(Exception):
@@ -100,17 +102,48 @@ def read_file(session: Session, rel_path: str) -> str:
 
 
 def write_file(session: Session, rel_path: str, content: str) -> None:
+    """Write via the Docker copy API (put_archive). Shell-free — content never
+    touches argv (Linux caps a single argv string at ~128 KiB) and there is
+    nothing to quote. Ownership is set to the session's non-root user so the
+    agent can keep editing files the UI wrote."""
     target = safe_workspace_path(rel_path)
-    encoded = base64.b64encode(content.encode()).decode()
-    if len(encoded) > MAX_FILE_BYTES * 2:
+    data = content.encode()
+    if len(data) > MAX_FILE_BYTES:
         raise ExecError("content too large", 413)
-    script = (
-        f"mkdir -p $(dirname {shlex.quote(target)}) && "
-        f"echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(target)}"
-    )
-    code, out = _run_in_container(session, ["sh", "-c", script])
-    if code != 0:
-        raise ExecError(f"write failed: {out.strip()[:300]}", 500)
+
+    arcname = target[len(WORKSPACE) + 1 :] if target != WORKSPACE else ""
+    if not arcname:
+        raise ExecError("path names the workspace root", 400)
+
+    buf = io.BytesIO()
+    now = int(time.time())
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        # Explicit parent-dir entries so ownership/permissions are right even
+        # when the UI writes into a directory that does not exist yet.
+        parts = arcname.split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            dir_info = tarfile.TarInfo("/".join(parts[:i]))
+            dir_info.type = tarfile.DIRTYPE
+            dir_info.mode = 0o755
+            dir_info.uid = dir_info.gid = SESSION_UID
+            dir_info.mtime = now
+            tar.addfile(dir_info)
+        info = tarfile.TarInfo(arcname)
+        info.size = len(data)
+        info.mode = 0o644
+        info.uid = info.gid = SESSION_UID
+        info.mtime = now
+        tar.addfile(info, io.BytesIO(data))
+
+    container = _container(session)
+    if container.status != "running":
+        raise ExecError("session is not running — start it first", 409)
+    try:
+        ok = container.put_archive(WORKSPACE, buf.getvalue())
+    except Exception as exc:
+        raise ExecError(f"write failed: {exc}", 500) from exc
+    if not ok:
+        raise ExecError("write failed", 500)
 
 
 def git(session: Session, args: list[str]) -> tuple[int, str]:

@@ -52,12 +52,16 @@ class TestLlamacppCommand:
         cmd = build_llamacpp_command(model, settings)
 
         assert "--jinja" in cmd
-        assert "--flash-attn" in cmd
+        # llama.cpp made --flash-attn value-taking ([on|off|auto]) in Aug 2025;
+        # the command must omit it entirely to stay valid on the rolling tag.
+        assert "--flash-attn" not in cmd
         assert flag_value(cmd, "-m") == f"/data/models/{model.file_path}"
         assert flag_value(cmd, "--host") == "0.0.0.0"
         assert flag_value(cmd, "--port") == str(settings.llamacpp_port)
         assert flag_value(cmd, "--parallel") == str(settings.llamacpp_slots)
-        assert flag_value(cmd, "--alias") == model.display_name
+        from app.opencode_config import opencode_model_id
+
+        assert flag_value(cmd, "--alias") == opencode_model_id(model)
 
         ngl = int(flag_value(cmd, "--n-gpu-layers"))
         assert 0 < ngl <= model.n_layers
@@ -115,6 +119,19 @@ class TestVllmCommand:
         cmd = self._cmd(fmt)
         assert "--enable-auto-tool-choice" in cmd
         assert flag_value(cmd, "--tool-call-parser") == parser
+
+    def test_serves_the_opencode_slug_first(self):
+        """OpenCode sends the provider models-map key (the slug) as the
+        request's model field; vLLM 404s unserved names — the slug must be a
+        served model name or every session on the fast lane fails."""
+        from app.opencode_config import opencode_model_id
+
+        model = make_model(engine=EngineKind.vllm, file_path="")
+        cmd = build_vllm_command(model, Settings())
+        idx = cmd.index("--served-model-name")
+        served = [cmd[idx + 1], cmd[idx + 2]]
+        assert served[0] == opencode_model_id(model)
+        assert model.display_name in served
 
     def test_none_format_gets_no_tool_flags(self):
         cmd = self._cmd(ToolCallFormat.none)
@@ -186,7 +203,7 @@ def stub_healthwait(monkeypatch):
     """Replace the container-start/healthwait coroutine so lease-arbitration
     tests run instantly and touch neither docker nor HTTP."""
 
-    async def stub(self, model, lease):
+    async def stub(self, model, lease, generation):
         lease.state = "ready"
         lease.container_id = f"stub-{model.id}"
 
@@ -217,7 +234,7 @@ class TestLeaseArbitration:
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def slow_stub(self, model, lease):
+        async def slow_stub(self, model, lease, generation):
             started.set()
             await release.wait()
             lease.state = "ready"
@@ -245,7 +262,7 @@ class TestLeaseArbitration:
     async def test_failed_lease_does_not_block_the_next_load(
         self, manager, monkeypatch
     ):
-        async def failing_stub(self, model, lease):
+        async def failing_stub(self, model, lease, generation):
             lease.state = "failed"
             lease.error = "boom"
 
@@ -254,7 +271,7 @@ class TestLeaseArbitration:
         await asyncio.wait_for(manager._load_task, 5)
         assert manager.lease.state == "failed"
 
-        async def ok_stub(self, model, lease):
+        async def ok_stub(self, model, lease, generation):
             lease.state = "ready"
 
         monkeypatch.setattr(EngineManager, "_start_and_healthwait", ok_stub)

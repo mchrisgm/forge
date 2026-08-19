@@ -153,6 +153,25 @@ class TestCreateAndSpawn:
         # Workspace dir was created on the orchestrator side.
         assert Path(settings.workspaces_dir, final.id).is_dir()
 
+    async def test_pat_not_injected_when_github_connector_disabled(self, fake_docker):
+        """The connector toggle must actually cut access — even with a token
+        stored and an env fallback configured (review finding)."""
+        with write_session() as db:
+            db.add(
+                Connector(
+                    kind=ConnectorKind.github,
+                    enabled=False,
+                    config_json=json.dumps({"token": "ghp_should_not_leak"}),
+                )
+            )
+        model_id = add_model()
+        final = await spawn_session(model_id)
+        assert final.state == SessionState.running, final.last_error
+        env = fake_docker.containers.get(container_name(final.id)).run_kwargs[
+            "environment"
+        ]
+        assert "GITHUB_PAT" not in env
+
     async def test_spawn_failure_marks_session_error(self, fake_docker):
         fake_docker.containers.fail_run = RuntimeError("image not found")
         model_id = add_model()

@@ -56,6 +56,22 @@ def _validate_git_url(git_url: str) -> None:
         raise SkillError("only http(s) git URLs are supported")
 
 
+def _reject_escaping_symlinks(skill_dir: Path, clone_root: Path) -> None:
+    """A malicious repo could ship symlinks to orchestrator files (DB with the
+    JWT signing key and PAT); shutil.copytree dereferences them by default,
+    which would copy those secrets into the session-readable /skills volume.
+    Refuse any symlink that resolves outside the clone."""
+    root = clone_root.resolve()
+    for path in skill_dir.rglob("*"):
+        if path.is_symlink():
+            resolved = path.resolve()
+            if not str(resolved).startswith(str(root) + "/") and resolved != root:
+                raise SkillError(
+                    f"skill contains a symlink escaping the repository: "
+                    f"{path.relative_to(clone_root)}"
+                )
+
+
 def _find_skill_dir(repo_root: Path, subdir: str | None) -> Path:
     if subdir:
         candidate = (repo_root / subdir).resolve()
@@ -102,6 +118,7 @@ def install(git_url: str, subdir: str | None = None) -> Skill:
             raise SkillError("git clone timed out") from exc
 
         skill_dir = _find_skill_dir(clone_dir, subdir)
+        _reject_escaping_symlinks(skill_dir, clone_dir)
         skill_md = (skill_dir / "SKILL.md").read_text(encoding="utf-8", errors="replace")
         meta = parse_frontmatter(skill_md)
         name = str(meta.get("name") or skill_dir.name)
@@ -115,7 +132,12 @@ def install(git_url: str, subdir: str | None = None) -> Skill:
         dest = skills_root / slug
         if dest.exists():
             shutil.rmtree(dest)
-        shutil.copytree(skill_dir, dest, ignore=shutil.ignore_patterns(".git"))
+        # symlinks=True copies links verbatim (intra-repo links keep working,
+        # anything else dangles harmlessly inside the read-only volume) instead
+        # of dereferencing them into the shared volume.
+        shutil.copytree(
+            skill_dir, dest, symlinks=True, ignore=shutil.ignore_patterns(".git")
+        )
 
     skill = Skill(name=name, description=description, source_url=git_url, path=str(dest))
     with write_session() as db:

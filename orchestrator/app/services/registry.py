@@ -119,7 +119,14 @@ def _find_gguf(
         ggufs = [
             s
             for s in (info.siblings or [])
-            if s.rfilename.lower().endswith(".gguf") and s.size
+            if s.rfilename.lower().endswith(".gguf")
+            and s.size
+            # Split quants (-00001-of-00003.gguf): a single part is unloadable
+            # and its lone size would poison lane assignment; skip them (their
+            # total exceeds the offload budget anyway). Also skip multimodal
+            # projector files.
+            and not re.search(r"-\d{5}-of-\d{5}\.gguf$", s.rfilename.lower())
+            and not s.rfilename.rsplit("/", 1)[-1].lower().startswith("mmproj")
         ]
         if not ggufs:
             continue

@@ -159,12 +159,28 @@ class SessionManager:
         }
         if session.repo_url:
             env["FORGE_REPO_URL"] = session.repo_url
+        # The PAT reaches a session ONLY while the GitHub connector is enabled —
+        # the toggle must actually cut access (env fallback included).
         github = next((c for c in connectors if c.kind == ConnectorKind.github), None)
         if github and github.enabled:
             token = json.loads(github.config_json or "{}").get("token", "")
-            env["GITHUB_PAT"] = token or settings.github_pat
-        elif settings.github_pat:
-            env["GITHUB_PAT"] = settings.github_pat
+            pat = token or settings.github_pat
+            if pat:
+                env["GITHUB_PAT"] = pat
+
+        # Disabled skills are filtered out by the skills MCP server inside the
+        # container (the /skills volume mount itself is shared and read-only).
+        from sqlmodel import select as sql_select
+
+        from ..models import Skill
+
+        with read_session() as db:
+            disabled = [
+                Path(s.path).name
+                for s in db.exec(sql_select(Skill).where(Skill.enabled == False)).all()  # noqa: E712
+            ]
+        if disabled:
+            env["FORGE_DISABLED_SKILLS"] = ",".join(sorted(disabled))
 
         mounts = [
             docker.types.Mount(target="/workspace", source=host_ws, type="bind"),
@@ -299,8 +315,15 @@ class SessionManager:
             sessions = list(
                 db.exec(select(Session).where(Session.state == SessionState.running)).all()
             )
+        # Sessions with a task still in flight are active regardless of
+        # last_active_at (a long agent turn does not touch the timestamp).
+        from .task_runner import inflight_session_ids
+
+        busy = inflight_session_ids()
         reaped = 0
         for session in sessions:
+            if session.id in busy:
+                continue
             last = session.last_active_at
             if last.tzinfo is None:
                 last = last.replace(tzinfo=UTC)

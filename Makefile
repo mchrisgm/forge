@@ -8,6 +8,10 @@ help: ## Show this help
 
 up: ## Build and start the full stack (gateway on :8080)
 	$(COMPOSE) up -d --build
+	# Profile-gated images are invisible to plain `up` — build them explicitly
+	# so the orchestrator can spawn sessions/engines from them.
+	$(COMPOSE) --profile build-only build session-runner
+	$(COMPOSE) --profile engines build airllm
 
 down: ## Stop the stack (volumes are kept)
 	$(COMPOSE) down --remove-orphans
@@ -35,6 +39,7 @@ seed: ## Insert the seed model catalog into the orchestrator DB
 	$(COMPOSE) exec orchestrator python /app/scripts/seed_models.py
 
 dev: ## Start with dev overrides (orchestrator --reload, UI hot reload on :5173)
+	$(COMPOSE) --profile build-only build session-runner
 	$(COMPOSE_DEV) up --build
 
 ui-build: ## Build the PWA bundle locally

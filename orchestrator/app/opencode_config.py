@@ -57,6 +57,9 @@ def render_mcp_block(connectors: list[Connector]) -> dict[str, Any]:
     mcp["skills"] = {
         "type": "local",
         "command": ["python3", SKILLS_MCP_PATH],
+        # Same {env:...} passthrough pattern as GITHUB_PAT: the value reaches
+        # the stdio subprocess from the container env set at spawn time.
+        "environment": {"FORGE_DISABLED_SKILLS": "{env:FORGE_DISABLED_SKILLS}"},
         "enabled": bool(enabled.get(ConnectorKind.skills, True)),
     }
     return mcp
@@ -69,6 +72,7 @@ def render_opencode_config(
 ) -> dict[str, Any]:
     settings = settings or get_settings()
     model_id = opencode_model_id(model)
+    supports_tools = model.tool_call_format.value != "none"
     config: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
         "provider": {
@@ -79,13 +83,19 @@ def render_opencode_config(
                 "models": {
                     model_id: {
                         "name": model.display_name,
-                        "tools": model.tool_call_format.value != "none",
+                        # OpenCode's model-capability key is tool_call (a bare
+                        # "tools" key is silently ignored by its schema).
+                        "tool_call": supports_tools,
                     }
                 },
             }
         },
         "model": f"{OPENCODE_PROVIDER}/{model_id}",
     }
+    if not supports_tools:
+        # Belt and suspenders: OpenCode enforces tool stripping through the
+        # permission/tools ruleset, not the capability flag alone.
+        config["tools"] = {"*": False}
     if connectors is not None:
         config["mcp"] = render_mcp_block(connectors)
     return config

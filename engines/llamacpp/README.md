@@ -11,8 +11,7 @@ EngineManager starts/stops the container; compose never does.
 
 ```
 llama-server -m /data/models/<file_path> --host 0.0.0.0 --port 8081 \
-  -c <ctx> --n-gpu-layers <ngl> --parallel <slots> \
-  --jinja --flash-attn --alias <display_name>
+  -c <ctx> --n-gpu-layers <ngl> --parallel <slots> --jinja --alias <model-slug>
 ```
 
 - `<ctx>` = `min(model.ctx_max, FORGE_DEFAULT_CTX)` (default 16384).
@@ -22,7 +21,8 @@ llama-server -m /data/models/<file_path> --host 0.0.0.0 --port 8081 \
   layers offload to RAM (32 GB cap, PLAN §2).
 - `--jinja` enables the model's chat template so OpenAI-style tool calling
   works through OpenCode.
-- `--alias` makes `/v1/models` report the catalog display name.
+- `--alias` makes `/v1/models` report the OpenCode model slug (`opencode_model_id`), so the id OpenCode sends always matches.
+- No `--flash-attn` flag: llama.cpp made it value-taking (`[on|off|auto]`, default `auto`) in Aug 2025; omitting it is valid on every image generation and the modern default already enables FA where supported.
 
 ## Slots vs context (PLAN §6.2)
 
