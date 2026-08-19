@@ -286,10 +286,21 @@ class EngineManager:
                 gpu_ids = [int(g) for g in (labels.get(GPU_LABEL) or "0").split(",")]
             except ValueError:
                 gpu_ids = [0]
+            model_id = int(labels.get("forge.model_id", 0) or 0)
+            model_slug = labels.get("forge.model_slug", "")
+            if not model_slug and model_id:
+                # Containers started by pre-multi-GPU builds carry no slug
+                # label; without it the /v1 router 404s every session request.
+                from ..db import read_session
+
+                with read_session() as db:
+                    model = db.get(ModelEntry, model_id)
+                if model is not None:
+                    model_slug = opencode_model_id_for(model)
             lease = Lease(
-                model_id=int(labels.get("forge.model_id", 0) or 0),
+                model_id=model_id,
                 model_name=labels.get("forge.model_name", "unknown"),
-                model_slug=labels.get("forge.model_slug", ""),
+                model_slug=model_slug,
                 engine=engine,
                 gpu_ids=gpu_ids,
                 state="ready",
@@ -330,11 +341,16 @@ class EngineManager:
             self._leases = {
                 i: lease for i, lease in self._leases.items() if lease.state != "failed"
             }
-            # A model already serving is never loaded twice.
+            # A model already serving is never loaded twice — matched by id,
+            # not slug. Two DIFFERENT models whose display names slugify
+            # identically would collide in the /v1 router, so that case is a
+            # hard 409 rather than silently serving the wrong model.
             slug = opencode_model_id_for(model)
             for lease in self._leases.values():
-                if lease.model_slug == slug:
+                if lease.model_id == (model.id or 0):
                     return lease
+                if lease.model_slug == slug:
+                    raise LeaseHeldError([lease.as_dict()])
 
             gpus = self._pick_gpus(gpu_index, gpu_count)
             if gpus is None:

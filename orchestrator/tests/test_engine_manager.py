@@ -382,12 +382,24 @@ class TestMultiGpu:
             )
         await settle(manager2)
 
-    async def test_same_slug_returns_existing_lease(self, manager2, stub_healthwait):
+    async def test_same_model_returns_existing_lease(self, manager2, stub_healthwait):
         model = make_model(id=1)
         first = await manager2.load(model)
-        again = await manager2.load(make_model(id=1))  # same display name -> same slug
+        again = await manager2.load(make_model(id=1))  # same model id
         assert again is first
         assert len(manager2._leases) == 1  # no second GPU claimed
+        await settle(manager2)
+
+    async def test_slug_collision_between_different_models_is_409(
+        self, manager2, stub_healthwait
+    ):
+        """Two DIFFERENT models slugifying identically must never be absorbed
+        into one lease — the /v1 router routes by slug, so a collision would
+        silently serve the wrong model (review finding)."""
+        await manager2.load(make_model(id=1, display_name="Foo Bar"))
+        with pytest.raises(LeaseHeldError):
+            await manager2.load(make_model(id=2, display_name="Foo-Bar"))
+        assert len(manager2._leases) == 1
         await settle(manager2)
 
     async def test_unload_single_gpu_releases_only_that_gpu(
@@ -541,3 +553,41 @@ class TestHealthwait:
         assert "timed out" in lease.error
         (container,) = fake_docker.containers.run_calls
         assert container.removed is True
+
+
+class TestReconcileOnBoot:
+    async def test_legacy_container_without_slug_label_resolves_slug_from_db(
+        self, fake_docker, db_ready
+    ):
+        """Engines started by pre-multi-GPU builds carry no forge.model_slug
+        label; adoption must recover the slug from the catalog or every new
+        session 404s at the /v1 router until a manual reload (review finding)."""
+        from app.db import read_session
+        from app.opencode_config import opencode_model_id
+        from app.services.engine_manager import EngineManager
+        from tests.conftest import add_model
+
+        model_id = add_model(display_name="Qwen3 Coder 30B A3B")
+        with read_session() as db:
+            model = db.get(ModelEntry, model_id)
+            expected_slug = opencode_model_id(model)
+
+        fake_docker.containers.run(
+            "ghcr.io/ggml-org/llama.cpp:server-cuda",
+            name="forge-engine-llamacpp",
+            labels={
+                "forge.engine": "llamacpp",
+                "forge.model_id": str(model_id),
+                "forge.model_name": "Qwen3 Coder 30B A3B",
+                # legacy: no forge.model_slug, no forge.gpus
+            },
+        )
+
+        manager = EngineManager()
+        manager._gpu_count = 1
+        manager.reconcile_on_boot()
+
+        lease = manager.lease
+        assert lease is not None and lease.state == "ready"
+        assert lease.model_slug == expected_slug
+        assert lease.gpu_ids == [0]

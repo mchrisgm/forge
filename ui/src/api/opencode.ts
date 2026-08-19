@@ -262,7 +262,9 @@ export function eventPermissionRemovalId(event: OcEvent): string | null {
  */
 export function mostRecentOcSession(list: OcSession[]): OcSession | null {
   const interactive = list.filter(
-    (s) => !(typeof s.title === "string" && s.title.startsWith("task-")),
+    // Hide ONLY the task runner's own sessions (titled exactly "task-<id>");
+    // a user session legitimately named "task-…" must keep its chat thread.
+    (s) => !(typeof s.title === "string" && /^task-\d+$/.test(s.title)),
   );
   if (!interactive.length) return null;
   const stamp = (s: OcSession) => s.time?.updated ?? s.time?.created ?? 0;
