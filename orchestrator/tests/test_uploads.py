@@ -280,3 +280,76 @@ class TestFilesApi:
     def test_upload_requires_auth(self, api):
         resp = api.post("/api/files", files={"file": ("a.txt", b"hi", "text/plain")})
         assert resp.status_code == 401
+
+
+# ── generated files (chat image generation) ─────────────────────────────────
+
+
+class TestSaveGenerated:
+    def test_png_magic_sets_mime_kind_and_slugged_filename(self):
+        user_id = make_user()
+        upload = uploads.save_generated(user_id, PNG, "A red FOX  jumps!")
+        assert upload.mime == "image/png"
+        assert upload.kind == "image"
+        assert upload.filename == "a-red-fox-jumps.png"
+        assert upload.generated is True
+        assert upload.prompt == "A red FOX  jumps!"
+        assert upload.size_bytes == len(PNG)
+        path = Path(upload.path)
+        assert path.read_bytes() == PNG
+        assert path.parent == Path(config.get_settings().uploads_dir) / str(user_id)
+
+    def test_sniffed_magic_beats_the_declared_mime(self):
+        upload = uploads.save_generated(make_user(), JPEG, "a fox", mime="image/png")
+        assert upload.mime == "image/jpeg"
+        assert upload.filename.endswith(".jpg")
+
+    def test_unknown_bytes_get_a_bin_extension(self):
+        upload = uploads.save_generated(make_user(), b"\x00\x01data", "blob", mime="")
+        assert upload.kind == "other"
+        assert upload.filename == "blob.bin"
+
+    def test_symbol_only_prompt_falls_back_to_generated(self):
+        upload = uploads.save_generated(make_user(), PNG, "???!!!")
+        assert upload.filename == "generated.png"
+
+    def test_long_prompts_truncate_stem_and_stored_prompt(self):
+        upload = uploads.save_generated(make_user(), PNG, "x" * 3000)
+        assert upload.filename == "x" * 48 + ".png"
+        assert len(upload.prompt) == 2000
+
+    def test_empty_data_is_502(self):
+        with pytest.raises(HTTPException) as excinfo:
+            uploads.save_generated(make_user(), b"", "a fox")
+        assert excinfo.value.status_code == 502
+
+    def test_oversize_generation_is_502(self, monkeypatch):
+        monkeypatch.setenv("FORGE_UPLOAD_MAX_MB", "1")
+        config.get_settings.cache_clear()
+        user_id = make_user()
+        with pytest.raises(HTTPException) as excinfo:
+            uploads.save_generated(user_id, PNG + b"\x00" * 1024 * 1024, "big")
+        assert excinfo.value.status_code == 502
+        # Nothing was stored for the rejected generation.
+        user_dir = Path(config.get_settings().uploads_dir) / str(user_id)
+        assert not user_dir.exists() or list(user_dir.iterdir()) == []
+
+    def test_served_to_the_owner_and_hidden_from_others(
+        self, api, auth_headers, second_user_headers
+    ):
+        owner_id = api.get("/api/users/me", headers=auth_headers).json()["id"]
+        upload = uploads.save_generated(owner_id, PNG, "a fox")
+
+        fetched = api.get(f"/api/files/{upload.id}", headers=auth_headers)
+        assert fetched.status_code == 200
+        assert fetched.content == PNG
+        assert fetched.headers["content-type"] == "image/png"
+        assert [f["id"] for f in api.get("/api/files", headers=auth_headers).json()] == [
+            upload.id
+        ]
+
+        assert (
+            api.get(f"/api/files/{upload.id}", headers=second_user_headers).status_code
+            == 404
+        )
+        assert api.get("/api/files", headers=second_user_headers).json() == []
