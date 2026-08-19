@@ -228,6 +228,18 @@ class SessionManager:
             ),
         ]
 
+        # Fail fast with a fixable message when the session image was never
+        # built (fresh box, `docker compose up` without `make up`).
+        try:
+            docker_util.client().images.get(settings.session_image)
+        except docker.errors.ImageNotFound:
+            raise SessionError(
+                f"session image '{settings.session_image}' is not built on this "
+                "host — run `make up` (or: docker compose --profile build-only "
+                "build session-runner), then start the session again",
+                503,
+            ) from None
+
         # Replace any stale container with the same name (e.g. after error retry)
         try:
             stale = docker_util.client().containers.get(container_name(session_id))

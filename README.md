@@ -97,21 +97,36 @@ Different hardware? Adjust `FORGE_VRAM_BUDGET_GB` and
 
 ```bash
 git clone <your-forge-repo> forge && cd forge
-cp .env.example .env
-# optional: set FORGE_SECRET_KEY (openssl rand -hex 32)
 make up
 ```
 
-That's the whole setup: on first boot the orchestrator initializes the
-database, seeds the starter model catalog, and waits for you. Open
-`http://<host-ip>:8080` from any device on your LAN — the **setup wizard**
-asks you to create the first profile (it becomes the admin), and from then on
-anyone on the LAN can visit the same URL and register their own profile. On
-your phone, use the browser's **"Add to Home Screen" / "Install app"** — the
-UI is an installable PWA with a mobile-first layout.
+That's the whole setup — no manual `.env` step. `make up`:
+
+1. runs a **preflight check** (`scripts/preflight.sh`): docker + compose v2
+   are hard requirements with actionable messages; no GPU, low disk, or no
+   KVM only warn;
+2. creates `.env` from `.env.example` on first run and generates
+   `SEARXNG_SECRET` into it (idempotent — an existing `.env` is left alone);
+3. auto-includes the **GPU overlay** (`docker-compose.gpu.yml`) when
+   `nvidia-smi` is present — on a **CPU-only box** the stack comes up cleanly
+   with plain compose and GPU stats simply show unavailable;
+4. builds the session-runner and locally-built engine images, and prefetches
+   the big llama.cpp/vLLM engine images (skip with `FORGE_SKIP_PULL=1`).
+
+On first boot the orchestrator initializes the database, **seeds the starter
+model catalog automatically** (`make seed` exists only for re-seeding), and
+waits for you. Open `http://<host-ip>:8080` from any device on your LAN — the
+**setup wizard** asks you to create the first profile (it becomes the admin),
+and from then on anyone on the LAN can visit the same URL and register their
+own profile. On your phone, use the browser's **"Add to Home Screen" /
+"Install app"** — the UI is an installable PWA with a mobile-first layout.
+
+The optional **sandbox lane** (hardware-isolated microVMs for the "run this
+code" tool) is not built by `make up`: it needs `/dev/kvm` on the host — run
+`make sandbox` to opt in.
 
 `make help` lists all targets (`up`, `down`, `logs`, `seed`, `smoke`, `test`,
-`dev`, `clean`).
+`dev`, `sandbox`, `clean`).
 
 ## First run
 
@@ -312,6 +327,19 @@ service needs to change.
 
 ## Troubleshooting
 
+- **`make up` fails at preflight** — only missing docker / an unreachable
+  daemon / missing compose v2 abort the run, and each FAIL line names the
+  fix. A missing GPU or NVIDIA container runtime is a **warning**, not a
+  failure: the stack continues in CPU-only mode (engine loads need a GPU).
+  Re-run the checks any time with `./scripts/preflight.sh`.
+- **Sessions or engines fail with "image ... is not built"** — the
+  session-runner / airllm / imagegen images are built by `make up` (they hide
+  behind compose profiles, so a raw `docker compose up` skips them). Run
+  `make up`, or build them directly: `docker compose --profile build-only
+  build session-runner` and `docker compose --profile engines build airllm
+  imagegen`. The System page (and `GET /api/system/stats` →
+  `missing_images`) shows which are absent; the first llama.cpp/vLLM load
+  pulls its image automatically if the prefetch was skipped.
 - **Engine fails to load / VRAM OOM** — the healthwait treats an engine
   container exit as a failed load: the lease auto-releases and the engine's
   log tail surfaces in the UI (Models/System) and in `GET /api/engines` under
@@ -321,9 +349,10 @@ service needs to change.
   after `FORGE_SESSION_IDLE_MIN` (default 120) to free resources. Restart it:
   Sessions page → **Start** (or `POST /api/sessions/{id}/start`). The
   workspace volume persists, and OpenCode reloads its session state from it.
-- **`make smoke` says "no ready model"** — run `make seed`, download a model
-  (UI or `POST /api/models/{id}/download`), and re-run. `SMOKE_SKIP_MODEL=1
-  ./scripts/smoke.sh` accepts an infra-only pass.
+- **`make smoke` says "no ready model"** — download a model (UI or `POST
+  /api/models/{id}/download`) and re-run; the catalog is seeded automatically
+  on first boot, so `make seed` is only needed after wiping the DB.
+  `SMOKE_SKIP_MODEL=1 ./scripts/smoke.sh` accepts an infra-only pass.
 - **Tool calls are flaky** — open the model's detail view: each catalog entry
   records a `tool_call_format` and a tool-reliability note. Prefer the seeded
   Qwen coder models for agentic work; gpt-oss-20b is seeded chat-only.

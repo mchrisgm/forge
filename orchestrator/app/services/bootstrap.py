@@ -17,6 +17,11 @@ from ..db import read_session
 
 log = logging.getLogger(__name__)
 
+# Locally-built images the orchestrator spawns containers from that were
+# missing at boot — populated by check_required_images() and exposed through
+# GET /api/system/stats as `missing_images` so the UI can show a setup warning.
+missing_images: list[str] = []
+
 
 def seed_model_catalog_if_empty() -> int:
     """Insert the curated starter catalog on a fresh install so the Models
@@ -45,6 +50,46 @@ def seed_model_catalog_if_empty() -> int:
     return created
 
 
+def check_required_images() -> list[str]:
+    """Check that the images the orchestrator spawns containers from exist
+    (session-runner + the locally-built engine lanes). Purely advisory: a
+    missing image logs ONE prominent warning naming the exact build commands
+    and is surfaced via /api/system/stats — the stack still boots."""
+    import docker
+
+    from ..config import get_settings
+    from . import docker_util
+
+    settings = get_settings()
+    required = [settings.session_image, settings.airllm_image, settings.imagegen_image]
+    missing: list[str] = []
+    try:
+        client = docker_util.client()
+        for image in dict.fromkeys(required):  # dedupe, keep order
+            try:
+                client.images.get(image)
+            except docker.errors.ImageNotFound:
+                missing.append(image)
+    except Exception as exc:  # daemon unreachable (tests, degraded host)
+        log.debug("image presence check skipped — docker unavailable: %s", exc)
+        missing_images[:] = []
+        return []
+
+    missing_images[:] = missing
+    if missing:
+        log.warning(
+            "════════════════════════════════════════════════════════════\n"
+            "  Missing local images: %s\n"
+            "  Sessions/engines using them will fail to start until built.\n"
+            "  Fix: run `make up` (builds all of them), or individually:\n"
+            "    docker compose --profile build-only build session-runner\n"
+            "    docker compose --profile engines build airllm imagegen\n"
+            "════════════════════════════════════════════════════════════",
+            ", ".join(missing),
+        )
+    return missing
+
+
 def first_run_banner() -> None:
     if user_count() == 0:
         log.info(
@@ -58,4 +103,5 @@ def first_run_banner() -> None:
 
 def run() -> None:
     seed_model_catalog_if_empty()
+    check_required_images()
     first_run_banner()
