@@ -63,8 +63,9 @@ async def generate_local(prompt: str, size: str) -> tuple[bytes, str]:
         )
     try:
         async with httpx.AsyncClient(timeout=GENERATION_TIMEOUT) as client:
+            # lease.base_url already ends in /v1 (see engine_base_url).
             response = await client.post(
-                f"{lease.base_url}/v1/images/generations",
+                f"{lease.base_url}/images/generations",
                 json={
                     "prompt": prompt,
                     "n": 1,
