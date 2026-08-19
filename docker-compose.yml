@@ -1,0 +1,161 @@
+name: forge
+
+services:
+  gateway:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "8080:8080"          # bound on 0.0.0.0 for LAN access (LAN-only threat model, PLAN §7)
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ui-dist:/srv/ui:ro
+      - caddy-data:/data
+    networks: [forge-edge]
+    depends_on:
+      ui:
+        condition: service_completed_successfully
+      orchestrator:
+        condition: service_started
+
+  # Builds the PWA and copies the bundle into the shared ui-dist volume, then exits.
+  ui:
+    build: ./ui
+    restart: "no"
+    volumes:
+      - ui-dist:/srv/ui
+    command: ["sh", "-c", "rm -rf /srv/ui/* && cp -r /app/dist/. /srv/ui/"]
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: orchestrator/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      FORGE_DB_PATH: ${FORGE_DB_PATH:-/data/db/forge.db}
+      FORGE_MODELS_DIR: ${FORGE_MODELS_DIR:-/data/models}
+      FORGE_SKILLS_DIR: ${FORGE_SKILLS_DIR:-/data/skills}
+      FORGE_WORKSPACES_DIR: ${FORGE_WORKSPACES_DIR:-/data/workspaces}
+      FORGE_DOCKER_NETWORK: ${FORGE_DOCKER_NETWORK:-forge-internal}
+      FORGE_MODELS_VOLUME: ${FORGE_MODELS_VOLUME:-forge-models}
+      FORGE_SKILLS_VOLUME: ${FORGE_SKILLS_VOLUME:-forge-skills}
+      FORGE_WORKSPACES_VOLUME: ${FORGE_WORKSPACES_VOLUME:-forge-workspaces}
+      # NVML-only GPU visibility for /system/stats (no compute libraries).
+      # Non-exclusive: does not conflict with the engine containers' GPU use.
+      # On a host WITHOUT the NVIDIA toolkit, remove this and the deploy block
+      # below — the UI then shows GPU stats as unavailable.
+      NVIDIA_DRIVER_CAPABILITIES: utility
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # ONLY here — sessions never get it (PLAN §1.5)
+      - models:/data/models
+      - db:/data/db
+      - skills:/data/skills
+      - workspaces:/data/workspaces
+    networks: [forge-edge, forge-internal]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  searxng:
+    image: searxng/searxng:2026.8.17-374939b88
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - searxng-config:/etc/searxng/data
+    networks: [forge-internal]
+
+  mcp-playwright:
+    image: mcr.microsoft.com/playwright/mcp:v0.0.49
+    restart: unless-stopped
+    command: ["--host", "0.0.0.0", "--port", "8931", "--headless", "--isolated"]
+    networks: [forge-internal]
+
+  # ── Engine lanes ────────────────────────────────────────────────────────────
+  # Defined under the "engines" profile so `docker compose up` never starts
+  # them. The orchestrator's EngineManager starts exactly ONE at a time via the
+  # docker socket, with per-model flags (PLAN §2, §6.2). These entries document
+  # the images and let `docker compose --profile engines pull` prefetch them.
+  llamacpp:
+    profiles: ["engines"]
+    image: ${FORGE_LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    volumes:
+      - models:/data/models
+    networks: [forge-internal]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  vllm:
+    profiles: ["engines"]
+    image: ${FORGE_VLLM_IMAGE:-vllm/vllm-openai:v0.10.1}
+    volumes:
+      - models:/data/models
+    networks: [forge-internal]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  airllm:
+    profiles: ["engines"]
+    build: ./engines/airllm
+    image: ${FORGE_AIRLLM_IMAGE:-forge-airllm}
+    volumes:
+      - models:/data/models
+    networks: [forge-internal]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Built here so `make up` produces the image the orchestrator spawns
+  # sessions from; never started by compose itself.
+  session-runner:
+    profiles: ["build-only"]
+    build: ./session-runner
+    image: ${FORGE_SESSION_IMAGE:-forge-session-runner}
+
+networks:
+  forge-edge:
+    name: forge-edge
+  forge-internal:
+    name: forge-internal
+    # NOT `internal: true` — sessions need outbound for git/pip/npm (PLAN §4)
+
+volumes:
+  models:
+    name: forge-models
+  db:
+    name: forge-db
+  skills:
+    name: forge-skills
+  workspaces:
+    name: forge-workspaces
+  searxng-config:
+    name: forge-searxng-config
+  caddy-data:
+    name: forge-caddy-data
+  ui-dist:
+    name: forge-ui-dist
