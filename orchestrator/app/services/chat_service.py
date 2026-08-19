@@ -166,6 +166,11 @@ async def stream_completion(
 ) -> AsyncIterator[str]:
     """Yield upstream SSE frames verbatim while accumulating assistant text
     into `collected` (joined by the caller after the stream ends)."""
+    from . import routing
+
+    # Chain through the headroom compression proxy when it is up (the model
+    # slug in the body survives the hop and resolves at /v1-direct).
+    base_url = await routing.completion_base_url(base_url)
     body = {"model": model_slug, "messages": messages, "stream": True}
     timeout = httpx.Timeout(connect=10, read=None, write=30, pool=10)
     async with httpx.AsyncClient(timeout=timeout) as http:

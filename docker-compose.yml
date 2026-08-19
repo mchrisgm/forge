@@ -30,7 +30,12 @@ services:
       context: .
       dockerfile: orchestrator/Dockerfile
     restart: unless-stopped
-    env_file: .env
+    # Optional: `make up` creates .env from .env.example, but a raw
+    # `docker compose up` must not die when it is absent (all interpolations
+    # below carry :-defaults).
+    env_file:
+      - path: .env
+        required: false
     environment:
       FORGE_DB_PATH: ${FORGE_DB_PATH:-/data/db/forge.db}
       FORGE_MODELS_DIR: ${FORGE_MODELS_DIR:-/data/models}
@@ -40,11 +45,9 @@ services:
       FORGE_MODELS_VOLUME: ${FORGE_MODELS_VOLUME:-forge-models}
       FORGE_SKILLS_VOLUME: ${FORGE_SKILLS_VOLUME:-forge-skills}
       FORGE_WORKSPACES_VOLUME: ${FORGE_WORKSPACES_VOLUME:-forge-workspaces}
-      # NVML-only GPU visibility for /system/stats (no compute libraries).
-      # Non-exclusive: does not conflict with the engine containers' GPU use.
-      # On a host WITHOUT the NVIDIA toolkit, remove this and the deploy block
-      # below — the UI then shows GPU stats as unavailable.
-      NVIDIA_DRIVER_CAPABILITIES: utility
+      # GPU access (NVML stats) lives in docker-compose.gpu.yml — `make up`
+      # includes that overlay automatically when nvidia-smi is present, so a
+      # CPU-only box brings the stack up cleanly (GPU stats show unavailable).
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock   # ONLY here — sessions never get it (PLAN §1.5)
       - models:/data/models
@@ -53,13 +56,6 @@ services:
       - workspaces:/data/workspaces
       - uploads:/data/uploads
     networks: [forge-edge, forge-internal]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all   # NVML must see every GPU for multi-GPU stats/leases
-              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
       interval: 15s
@@ -72,6 +68,9 @@ services:
     restart: unless-stopped
     environment:
       SEARXNG_BASE_URL: http://searxng:8080/
+      # Overrides the committed placeholder in settings.yml; `make up`
+      # generates a value into .env on first run.
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-}
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
       - searxng-config:/etc/searxng/data
@@ -81,6 +80,48 @@ services:
     image: mcr.microsoft.com/playwright/mcp:v0.0.49
     restart: unless-stopped
     command: ["--host", "0.0.0.0", "--port", "8931", "--headless", "--isolated"]
+    networks: [forge-internal]
+
+  # Stealth web fetching/scraping MCP (Scrapling): TLS-fingerprint HTTP get,
+  # Playwright fetch, and Cloudflare-solving stealth Chromium, with markdown
+  # extraction. Core connector for sessions AND the chat "read page" tool.
+  # Internal network only, same trust posture as mcp-playwright.
+  mcp-scrapling:
+    image: ${FORGE_SCRAPLING_IMAGE:-ghcr.io/d4vinci/scrapling:v0.4.14}
+    restart: unless-stopped
+    command: ["mcp", "--http", "--host", "0.0.0.0", "--port", "8000"]
+    networks: [forge-internal]
+
+  # Context-compression proxy (Headroom): all chat-completion traffic flows
+  # orchestrator/sessions -> headroom -> orchestrator /v1 router -> engines.
+  # The orchestrator falls back to the direct engine path automatically when
+  # this service is down or the toggle is off (Settings).
+  headroom:
+    image: ${FORGE_HEADROOM_IMAGE:-ghcr.io/headroomlabs-ai/headroom:0.35.0}
+    restart: unless-stopped
+    environment:
+      # /v1-direct is the router's headroom-free internal path — targeting the
+      # public /v1 would loop (that path forwards to headroom when enabled).
+      OPENAI_TARGET_API_URL: http://orchestrator:8000/v1-direct
+      # No surprise model downloads on a self-hosted box: the ML prose
+      # compressor stays off; JSON/log/code compressors work fully offline.
+      HEADROOM_OFFLINE: "1"
+    volumes:
+      - headroom-cache:/home/nonroot/.cache
+    networks: [forge-internal]
+
+  # ── Sandbox lane (opt-in profile; requires /dev/kvm on the host) ──────────
+  # smolvm boots hardware-isolated microVMs for the "run this code" tool.
+  # Its control API has NO auth — it must never leave forge-internal.
+  smolvm:
+    profiles: ["sandbox"]
+    build: ./sandbox/smolvm
+    image: ${FORGE_SMOLVM_IMAGE:-forge-smolvm}
+    restart: unless-stopped
+    devices:
+      - /dev/kvm:/dev/kvm
+    volumes:
+      - sandbox-state:/var/lib/smolvm
     networks: [forge-internal]
 
   # ── Engine lanes ────────────────────────────────────────────────────────────
@@ -173,6 +214,10 @@ volumes:
     name: forge-uploads
   searxng-config:
     name: forge-searxng-config
+  headroom-cache:
+    name: forge-headroom-cache
+  sandbox-state:
+    name: forge-sandbox-state
   caddy-data:
     name: forge-caddy-data
   ui-dist:

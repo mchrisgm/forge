@@ -193,12 +193,14 @@ async def _model_text(prompt: str, system: str, max_tokens: int = 350) -> str | 
     """One plain completion on the current lease, or None if unavailable."""
     import httpx
 
+    from . import routing
     from .engine_manager import engine_manager
 
-    ready = engine_manager.ready_leases()
+    ready = engine_manager.ready_text_leases()  # imagegen can't answer chat
     if not ready:
         return None
     lease = ready[0]
+    base_url = await routing.completion_base_url(lease.base_url)
     body = {
         "model": lease.model_slug,
         "messages": [
@@ -210,7 +212,7 @@ async def _model_text(prompt: str, system: str, max_tokens: int = 350) -> str | 
     }
     try:
         async with httpx.AsyncClient(timeout=_timeout()) as http:
-            resp = await http.post(f"{lease.base_url}/chat/completions", json=body)
+            resp = await http.post(f"{base_url}/chat/completions", json=body)
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as exc:

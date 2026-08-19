@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     # (forge-internal DNS name of the compose service).
     orchestrator_internal_url: str = "http://orchestrator:8000"
 
+    # Headroom context-compression proxy (compose service `headroom`). When
+    # enabled AND healthy, ALL chat-completion traffic chains through it; the
+    # Setting-table key "headroom_enabled" overrides the default at runtime.
+    headroom_url: str = "http://headroom:8787/v1"
+    headroom_enabled: bool = True
+
     # Optional integrations (no FORGE_ prefix, PLAN §8)
     hf_token: str = Field("", validation_alias=AliasChoices("HF_TOKEN", "FORGE_HF_TOKEN"))
     github_pat: str = Field("", validation_alias=AliasChoices("GITHUB_PAT", "FORGE_GITHUB_PAT"))

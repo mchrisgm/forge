@@ -166,7 +166,10 @@ def create_app() -> FastAPI:
     # OpenAI-compatible model router for session containers. Unauthenticated
     # by design and unreachable from outside forge-internal: the gateway only
     # forwards /api/* and the orchestrator publishes no host ports.
+    # /v1 chains through the headroom compression proxy when active;
+    # /v1-direct is headroom's loop-free upstream.
     app.include_router(openai_router.router)
+    app.include_router(openai_router.direct_router)
     return app
 
 
