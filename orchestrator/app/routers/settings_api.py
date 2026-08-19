@@ -1,11 +1,11 @@
-"""Runtime-tunable settings (Settings page): password, reaper timeout,
-registry schedule. Stored in the Setting table, overriding env defaults."""
+"""Runtime-tunable settings (Settings page): reaper timeout and registry
+schedule. Stored in the Setting table, overriding env defaults. Per-profile
+settings (password, instructions, memory) live under /users/me."""
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from ..auth import change_password, verify_password
 from ..config import get_settings
 from ..db import get_setting, set_setting
 
@@ -27,10 +27,6 @@ class PatchBody(BaseModel):
     session_idle_min: int | None = None
     registry_cron: str | None = None
 
-
-class PasswordBody(BaseModel):
-    current_password: str
-    new_password: str
 
 
 @router.get("")
@@ -63,12 +59,3 @@ def patch(body: PatchBody, request: Request) -> dict:
             scheduler.reschedule_job("registry_scan", trigger=trigger)
     return get_all()
 
-
-@router.post("/password")
-def set_password(body: PasswordBody) -> dict:
-    if not verify_password(body.current_password):
-        raise HTTPException(401, "current password is wrong")
-    if len(body.new_password) < 8:
-        raise HTTPException(400, "new password must be at least 8 characters")
-    change_password(body.new_password)
-    return {"ok": True}

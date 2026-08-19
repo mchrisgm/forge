@@ -1,0 +1,51 @@
+"""Chat attachment uploads (per-user)."""
+
+import asyncio
+
+from fastapi import APIRouter, Depends, UploadFile
+from fastapi.responses import FileResponse
+from sqlmodel import select
+
+from ..auth import current_user
+from ..db import read_session
+from ..models import Upload, User
+from ..services import uploads
+
+router = APIRouter(prefix="/files")
+
+
+def _meta(upload: Upload) -> dict:
+    return {
+        "id": upload.id,
+        "filename": upload.filename,
+        "mime": upload.mime,
+        "kind": upload.kind,
+        "size_bytes": upload.size_bytes,
+        "created_at": upload.created_at.isoformat(),
+    }
+
+
+@router.post("")
+async def upload_file(file: UploadFile, user: User = Depends(current_user)) -> dict:
+    upload = await uploads.save_upload(user.id, file)
+    return _meta(upload)
+
+
+@router.get("")
+def list_files(user: User = Depends(current_user)) -> list[dict]:
+    with read_session() as db:
+        rows = db.exec(select(Upload).where(Upload.user_id == user.id)).all()
+    rows = sorted(rows, key=lambda r: r.created_at, reverse=True)
+    return [_meta(row) for row in rows]
+
+
+@router.get("/{upload_id}")
+def get_file(upload_id: str, user: User = Depends(current_user)) -> FileResponse:
+    upload = uploads.get_owned(upload_id, user.id)
+    return FileResponse(upload.path, media_type=upload.mime, filename=upload.filename)
+
+
+@router.delete("/{upload_id}")
+async def delete_file(upload_id: str, user: User = Depends(current_user)) -> dict:
+    await asyncio.to_thread(uploads.delete_upload, upload_id, user.id)
+    return {"ok": True}

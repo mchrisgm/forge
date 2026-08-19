@@ -1,13 +1,14 @@
 import json
 import re
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import select
 
+from ..auth import current_user
 from ..connector_catalog import CATALOG
 from ..db import read_session, write_session
-from ..models import Connector
+from ..models import Connector, User
 
 router = APIRouter(prefix="/connectors")
 
@@ -84,18 +85,24 @@ class CustomBody(BaseModel):
 
 
 @router.get("")
-def list_connectors() -> list[dict]:
+def list_connectors(user: User = Depends(current_user)) -> list[dict]:
     with read_session() as db:
-        rows = db.exec(select(Connector)).all()
+        rows = db.exec(select(Connector).where(Connector.user_id == user.id)).all()
     views = [_public_view(row) for row in rows]
     views.sort(key=lambda v: (_CATEGORY_ORDER.get(v["category"], 9), v["name"].lower()))
     return views
 
 
 @router.patch("/{kind}")
-def patch_connector(kind: str, body: PatchBody) -> dict:
+def patch_connector(
+    kind: str, body: PatchBody, user: User = Depends(current_user)
+) -> dict:
     with write_session() as db:
-        connector = db.exec(select(Connector).where(Connector.kind == kind)).first()
+        connector = db.exec(
+            select(Connector).where(
+                Connector.kind == kind, Connector.user_id == user.id
+            )
+        ).first()
         if connector is None:
             raise HTTPException(404, "connector not found")
         if body.enabled is not None:
@@ -118,7 +125,7 @@ def patch_connector(kind: str, body: PatchBody) -> dict:
 
 
 @router.post("/custom")
-def add_custom(body: CustomBody) -> dict:
+def add_custom(body: CustomBody, user: User = Depends(current_user)) -> dict:
     slug = re.sub(r"[^a-z0-9]+", "-", body.name.lower()).strip("-")[:40]
     if not slug:
         raise HTTPException(400, "name required")
@@ -140,9 +147,15 @@ def add_custom(body: CustomBody) -> dict:
 
     config = json.dumps({"display_name": body.name, "mcp": mcp})
     with write_session() as db:
-        if db.exec(select(Connector).where(Connector.kind == kind)).first():
+        if db.exec(
+            select(Connector).where(
+                Connector.kind == kind, Connector.user_id == user.id
+            )
+        ).first():
             raise HTTPException(409, f"connector '{kind}' already exists")
-        connector = Connector(kind=kind, enabled=True, config_json=config)
+        connector = Connector(
+            kind=kind, enabled=True, config_json=config, user_id=user.id
+        )
         db.add(connector)
         db.flush()
         db.refresh(connector)
@@ -151,11 +164,15 @@ def add_custom(body: CustomBody) -> dict:
 
 
 @router.delete("/{kind}")
-def delete_connector(kind: str) -> dict:
+def delete_connector(kind: str, user: User = Depends(current_user)) -> dict:
     if not kind.startswith("custom-"):
         raise HTTPException(400, "only custom connectors can be removed")
     with write_session() as db:
-        connector = db.exec(select(Connector).where(Connector.kind == kind)).first()
+        connector = db.exec(
+            select(Connector).where(
+                Connector.kind == kind, Connector.user_id == user.id
+            )
+        ).first()
         if connector is None:
             raise HTTPException(404, "connector not found")
         db.delete(connector)

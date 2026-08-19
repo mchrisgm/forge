@@ -51,6 +51,7 @@ services:
       - db:/data/db
       - skills:/data/skills
       - workspaces:/data/workspaces
+      - uploads:/data/uploads
     networks: [forge-edge, forge-internal]
     deploy:
       resources:
@@ -153,6 +154,8 @@ volumes:
     name: forge-skills
   workspaces:
     name: forge-workspaces
+  uploads:
+    name: forge-uploads
   searxng-config:
     name: forge-searxng-config
   caddy-data:

@@ -13,19 +13,21 @@ from sqlmodel import select
 
 from .auth import ensure_auth_seeded, require_auth
 from .db import get_setting, init_db, write_session
-from .models import Connector
 from .routers import (
-    auth,
+    chat,
     connectors,
     engines,
     events,
+    files_api,
     health,
+    memory_api,
     models_api,
     openai_router,
     sessions,
     settings_api,
     skills,
     system,
+    users,
 )
 from .services.engine_manager import engine_manager
 from .services.events import bus
@@ -35,18 +37,6 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
 log = logging.getLogger("forge")
-
-def seed_connectors() -> None:
-    """One row per catalog entry: core connectors keep their defaults,
-    integrations start disabled until configured from the Connectors page."""
-    from .connector_catalog import CATALOG, DEFAULT_ENABLED
-
-    with write_session() as db:
-        existing = {c.kind for c in db.exec(select(Connector)).all()}
-        for kind in CATALOG:
-            if kind not in existing:
-                db.add(Connector(kind=kind, enabled=DEFAULT_ENABLED.get(kind, False)))
-
 
 def reconcile_interrupted_work() -> None:
     """An orchestrator restart kills in-flight downloads and tasks; without
@@ -93,6 +83,15 @@ async def _registry_scan_job() -> None:
         log.exception("registry scan failed")
 
 
+async def _memory_consolidation_job() -> None:
+    from .services.memory import consolidate_all
+
+    try:
+        await consolidate_all()
+    except Exception:
+        log.exception("memory consolidation failed")
+
+
 async def _reaper_job() -> None:
     try:
         await session_manager.reap_idle()
@@ -104,8 +103,10 @@ async def _reaper_job() -> None:
 async def lifespan(app: FastAPI):
     init_db()
     ensure_auth_seeded()
-    seed_connectors()
     reconcile_interrupted_work()
+    from .services import bootstrap
+
+    await asyncio.to_thread(bootstrap.run)
     bus.bind_loop(asyncio.get_running_loop())
 
     await asyncio.to_thread(engine_manager.reconcile_on_boot)
@@ -114,6 +115,11 @@ async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler()
     scheduler.add_job(_reaper_job, IntervalTrigger(minutes=5), id="session_reaper")
     scheduler.add_job(_registry_scan_job, _registry_trigger(), id="registry_scan")
+    scheduler.add_job(
+        _memory_consolidation_job,
+        CronTrigger.from_crontab("0 4 * * *"),
+        id="memory_consolidation",
+    )
     scheduler.start()
     app.state.scheduler = scheduler
     log.info("forge orchestrator up")
@@ -139,9 +145,13 @@ def create_app() -> FastAPI:
 
     api = APIRouter(prefix="/api")
     api.include_router(health.router)
-    api.include_router(auth.router)
+    api.include_router(users.auth_router)
 
     protected = APIRouter(dependencies=[Depends(require_auth)])
+    protected.include_router(users.users_router)
+    protected.include_router(chat.router)
+    protected.include_router(files_api.router)
+    protected.include_router(memory_api.router)
     protected.include_router(system.router)
     protected.include_router(engines.router)
     protected.include_router(models_api.router)

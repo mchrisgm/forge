@@ -61,13 +61,21 @@ def _set_state(task_id: int, state: TaskState, **fields) -> Task | None:
 
 
 async def create_task(
-    session_id: str, prompt: str, thinking: ThinkingLevel = ThinkingLevel.auto
+    session_id: str,
+    prompt: str,
+    thinking: ThinkingLevel = ThinkingLevel.auto,
+    user_id: int | None = None,
 ) -> Task:
     with read_session() as db:
         session = db.get(Session, session_id)
     if session is None:
         raise ValueError("session not found")
-    task = Task(session_id=session_id, prompt=prompt, thinking=thinking)
+    task = Task(
+        session_id=session_id,
+        prompt=prompt,
+        thinking=thinking,
+        user_id=user_id if user_id is not None else session.user_id,
+    )
     with write_session() as db:
         db.add(task)
         db.flush()

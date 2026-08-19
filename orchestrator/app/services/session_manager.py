@@ -66,7 +66,11 @@ class SessionManager:
         return local, host
 
     async def create(
-        self, name: str, model_id: int, repo_url: str | None = None
+        self,
+        name: str,
+        model_id: int,
+        repo_url: str | None = None,
+        user_id: int | None = None,
     ) -> Session:
         import asyncio
 
@@ -92,7 +96,9 @@ class SessionManager:
                 f"max parallel sessions reached ({settings.max_parallel_sessions})", 409
             )
 
-        session = Session(name=name, model_id=model_id, repo_url=repo_url)
+        session = Session(
+            name=name, model_id=model_id, repo_url=repo_url, user_id=user_id
+        )
         local_ws, _ = self._workspace_paths(session.id)
         session.workspace_path = str(local_ws)
         with write_session() as db:
@@ -143,7 +149,12 @@ class SessionManager:
             model = db.get(ModelEntry, session.model_id) if session else None
             from sqlmodel import select
 
-            connectors = list(db.exec(select(Connector)).all())
+            owner_id = session.user_id if session else None
+            connectors = list(
+                db.exec(
+                    select(Connector).where(Connector.user_id == owner_id)
+                ).all()
+            )
         if session is None or model is None:
             raise RuntimeError("session or model vanished during spawn")
 
