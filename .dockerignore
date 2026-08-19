@@ -1,0 +1,12 @@
+# Root build context is used by orchestrator/Dockerfile — keep it lean.
+.git
+.env
+ui/node_modules
+ui/dist
+ui/dev-dist
+orchestrator/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+skills
+data

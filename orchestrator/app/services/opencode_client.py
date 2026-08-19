@@ -5,14 +5,17 @@ shapes assumed here are pinned by tests/test_opencode_client_shapes.py and by
 the OpenCode version pinned in session-runner/Dockerfile. Everything else in
 the orchestrator goes through these helpers or the generic reverse proxy.
 
-Assumed surface (OpenCode >= 0.4):
+Assumed surface (verified against sst/opencode source — PromptInput schema):
   GET  /session                      -> [ {id, title, ...} ]
-  POST /session {}                   -> {id, ...}
+  POST /session {title?}             -> {id, ...}
   GET  /session/{id}/message         -> [ {info: {...}, parts: [...]}, ... ]
-  POST /session/{id}/message {providerID, modelID, parts:[{type:"text",text}]}
-                                     -> assistant message (blocks until done)
-  POST /session/{id}/abort           -> {}
-  POST /session/{id}/permissions/{permissionID} {response: "always"|"once"|"reject"}
+  POST /session/{id}/message
+       {model: {providerID, modelID}, parts: [{type:"text", text}]}
+                                     -> assistant message (blocks until turn done)
+  POST /session/{id}/prompt_async    -> same body, fire-and-forget
+  POST /session/{id}/abort           -> boolean
+  POST /session/{id}/permissions/{permissionID}
+       {response: "once"|"always"|"reject"}
   GET  /event                        -> SSE stream of {type, properties} events
 """
 
@@ -51,8 +54,7 @@ async def send_prompt(
 ) -> dict[str, Any]:
     """Send a prompt and wait for the agent turn to finish (long poll)."""
     body = {
-        "providerID": provider_id,
-        "modelID": model_id,
+        "model": {"providerID": provider_id, "modelID": model_id},
         "parts": [{"type": "text", "text": text}],
     }
     async with httpx.AsyncClient(timeout=PROMPT_TIMEOUT_S) as http:
