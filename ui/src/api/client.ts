@@ -13,12 +13,16 @@ import type {
   FilesResponse,
   GitCommitEntry,
   GitStatus,
+  ImageGenerationResult,
   Lease,
   ManualAddBody,
   MemoryEntry,
   MemoryKind,
   ModelEntry,
+  ModelSearchKind,
+  ModelSearchResult,
   PublicUser,
+  SearchAddBody,
   Session,
   SettingsPayload,
   Skill,
@@ -183,6 +187,18 @@ export const api = {
   deleteConversation: (id: string) =>
     del<{ ok: boolean }>(`/api/chat/conversations/${id}`),
   chatStatus: () => get<ChatStatus>("/api/chat/status"),
+  /** Generate an image in chat — can take minutes; resolves with the upload. */
+  generateImage: (body: {
+    prompt: string;
+    /** Null = no conversation to record into. */
+    conversation_id: string | null;
+    /** "local" (imagegen lane) or an enabled remote connector kind. */
+    provider: string;
+    size: string;
+    /** Incognito: nothing is stored server-side; the image comes back
+     *  inline as image_data_uri. */
+    temporary?: boolean;
+  }) => post<ImageGenerationResult>("/api/chat/image", body),
 
   // files (chat attachments)
   uploadFile: (file: File) => {
@@ -263,6 +279,12 @@ export const api = {
     post<{ new_suggestions: number; considered: number }>(
       "/api/models/registry/scan",
     ),
+  searchModels: (q: string, kind: ModelSearchKind) =>
+    get<ModelSearchResult[]>(
+      `/api/models/search?q=${encodeURIComponent(q)}&kind=${kind}`,
+    ),
+  addFromSearch: (body: SearchAddBody) =>
+    post<ModelEntry>("/api/models/search/add", body),
   thinkingDirectives: (modelId: number, level: ThinkingLevel) =>
     get<ThinkingDirectives>(`/api/models/${modelId}/thinking/${level}`),
 

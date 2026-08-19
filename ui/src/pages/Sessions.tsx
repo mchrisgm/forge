@@ -43,9 +43,16 @@ function NewSessionSheet({
   const [modelId, setModelId] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
 
-  // PLAN §2: AirLLM lane is chat-only — never offered for sessions.
+  // PLAN §2: AirLLM is chat-only and imagegen is not a language model —
+  // neither can power a session (the backend rejects them too).
   const eligible = useMemo(
-    () => models.filter((m) => m.status === "ready" && m.engine !== "airllm"),
+    () =>
+      models.filter(
+        (m) =>
+          m.status === "ready" &&
+          m.engine !== "airllm" &&
+          m.engine !== "imagegen",
+      ),
     [models],
   );
   const hasAirllmReady = useMemo(

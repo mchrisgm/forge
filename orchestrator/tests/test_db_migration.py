@@ -377,10 +377,10 @@ class TestBootstrapModelSeeding:
 
         from scripts.seed_models import SEED_MODELS
 
-        assert created == len(SEED_MODELS) == 5
+        assert created == len(SEED_MODELS) == 6
         with db_module.read_session() as db:
             rows = db.exec(select(ModelEntry)).all()
-        assert len(rows) == 5
+        assert len(rows) == 6
         # Seeds arrive approved (visible, not yet downloaded), never ready.
         assert {row.status for row in rows} == {ModelStatus.approved}
         assert all(row.hf_repo for row in rows)
@@ -388,7 +388,7 @@ class TestBootstrapModelSeeding:
         # Second boot: the table is non-empty, so seeding is a no-op.
         assert bootstrap.seed_model_catalog_if_empty() == 0
         with db_module.read_session() as db:
-            assert len(db.exec(select(ModelEntry)).all()) == 5
+            assert len(db.exec(select(ModelEntry)).all()) == 6
 
     def test_a_single_manual_entry_suppresses_seeding(self):
         from app.models import ModelEntry

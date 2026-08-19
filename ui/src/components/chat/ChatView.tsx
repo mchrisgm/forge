@@ -4,7 +4,7 @@
 // that keeps everything in component state and stores nothing.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useBlocker, useNavigate } from "react-router-dom";
 import {
   api,
@@ -22,20 +22,39 @@ import type {
 } from "../../api/types";
 import { useToast } from "../../hooks/toast";
 import { cx } from "../../lib/utils";
-import { IconChevronLeft, IconCube, IconGhost } from "../icons";
+import { IconChevronLeft, IconCube, IconGhost, IconImage } from "../icons";
 import {
   loadStoredThinking,
   storeThinking,
 } from "../ThinkingSelect";
 import { Button, EmptyState, LaneBadge, Spinner } from "../ui";
-import { Composer } from "./Composer";
+import { Composer, type ImageProvider } from "./Composer";
 import { MessageBubble, type UiMessage } from "./messages";
 
 const THINKING_STORAGE_KEY = "forge.thinking.chats";
 
+const IMAGE_SIZE = "1024x1024";
+
 interface SendError {
   kind: "no-model" | "other";
   message: string;
+}
+
+/** The last sent turn, kept for one-click retry after a failure. */
+type LastSend =
+  | { type: "text"; content: string; metas: AttachmentMeta[] }
+  | { type: "image"; prompt: string; provider: string };
+
+/** 409s from /api/chat/image carry {message, detail} — join both so the
+ *  inline error explains what to do, not just what failed. */
+function imageErrorMessage(err: unknown): string {
+  if (err instanceof ApiError && err.detail && typeof err.detail === "object") {
+    const d = err.detail as { message?: unknown; detail?: unknown };
+    if (typeof d.message === "string" && typeof d.detail === "string") {
+      return `${d.message} — ${d.detail}`;
+    }
+  }
+  return errorMessage(err);
 }
 
 export function ChatView({
@@ -50,6 +69,7 @@ export function ChatView({
 
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
+  const [generatingImage, setGeneratingImage] = useState(false);
   const [tempMode, setTempMode] = useState(false);
   const [sendError, setSendError] = useState<SendError | null>(null);
   const [newChatSlug, setNewChatSlug] = useState("");
@@ -66,9 +86,7 @@ export function ChatView({
   const holdRef = useRef<string | null>(null);
   /** Last server snapshot applied, to avoid redundant reloads. */
   const lastLoadedDataRef = useRef<ConversationDetail | null>(null);
-  const lastSendRef = useRef<{ content: string; metas: AttachmentMeta[] } | null>(
-    null,
-  );
+  const lastSendRef = useRef<LastSend | null>(null);
   const keyRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -88,6 +106,30 @@ export function ChatView({
   });
   const serving = status.data?.serving ?? [];
   const nothingServing = status.data != null && serving.length === 0;
+  const imageLease = status.data?.image ?? null;
+
+  // ── image providers: the local imagegen lane plus enabled remote
+  //    connectors that advertise image generation (e.g. Higgsfield) ─────────
+  const connectors = useQuery({
+    queryKey: ["connectors"],
+    queryFn: api.listConnectors,
+  });
+  const imageProviders = useMemo<ImageProvider[]>(() => {
+    const providers: ImageProvider[] = [];
+    if (imageLease) {
+      providers.push({ id: "local", label: `Local · ${imageLease.model_name}` });
+    }
+    for (const c of connectors.data ?? []) {
+      if (
+        c.enabled &&
+        c.mcp_type === "remote" &&
+        /image/i.test(`${c.name} ${c.description}`)
+      ) {
+        providers.push({ id: c.kind, label: c.name });
+      }
+    }
+    return providers;
+  }, [imageLease, connectors.data]);
 
   // A slug-less request only resolves when exactly one model serves, so with
   // several serving a fresh chat needs an explicit pick — default to the
@@ -298,8 +340,100 @@ export function ChatView({
     }
   };
 
+  /** Generate an image and record the exchange (unless in temporary mode).
+   *  Generation can take minutes — a pending bubble holds the spot. */
+  const runImage = async (
+    prompt: string,
+    provider: string,
+    reuseUserBubble: boolean,
+  ) => {
+    setSendError(null);
+    setGeneratingImage(true);
+
+    const assistantKey = nextKey();
+    const userMsg: UiMessage = {
+      key: nextKey(),
+      role: "user",
+      content: prompt,
+      attachments: [],
+    };
+    const assistantMsg: UiMessage = {
+      key: assistantKey,
+      role: "assistant",
+      content: "",
+      attachments: [],
+      pendingImage: { prompt },
+    };
+    setMessages((prev) =>
+      reuseUserBubble ? [...prev, assistantMsg] : [...prev, userMsg, assistantMsg],
+    );
+
+    try {
+      let id: string | null = null;
+      if (!tempMode) {
+        id = conversationId ?? loadedForRef.current;
+        if (!id) {
+          const conv = await api.createConversation({
+            model_slug: newChatSlug,
+            thinking,
+          });
+          id = conv.id;
+          loadedForRef.current = id;
+          navigate(`/chats/${id}`, { replace: true });
+          void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+        }
+        holdRef.current = id;
+      }
+
+      const result = await api.generateImage({
+        prompt,
+        conversation_id: id,
+        provider,
+        size: IMAGE_SIZE,
+        // Temporary mode stores nothing server-side — the image arrives
+        // inline as a data URI and lives only in this tab.
+        temporary: tempMode,
+      });
+
+      // Show the image right away; the placeholder content mirrors what the
+      // backend records, so temporary-chat history stays coherent too.
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.key === assistantKey
+            ? {
+                ...m,
+                pendingImage: undefined,
+                content: `[Generated image: ${prompt}]`,
+                attachments: result.upload ? [result.upload] : [],
+                tempImage: result.image_data_uri
+                  ? { dataUri: result.image_data_uri, prompt }
+                  : undefined,
+              }
+            : m,
+        ),
+      );
+      if (!tempMode && id) {
+        // Refetch so the cached conversation carries the recorded exchange
+        // (local state stays authoritative for this visit, as with streams).
+        void queryClient.invalidateQueries({ queryKey: ["conversation", id] });
+        void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      }
+    } catch (err) {
+      const message = imageErrorMessage(err);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.key === assistantKey
+            ? { ...m, pendingImage: undefined, error: message }
+            : m,
+        ),
+      );
+    } finally {
+      setGeneratingImage(false);
+    }
+  };
+
   const onSend = (content: string, uploads: UploadMeta[]) => {
-    if (streaming) return;
+    if (streaming || generatingImage) return;
     const metas: AttachmentMeta[] = uploads.map((u) => ({
       id: u.id,
       filename: u.filename,
@@ -307,21 +441,28 @@ export function ChatView({
       mime: u.mime,
       size_bytes: u.size_bytes,
     }));
-    lastSendRef.current = { content, metas };
+    lastSendRef.current = { type: "text", content, metas };
     void run(content, metas, false);
+  };
+
+  const onGenerateImage = (prompt: string, provider: string) => {
+    if (streaming || generatingImage) return;
+    lastSendRef.current = { type: "image", prompt, provider };
+    void runImage(prompt, provider, false);
   };
 
   /** Re-send the last user turn after a failure (its bubble stays). */
   const retry = () => {
     const last = lastSendRef.current;
-    if (!last || streaming) return;
+    if (!last || streaming || generatingImage) return;
     setMessages((prev) => {
       const tail = prev[prev.length - 1];
       return tail?.role === "assistant" && (tail.error || !tail.content)
         ? prev.slice(0, -1)
         : prev;
     });
-    void run(last.content, last.metas, true);
+    if (last.type === "image") void runImage(last.prompt, last.provider, true);
+    else void run(last.content, last.metas, true);
   };
 
   const stop = () => abortRef.current?.abort();
@@ -386,6 +527,15 @@ export function ChatView({
                 <span>No model loaded</span>
               ) : (
                 <span>{conversationId ? "Saved chat" : "Pick a model below"}</span>
+              )}
+              {imageLease && (
+                <span
+                  className="inline-flex shrink-0 items-center gap-1 text-faint"
+                  title={`Local image generation available — ${imageLease.model_name}`}
+                >
+                  <IconImage size={12} />
+                  <span className="hidden sm:inline">image</span>
+                </span>
               )}
             </div>
           </div>
@@ -514,7 +664,15 @@ export function ChatView({
           ))}
 
         {messages.map((m, i) => {
-          if (m.role === "assistant" && !m.content && !m.error) return null;
+          if (
+            m.role === "assistant" &&
+            !m.content &&
+            !m.error &&
+            !m.pendingImage &&
+            m.attachments.length === 0
+          ) {
+            return null;
+          }
           return (
             <MessageBubble
               key={m.key}
@@ -577,7 +735,10 @@ export function ChatView({
           <Composer
             onSend={onSend}
             onStop={stop}
+            onGenerateImage={onGenerateImage}
+            imageProviders={imageProviders}
             streaming={streaming}
+            generatingImage={generatingImage}
             disabled={nothingServing}
             thinking={thinking}
             onThinking={setThinking}

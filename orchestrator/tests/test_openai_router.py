@@ -111,6 +111,28 @@ class TestResolveLease:
         with pytest.raises(HTTPException):
             resolve_lease("model-a")
 
+    def test_explicit_imagegen_slug_is_404(self):
+        """Imagegen leases never answer chat, even when named explicitly."""
+        install_leases(make_lease("sdxl-turbo", engine=EngineKind.imagegen))
+        with pytest.raises(HTTPException) as excinfo:
+            resolve_lease("sdxl-turbo")
+        assert excinfo.value.status_code == 404
+        assert "(none)" in excinfo.value.detail
+
+    def test_imagegen_lease_is_not_the_slugless_fallback(self):
+        install_leases(make_lease("sdxl-turbo", engine=EngineKind.imagegen))
+        with pytest.raises(HTTPException) as excinfo:
+            resolve_lease(None)
+        assert excinfo.value.status_code == 404
+
+    def test_single_text_lease_still_falls_back_beside_an_imagegen_lease(self):
+        text = make_lease("model-a", gpu=0, model_id=1)
+        install_leases(
+            text,
+            make_lease("sdxl-turbo", engine=EngineKind.imagegen, gpu=1, model_id=2),
+        )
+        assert resolve_lease(None) is text
+
 
 # ── GET /v1/models ──────────────────────────────────────────────────────────
 
@@ -138,6 +160,14 @@ class TestV1Models:
         resp = api.get("/v1/models")
         assert resp.status_code == 200
         assert resp.json()["data"] == []
+
+    def test_imagegen_leases_are_excluded_from_the_listing(self, api):
+        install_leases(
+            make_lease("model-a", gpu=0, model_id=1),
+            make_lease("sdxl-turbo", engine=EngineKind.imagegen, gpu=1, model_id=2),
+        )
+        resp = api.get("/v1/models")
+        assert [m["id"] for m in resp.json()["data"]] == ["model-a"]
 
 
 # ── POST /v1/chat/completions ───────────────────────────────────────────────

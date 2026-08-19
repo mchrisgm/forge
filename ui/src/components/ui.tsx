@@ -12,7 +12,13 @@ import {
   type TextareaHTMLAttributes,
 } from "react";
 import { cx } from "../lib/utils";
-import { IconChevronDown, IconChevronRight, IconRefresh, IconX } from "./icons";
+import {
+  IconChevronDown,
+  IconChevronRight,
+  IconImage,
+  IconRefresh,
+  IconX,
+} from "./icons";
 
 // ── Button ──────────────────────────────────────────────────────────────────
 
@@ -174,6 +180,7 @@ const LANE_STYLES: Record<string, string> = {
   llamacpp: "text-lane-llamacpp border-lane-llamacpp/35 bg-lane-llamacpp/10",
   vllm: "text-lane-vllm border-lane-vllm/35 bg-lane-vllm/10",
   airllm: "text-lane-airllm border-lane-airllm/35 bg-lane-airllm/10",
+  imagegen: "text-lane-imagegen border-lane-imagegen/35 bg-lane-imagegen/10",
 };
 
 export function LaneBadge({
@@ -187,14 +194,19 @@ export function LaneBadge({
   // llamacpp color family.
   const family = engine.startsWith("llamacpp") ? "llamacpp" : engine;
   const label =
-    engine === "airllm" && detailed ? "airllm · slow — chat only" : engine;
+    engine === "airllm" && detailed
+      ? "airllm · slow — chat only"
+      : engine === "imagegen" && detailed
+        ? "imagegen · text-to-image"
+        : engine;
   return (
     <span
       className={cx(
-        "inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[11px] font-medium",
+        "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[11px] font-medium",
         LANE_STYLES[family] ?? "border-border bg-raised text-muted",
       )}
     >
+      {family === "imagegen" && <IconImage size={11} className="shrink-0" />}
       {label}
     </span>
   );

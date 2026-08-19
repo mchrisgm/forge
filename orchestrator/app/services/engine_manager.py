@@ -113,6 +113,7 @@ def engine_port(engine: EngineKind, settings: Settings) -> int:
         EngineKind.llamacpp: settings.llamacpp_port,
         EngineKind.vllm: settings.vllm_port,
         EngineKind.airllm: settings.airllm_port,
+        EngineKind.imagegen: settings.imagegen_port,
     }[engine]
 
 
@@ -175,6 +176,15 @@ def build_vllm_command(
     return cmd
 
 
+def build_imagegen_env(model: ModelEntry, settings: Settings) -> dict[str, str]:
+    path = f"/data/models/{model.file_path}" if model.file_path else model.hf_repo
+    return {
+        "IMAGEGEN_MODEL_PATH": path,
+        "IMAGEGEN_MODEL_NAME": opencode_model_id_for(model),
+        "IMAGEGEN_PORT": str(settings.imagegen_port),
+    }
+
+
 def build_airllm_env(model: ModelEntry, settings: Settings) -> dict[str, str]:
     path = f"/data/models/{model.file_path}" if model.file_path else model.hf_repo
     return {
@@ -217,6 +227,19 @@ class EngineManager:
 
     def ready_leases(self) -> list[Lease]:
         return [lease for lease in self._leases.values() if lease.state == "ready"]
+
+    def ready_text_leases(self) -> list[Lease]:
+        """Ready leases that speak /chat/completions (imagegen excluded)."""
+        return [
+            lease for lease in self.ready_leases()
+            if lease.engine != EngineKind.imagegen
+        ]
+
+    def ready_image_lease(self) -> Lease | None:
+        for lease in self.ready_leases():
+            if lease.engine == EngineKind.imagegen:
+                return lease
+        return None
 
     def lease_for_slug(self, slug: str) -> Lease | None:
         for lease in self._leases.values():
@@ -477,6 +500,10 @@ class EngineManager:
             image = settings.vllm_image
             command = build_vllm_command(model, settings, len(lease.gpu_ids))
             env["VLLM_NO_USAGE_STATS"] = "1"
+        elif model.engine == EngineKind.imagegen:
+            image = settings.imagegen_image
+            command = None
+            env.update(build_imagegen_env(model, settings))
         else:
             image = settings.airllm_image
             command = None

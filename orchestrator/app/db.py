@@ -50,6 +50,8 @@ _COLUMN_MIGRATIONS: dict[tuple[str, str], str] = {
     ("session", "user_id"): "ALTER TABLE session ADD COLUMN user_id INTEGER",
     ("task", "user_id"): "ALTER TABLE task ADD COLUMN user_id INTEGER",
     ("modelentry", "vision"): "ALTER TABLE modelentry ADD COLUMN vision BOOLEAN DEFAULT 0",
+    ("upload", "generated"): "ALTER TABLE upload ADD COLUMN generated BOOLEAN DEFAULT 0",
+    ("upload", "prompt"): "ALTER TABLE upload ADD COLUMN prompt VARCHAR DEFAULT ''",
 }
 
 

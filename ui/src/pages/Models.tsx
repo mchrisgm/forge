@@ -7,16 +7,22 @@ import type {
   EnginesStatus,
   Lease,
   ModelEntry,
+  ModelSearchKind,
+  ModelSearchResult,
   Suggestion,
   ToolCallFormat,
 } from "../api/types";
 import {
   IconChat,
+  IconCheck,
   IconChevronDown,
   IconChevronRight,
   IconDownload,
+  IconHeart,
   IconPlay,
+  IconPlus,
   IconRefresh,
+  IconSearch,
   IconStop,
   IconTrash,
 } from "../components/icons";
@@ -30,6 +36,7 @@ import {
   LaneBadge,
   ModelStatusChip,
   ProgressBar,
+  SegmentedTabs,
   Select,
   Sheet,
   SkeletonList,
@@ -39,7 +46,7 @@ import {
 } from "../components/ui";
 import { useGlobalEvents } from "../hooks/events";
 import { useToast } from "../hooks/toast";
-import { cx, formatGb } from "../lib/utils";
+import { cx, formatCount, formatGb, relativeTime } from "../lib/utils";
 
 // ── GPU lease banner ────────────────────────────────────────────────────────
 
@@ -730,8 +737,13 @@ function ModelCard({
         <span className="font-mono">{model.quant}</span>
         {model.params_b > 0 && <span>{model.params_b}B</span>}
         {model.size_gb > 0 && <span>{formatGb(model.size_gb)}</span>}
-        <span>ctx {model.ctx_max.toLocaleString()}</span>
-        <span>tools: {model.tool_call_format}</span>
+        {/* Context window and tool calls don't apply to the image lane. */}
+        {model.engine !== "imagegen" && (
+          <>
+            <span>ctx {model.ctx_max.toLocaleString()}</span>
+            <span>tools: {model.tool_call_format}</span>
+          </>
+        )}
       </div>
 
       {model.status === "downloading" && (
@@ -850,6 +862,174 @@ function ModelCard({
         onConfirm={() => conflict && load.mutate({ ...conflict.vars, force: true })}
       />
     </div>
+  );
+}
+
+// ── Hugging Face Hub search ─────────────────────────────────────────────────
+
+const SEARCH_KIND_TABS = [
+  { id: "text", label: "Chat / Code" },
+  { id: "image", label: "Image" },
+] as const;
+
+function SearchResultRow({
+  result,
+  kind,
+}: {
+  result: ModelSearchResult;
+  kind: ModelSearchKind;
+}) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const add = useMutation({
+    mutationFn: () =>
+      api.addFromSearch({ hf_repo: result.hf_repo, kind, auto_download: true }),
+    onSuccess: (entry) => {
+      toast("success", `${entry.display_name} added — download started`);
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
+      void queryClient.invalidateQueries({ queryKey: ["hub-search"] });
+    },
+    onError: (err) => toast("error", errorMessage(err)),
+  });
+
+  return (
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+      <div className="min-w-0 flex-1 basis-52">
+        <p className="truncate font-mono text-sm font-semibold text-text">
+          {result.hf_repo}
+        </p>
+        <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted">
+          <span
+            className="inline-flex items-center gap-1"
+            title={`${result.downloads.toLocaleString()} downloads`}
+          >
+            <IconDownload size={12} className="shrink-0 text-faint" />
+            {formatCount(result.downloads)}
+          </span>
+          <span
+            className="inline-flex items-center gap-1"
+            title={`${result.likes.toLocaleString()} likes`}
+          >
+            <IconHeart size={12} className="shrink-0 text-faint" />
+            {formatCount(result.likes)}
+          </span>
+          {result.params_b > 0 && <span>{result.params_b}B params</span>}
+          {result.created_at && <span>{relativeTime(result.created_at)}</span>}
+          {result.gated && (
+            <span className="text-warn">gated — needs HF access</span>
+          )}
+        </p>
+      </div>
+      {result.in_catalog ? (
+        <span className="inline-flex shrink-0 items-center gap-1.5 text-xs font-medium text-ok">
+          <IconCheck size={14} />
+          In catalog
+        </span>
+      ) : (
+        <Button
+          size="sm"
+          variant="primary"
+          aria-label={`Add ${result.hf_repo} to the catalog`}
+          loading={add.isPending}
+          onClick={() => add.mutate()}
+          className="shrink-0"
+        >
+          {!add.isPending && <IconPlus size={14} />}
+          Add
+        </Button>
+      )}
+    </li>
+  );
+}
+
+function HubSearch() {
+  const [query, setQuery] = useState("");
+  const [kind, setKind] = useState<ModelSearchKind>("text");
+  const [submittedQ, setSubmittedQ] = useState("");
+
+  // Toggling the kind re-runs the current search in the other lane — the
+  // query key carries both, so react-query does the rest.
+  const search = useQuery({
+    queryKey: ["hub-search", submittedQ, kind],
+    queryFn: () => api.searchModels(submittedQ, kind),
+    enabled: submittedQ !== "",
+  });
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const q = query.trim();
+    if (q) setSubmittedQ(q);
+  };
+
+  return (
+    <section className="mb-7">
+      <h2 className="mb-2.5 text-sm font-semibold text-muted">
+        Find on Hugging Face
+      </h2>
+      <form onSubmit={submit} className="flex flex-col gap-2 sm:flex-row">
+        <div className="relative min-w-0 flex-1">
+          <IconSearch
+            size={15}
+            className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-faint"
+          />
+          <TextInput
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={
+              kind === "image"
+                ? "Search text-to-image models…"
+                : "Search chat & code models…"
+            }
+            aria-label="Search Hugging Face models"
+            enterKeyHint="search"
+            className="pl-9"
+          />
+        </div>
+        <div className="flex shrink-0 items-stretch gap-2">
+          <div className="w-44">
+            <SegmentedTabs
+              tabs={SEARCH_KIND_TABS}
+              value={kind}
+              onChange={setKind}
+            />
+          </div>
+          <Button
+            type="submit"
+            variant="primary"
+            disabled={!query.trim()}
+            loading={search.isFetching}
+          >
+            Search
+          </Button>
+        </div>
+      </form>
+
+      {submittedQ !== "" && (
+        <div className="mt-3">
+          {search.isLoading && <SkeletonList rows={3} />}
+          {search.isError && (
+            <p className="rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
+              {errorMessage(search.error)}
+            </p>
+          )}
+          {search.data && search.data.length === 0 && (
+            <p className="rounded-xl border border-dashed border-border px-4 py-5 text-center text-sm text-muted">
+              No {kind === "image" ? "text-to-image" : "chat/code"} models
+              matched "{submittedQ}".
+            </p>
+          )}
+          {search.data && search.data.length > 0 && (
+            <ul className="divide-y divide-border/60 rounded-xl border border-border bg-surface">
+              {search.data.map((r) => (
+                <SearchResultRow key={r.hf_repo} result={r} kind={kind} />
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -1080,7 +1260,7 @@ export default function Models() {
     <div>
       <PageHeader
         title="Models"
-        subtitle="Local catalog, registry suggestions and the GPU lease"
+        subtitle="Local catalog, Hub search, registry suggestions and the GPU lease"
         actions={
           <Button
             size="sm"
@@ -1125,6 +1305,8 @@ export default function Models() {
           </ul>
         )}
       </section>
+
+      <HubSearch />
 
       {/* Catalog */}
       <section className="mb-7">

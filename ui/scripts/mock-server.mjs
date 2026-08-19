@@ -143,7 +143,95 @@ const models = [
     note: "",
     added_at: iso(20 * DAY),
   },
+  {
+    id: 7,
+    hf_repo: "black-forest-labs/FLUX.1-schnell",
+    display_name: "FLUX.1 schnell",
+    family: "flux",
+    params_b: 12,
+    quant: "fp16-diffusers",
+    file_path: "/models/hf/black-forest-labs/FLUX.1-schnell",
+    size_gb: 23.8,
+    engine: "imagegen",
+    ctx_max: 0,
+    n_layers: 0,
+    is_moe: false,
+    tool_call_format: "none",
+    status: "ready",
+    score: 0,
+    note: "Added from Hub search — text-to-image (diffusers snapshot).",
+    added_at: iso(3 * DAY),
+  },
 ];
+
+// ── Hub search fixtures (GET /api/models/search) ────────────────────────────
+
+const hubSearchResults = {
+  text: [
+    {
+      hf_repo: "Qwen/Qwen2.5-Coder-32B-Instruct",
+      downloads: 1_284_301,
+      likes: 1893,
+      tags: ["text-generation", "qwen2", "code"],
+      gated: false,
+      created_at: iso(290 * DAY),
+      params_b: 32.8,
+      in_catalog: false,
+    },
+    {
+      hf_repo: "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
+      downloads: 402_118,
+      likes: 264,
+      tags: ["text-generation", "qwen2", "awq"],
+      gated: false,
+      created_at: iso(285 * DAY),
+      params_b: 14.7,
+      in_catalog: true,
+    },
+    {
+      hf_repo: "mistralai/Codestral-22B-v0.1",
+      downloads: 96_412,
+      likes: 1247,
+      tags: ["text-generation", "mistral", "code"],
+      gated: true,
+      created_at: iso(440 * DAY),
+      params_b: 22.2,
+      in_catalog: false,
+    },
+  ],
+  image: [
+    {
+      hf_repo: "black-forest-labs/FLUX.1-schnell",
+      downloads: 3_412_887,
+      likes: 3891,
+      tags: ["text-to-image", "diffusers", "flux"],
+      gated: false,
+      created_at: iso(380 * DAY),
+      params_b: 0,
+      in_catalog: true,
+    },
+    {
+      hf_repo: "stabilityai/stable-diffusion-xl-base-1.0",
+      downloads: 2_107_554,
+      likes: 6712,
+      tags: ["text-to-image", "diffusers", "sdxl"],
+      gated: false,
+      created_at: iso(750 * DAY),
+      params_b: 0,
+      in_catalog: false,
+    },
+    {
+      hf_repo: "black-forest-labs/FLUX.1-dev",
+      downloads: 1_893_020,
+      likes: 9204,
+      tags: ["text-to-image", "diffusers", "flux"],
+      gated: true,
+      created_at: iso(380 * DAY),
+      params_b: 0,
+      in_catalog: false,
+    },
+  ],
+};
 
 const suggestions = [
   {
@@ -632,7 +720,22 @@ const publicUsers = [
 
 // ── Chat conversations (routers/chat.py) ────────────────────────────────────
 
-const chatStatus = { serving: [lease0] };
+// The imagegen lane serving FLUX — lights up the chat image affordance.
+const imageLease = {
+  model_id: 7,
+  model_name: "FLUX.1 schnell",
+  model_slug: "flux-1-schnell",
+  engine: "imagegen",
+  gpu_ids: [1],
+  gpu_index: 1,
+  state: "ready",
+  container_id: "forge-imagegen",
+  base_url: "http://forge-imagegen:8084/v1",
+  error: "",
+  acquired_at: iso(9 * MIN),
+};
+
+const chatStatus = { serving: [lease0], image: imageLease };
 
 const conv = (id, title, model_slug, updatedAgo, createdAgo, extra = {}) => ({
   id,
@@ -671,6 +774,23 @@ const gardenAttachment = {
   kind: "image",
   mime: "image/png",
   size_bytes: 0, // patched after the PNG is generated below
+  generated: false,
+  prompt: "",
+};
+
+// A Forge-generated image attached to an assistant turn (POST /api/chat/image).
+const generatedPrompt =
+  "Top-down illustration of three raised garden beds connected by drip " +
+  "irrigation lines running from a rain barrel";
+
+const generatedAttachment = {
+  id: "up-gen-1",
+  filename: "top-down-illustration-of-three-raised-garden-beds.png",
+  kind: "image",
+  mime: "image/png",
+  size_bytes: 0, // patched after the PNG is generated below
+  generated: true,
+  prompt: generatedPrompt,
 };
 
 const gardenReply = [
@@ -732,6 +852,14 @@ const conversationDetail = {
       10 * MIN,
     ),
     chatMsg(104, "assistant", gardenFollowUp, 8 * MIN),
+    chatMsg(105, "user", generatedPrompt, 5 * MIN),
+    chatMsg(
+      106,
+      "assistant",
+      `[Generated image: ${generatedPrompt}]`,
+      4 * MIN,
+      [generatedAttachment],
+    ),
   ],
 };
 
@@ -937,6 +1065,7 @@ function renderGardenPng() {
 
 const gardenPngBuffer = renderGardenPng();
 gardenAttachment.size_bytes = gardenPngBuffer.length;
+generatedAttachment.size_bytes = gardenPngBuffer.length;
 
 // ── HTTP plumbing ───────────────────────────────────────────────────────────
 
@@ -1014,6 +1143,38 @@ function handleApi(req, res, url) {
 
   // chat
   if (p === "/api/chat/status") return sendJson(res, chatStatus);
+  if (p === "/api/chat/image" && req.method === "POST") {
+    // Happy path after a believable "diffusion" pause; the pending bubble
+    // shows meanwhile. Serves the demo garden PNG like every other upload —
+    // or inline as a data URI when the body asks for a temporary generation.
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      let temporary = false;
+      try {
+        temporary = JSON.parse(Buffer.concat(chunks).toString()).temporary === true;
+      } catch {
+        /* body optional in the mock */
+      }
+      const payload = temporary
+        ? {
+            upload: null,
+            image_data_uri: `data:image/png;base64,${gardenPngBuffer.toString("base64")}`,
+            conversation_id: null,
+            user_message_id: null,
+            assistant_message_id: null,
+          }
+        : {
+            upload: generatedAttachment,
+            conversation_id: null,
+            user_message_id: null,
+            assistant_message_id: null,
+          };
+      const timer = setTimeout(() => sendJson(res, payload), 1500);
+      req.on("close", () => clearTimeout(timer));
+    });
+    return;
+  }
   if (p === "/api/chat/conversations") {
     if (req.method === "POST") return sendJson(res, conversations[0]);
     const archived = q.get("archived") === "true";
@@ -1079,6 +1240,13 @@ function handleApi(req, res, url) {
 
   if (p === "/api/models") return sendJson(res, models);
   if (p === "/api/models/suggestions") return sendJson(res, suggestions);
+  if (p === "/api/models/search") {
+    const kind = q.get("kind") === "image" ? "image" : "text";
+    return sendJson(res, hubSearchResults[kind]);
+  }
+  if (p === "/api/models/search/add" && req.method === "POST") {
+    return sendJson(res, models[0]);
+  }
   m = p.match(/^\/api\/models\/(\d+)\/thinking\/(auto|off|low|high)$/);
   if (m) {
     const model = models.find((x) => x.id === Number(m[1]));

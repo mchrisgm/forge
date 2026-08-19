@@ -34,14 +34,22 @@ _MAGIC = {
 }
 
 
-def _sniff(head: bytes, filename: str, declared: str) -> tuple[str, str]:
-    """(mime, kind) from magic bytes first, extension second."""
+def _sniff_magic(head: bytes) -> tuple[str, str] | None:
+    """(mime, kind) when the magic bytes identify a known format."""
     for magic, mime in _MAGIC.items():
         if head.startswith(magic):
             if mime == "image/webp" and head[8:12] != b"WEBP":
                 continue
             kind = "pdf" if mime == "application/pdf" else "image"
             return mime, kind
+    return None
+
+
+def _sniff(head: bytes, filename: str, declared: str) -> tuple[str, str]:
+    """(mime, kind) from magic bytes first, extension second."""
+    sniffed = _sniff_magic(head)
+    if sniffed:
+        return sniffed
     ext = Path(filename).suffix.lower()
     if ext in TEXT_EXTENSIONS:
         return declared or "text/plain", "text"
@@ -82,6 +90,56 @@ async def save_upload(user_id: int, file: UploadFile) -> Upload:
         kind=kind,
         size_bytes=len(data),
         path=str(dest),
+    )
+    with write_session() as db:
+        db.add(upload)
+    with read_session() as db:
+        return db.get(Upload, upload_id)
+
+
+_GEN_EXT = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "application/pdf": ".pdf",
+}
+
+
+def save_generated(
+    user_id: int, data: bytes, prompt: str, mime: str = "image/png"
+) -> Upload:
+    """Persist a Forge-generated file (image generation etc.) as an Upload row
+    so it serves, attaches, and deletes exactly like a user upload."""
+    settings = get_settings()
+    if not data:
+        raise HTTPException(502, "generation returned an empty file")
+    if len(data) > settings.upload_max_mb * 1024 * 1024:
+        raise HTTPException(
+            502, f"generated file exceeds the {settings.upload_max_mb} MB limit"
+        )
+    # Magic bytes only — a connector's declared MIME is remote-controlled and
+    # must not put non-image bytes (SVG/HTML) into inline-render paths.
+    sniffed = _sniff_magic(data[:16])
+    mime, kind = sniffed if sniffed else ("application/octet-stream", "other")
+    stem = re.sub(r"[^\w]+", "-", prompt.lower()).strip("-")[:48] or "generated"
+    upload_id = str(uuid.uuid4())
+    user_dir = Path(settings.uploads_dir) / str(user_id)
+    user_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{stem}{_GEN_EXT.get(mime, '.bin')}"
+    dest = user_dir / f"{upload_id}-{filename}"
+    dest.write_bytes(data)
+
+    upload = Upload(
+        id=upload_id,
+        user_id=user_id,
+        filename=filename,
+        mime=mime,
+        kind=kind,
+        size_bytes=len(data),
+        path=str(dest),
+        generated=True,
+        prompt=prompt[:2000],
     )
     with write_session() as db:
         db.add(upload)

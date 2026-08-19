@@ -34,19 +34,20 @@ def list_served_models() -> dict:
                 "created": int(time.time()),
                 "owned_by": f"forge-{lease.engine.value}-gpu{lease.gpu_index}",
             }
-            for lease in engine_manager.ready_leases()
+            for lease in engine_manager.ready_text_leases()
         ],
     }
 
 
 def resolve_lease(model_slug: str | None):
-    """Lease serving `model_slug`. The single-ready-lease fallback applies
-    ONLY to slug-less requests — an explicit slug that matches nothing is a
-    404, never a silent answer from a different model."""
-    ready = engine_manager.ready_leases()
+    """TEXT lease serving `model_slug` (imagegen leases never answer chat).
+    The single-ready-lease fallback applies ONLY to slug-less requests — an
+    explicit slug that matches nothing is a 404, never a silent answer from a
+    different model."""
+    ready = engine_manager.ready_text_leases()
     if model_slug:
         lease = engine_manager.lease_for_slug(model_slug)
-        if lease:
+        if lease and lease.engine.value != "imagegen":
             return lease
     elif len(ready) == 1:
         return ready[0]
