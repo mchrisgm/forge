@@ -58,11 +58,22 @@ class TaskState(str, Enum):
 
 
 class ConnectorKind(str, Enum):
+    """The five core connectors (PLAN §1.8). The Connector table's kind column
+    is a free string so catalog integrations (notion, linear, figma, …) and
+    custom user-added MCP servers share the same storage."""
+
     github = "github"
     searxng = "searxng"
     fetch = "fetch"
     playwright = "playwright"
     skills = "skills"
+
+
+class ThinkingLevel(str, Enum):
+    auto = "auto"  # no directives — the model's native default
+    off = "off"
+    low = "low"
+    high = "high"
 
 
 class ModelEntry(SQLModel, table=True):
@@ -110,6 +121,7 @@ class Task(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     session_id: str = Field(foreign_key="session.id", index=True)
     prompt: str
+    thinking: ThinkingLevel = ThinkingLevel.auto
     state: TaskState = TaskState.queued
     opencode_session_id: str = ""  # OpenCode-side session created for this task
     result: str = ""  # last assistant text or error detail
@@ -129,9 +141,11 @@ class Skill(SQLModel, table=True):
 
 class Connector(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
-    kind: ConnectorKind = Field(index=True, unique=True)
+    # Free string: core kinds (ConnectorKind values), catalog integration ids
+    # (notion, linear, …), or "custom-<slug>" for user-defined MCP servers.
+    kind: str = Field(index=True, unique=True)
     enabled: bool = True
-    config_json: str = "{}"  # e.g. {"token": "<github pat>"} — LAN-only threat model (PLAN §7)
+    config_json: str = "{}"  # secrets + custom definitions — LAN-only threat model (PLAN §7)
 
 
 class Setting(SQLModel, table=True):

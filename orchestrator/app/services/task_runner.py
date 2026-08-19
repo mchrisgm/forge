@@ -10,11 +10,12 @@ import logging
 from datetime import UTC, datetime
 
 from ..db import read_session, write_session
-from ..models import ModelEntry, Session, SessionState, Task, TaskState
+from ..models import ModelEntry, Session, SessionState, Task, TaskState, ThinkingLevel
 from ..opencode_config import OPENCODE_PROVIDER, opencode_model_id
 from . import opencode_client
 from .events import bus
 from .session_manager import opencode_base_url, session_manager
+from .thinking import apply_to_prompt, directives_for
 
 log = logging.getLogger(__name__)
 
@@ -59,12 +60,14 @@ def _set_state(task_id: int, state: TaskState, **fields) -> Task | None:
     return task
 
 
-async def create_task(session_id: str, prompt: str) -> Task:
+async def create_task(
+    session_id: str, prompt: str, thinking: ThinkingLevel = ThinkingLevel.auto
+) -> Task:
     with read_session() as db:
         session = db.get(Session, session_id)
     if session is None:
         raise ValueError("session not found")
-    task = Task(session_id=session_id, prompt=prompt)
+    task = Task(session_id=session_id, prompt=prompt, thinking=thinking)
     with write_session() as db:
         db.add(task)
         db.flush()
@@ -110,12 +113,14 @@ async def _run(task_id: int) -> None:
             oc_session_id = await _retry_create(base_url, f"task-{task_id}")
             _set_state(task_id, TaskState.running, opencode_session_id=oc_session_id)
 
+        directives = directives_for(model, task.thinking)
         message = await opencode_client.send_prompt(
             base_url,
             oc_session_id,
-            task.prompt,
+            apply_to_prompt(task.prompt, directives),
             provider_id=OPENCODE_PROVIDER,
             model_id=opencode_model_id(model),
+            system=directives.system or None,
         )
         text = opencode_client.extract_text(message) or "(no text response)"
         _set_state(

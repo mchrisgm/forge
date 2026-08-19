@@ -8,7 +8,7 @@ import {
   useState,
   type KeyboardEvent,
 } from "react";
-import { api, errorMessage } from "../../api/client";
+import { api, errorMessage, getThinkingDirectives } from "../../api/client";
 import {
   eventMessageInfo,
   eventPart,
@@ -22,12 +22,17 @@ import {
   type OcPart,
   type OcPermission,
 } from "../../api/opencode";
-import type { ModelEntry, Session } from "../../api/types";
+import type { ModelEntry, Session, ThinkingLevel } from "../../api/types";
 import { useToast } from "../../hooks/toast";
 import { getToken } from "../../lib/auth";
 import { cx, opencodeModelId } from "../../lib/utils";
 import { IconCheck, IconPlay, IconSend, IconStop, IconWrench, IconX } from "../icons";
 import { Markdown } from "../lazy-markdown";
+import {
+  loadStoredThinking,
+  storeThinking,
+  ThinkingSelect,
+} from "../ThinkingSelect";
 import { Button, Collapsible, EmptyState, SkeletonBlock, Spinner } from "../ui";
 
 // ── Chat state: messages merged from history + SSE part updates ─────────────
@@ -344,6 +349,19 @@ export default function ChatTab({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const running = session.state === "running";
 
+  // Thinking level, persisted per session.
+  const thinkingKey = `forge.thinking.${session.id}`;
+  const [thinking, setThinkingState] = useState<ThinkingLevel>(() =>
+    loadStoredThinking(thinkingKey),
+  );
+  const setThinking = useCallback(
+    (level: ThinkingLevel) => {
+      setThinkingState(level);
+      storeThinking(thinkingKey, level);
+    },
+    [thinkingKey],
+  );
+
   // 1) Resolve (or create) the OpenCode session inside the container.
   const ocSession = useQuery({
     queryKey: ["ocSession", session.id],
@@ -523,12 +541,25 @@ export default function ChatTab({
   const send = useMutation({
     mutationFn: async (text: string) => {
       if (!ocId || !model) throw new Error("Session model not resolved yet");
+      let outgoing = text;
+      let system = "";
+      if (thinking !== "auto") {
+        try {
+          const d = await getThinkingDirectives(model.id, thinking);
+          if (d.user_suffix) outgoing = text + d.user_suffix;
+          system = d.system;
+        } catch {
+          // Directives endpoint unreachable — send the plain prompt rather
+          // than blocking the message.
+        }
+      }
       return opencode.sendMessage(
         session.id,
         ocId,
         "forge-local",
         opencodeModelId(model.display_name, model.id),
-        text,
+        outgoing,
+        system ? { system } : {},
       );
     },
     onSuccess: () => {
@@ -700,6 +731,11 @@ export default function ChatTab({
               }}
               onKeyDown={onComposerKeyDown}
               className="max-h-40 min-h-11 flex-1 resize-none rounded-xl border border-edge bg-raised px-3.5 py-2.5 text-sm text-text placeholder:text-faint focus:border-accent focus:outline-none"
+            />
+            <ThinkingSelect
+              value={thinking}
+              onChange={setThinking}
+              disabled={!ocId || !model}
             />
             {busy ? (
               <Button

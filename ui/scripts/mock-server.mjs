@@ -1,0 +1,775 @@
+// Mock orchestrator + static PWA server for README screenshots.
+//
+// Zero-dependency: serves the built PWA from ui/dist (SPA fallback) and
+// implements the /api endpoints the app calls with rich, static demo data so
+// screenshots look like a live two-GPU Forge box. Never used in production.
+//
+//   node scripts/mock-server.mjs [port]     (default 4173)
+
+import { createServer } from "node:http";
+import { readFileSync, existsSync, statSync } from "node:fs";
+import { join, extname, dirname, resolve, normalize } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DIST = resolve(__dirname, "..", "dist");
+const PORT = Number(process.argv[2] || 4173);
+
+const now = Date.now();
+const iso = (msAgo) => new Date(now - msAgo).toISOString();
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+
+// ── Demo data ───────────────────────────────────────────────────────────────
+
+const models = [
+  {
+    id: 1,
+    hf_repo: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+    display_name: "Qwen3 Coder 30B A3B",
+    family: "qwen3",
+    params_b: 30.5,
+    quant: "gguf-q4_k_m",
+    file_path: "/models/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf",
+    size_gb: 18.6,
+    engine: "llamacpp",
+    ctx_max: 65536,
+    n_layers: 48,
+    is_moe: true,
+    tool_call_format: "qwen",
+    status: "ready",
+    score: 0.91,
+    note: "",
+    added_at: iso(12 * DAY),
+  },
+  {
+    id: 2,
+    hf_repo: "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
+    display_name: "Qwen2.5 Coder 14B AWQ",
+    family: "qwen2.5",
+    params_b: 14.7,
+    quant: "awq",
+    file_path: "/models/qwen2.5-coder-14b-instruct-awq",
+    size_gb: 9.9,
+    engine: "vllm",
+    ctx_max: 32768,
+    n_layers: 48,
+    is_moe: false,
+    tool_call_format: "qwen",
+    status: "ready",
+    score: 0.84,
+    note: "",
+    added_at: iso(30 * DAY),
+  },
+  {
+    id: 3,
+    hf_repo: "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+    display_name: "Qwen2.5 Coder 7B",
+    family: "qwen2.5",
+    params_b: 7.6,
+    quant: "gguf-q4_k_m",
+    file_path: "/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+    size_gb: 4.7,
+    engine: "llamacpp",
+    ctx_max: 32768,
+    n_layers: 28,
+    is_moe: false,
+    tool_call_format: "qwen",
+    status: "ready",
+    score: 0.78,
+    note: "",
+    added_at: iso(41 * DAY),
+  },
+  {
+    id: 6,
+    hf_repo: "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ",
+    display_name: "Qwen2.5 Coder 32B AWQ",
+    family: "qwen2.5",
+    params_b: 32.8,
+    quant: "awq",
+    file_path: "/models/qwen2.5-coder-32b-instruct-awq",
+    size_gb: 19.3,
+    engine: "vllm",
+    ctx_max: 32768,
+    n_layers: 64,
+    is_moe: false,
+    tool_call_format: "qwen",
+    status: "ready",
+    score: 0.88,
+    note: "",
+    added_at: iso(8 * DAY),
+  },
+  {
+    id: 4,
+    hf_repo: "lmstudio-community/DeepSeek-Coder-V2-Lite-Instruct-GGUF",
+    display_name: "DeepSeek Coder V2 Lite",
+    family: "deepseek",
+    params_b: 15.7,
+    quant: "gguf-q4_k_m",
+    file_path: "/models/deepseek-coder-v2-lite-instruct-q4_k_m.gguf",
+    size_gb: 9.4,
+    engine: "llamacpp",
+    ctx_max: 131072,
+    n_layers: 27,
+    is_moe: true,
+    tool_call_format: "none",
+    status: "downloading",
+    score: 0.8,
+    note: "",
+    added_at: iso(2 * HOUR),
+  },
+  {
+    id: 5,
+    hf_repo: "meta-llama/Llama-3.3-70B-Instruct",
+    display_name: "Llama 3.3 70B",
+    family: "llama3",
+    params_b: 70.6,
+    quant: "fp16-airllm",
+    file_path: "/models/llama-3.3-70b-instruct",
+    size_gb: 131.4,
+    engine: "airllm",
+    ctx_max: 8192,
+    n_layers: 80,
+    is_moe: false,
+    tool_call_format: "llama3",
+    status: "ready",
+    score: 0.62,
+    note: "",
+    added_at: iso(20 * DAY),
+  },
+];
+
+const suggestions = [
+  {
+    id: 101,
+    hf_repo: "mistralai/Devstral-Small-2508",
+    reason: {
+      trend: 0.92,
+      recency: 0.88,
+      coding_signal: 0.95,
+      fit: 0.71,
+      lane: "llamacpp",
+      score: 0.89,
+      params_b: 24,
+      is_moe: false,
+      gguf_repo: "mistralai/Devstral-Small-2508_gguf",
+      gguf_file: "Devstral-Small-2508-Q4_K_M.gguf",
+      gguf_size_gb: 14.3,
+      has_awq: false,
+    },
+    created_at: iso(6 * HOUR),
+    dismissed: false,
+  },
+  {
+    id: 102,
+    hf_repo: "ByteDance-Seed/Seed-Coder-8B-Instruct",
+    reason: {
+      trend: 0.81,
+      recency: 0.64,
+      coding_signal: 0.9,
+      fit: 0.94,
+      lane: "vllm",
+      score: 0.81,
+      params_b: 8.2,
+      is_moe: false,
+      gguf_repo: null,
+      gguf_file: null,
+      gguf_size_gb: 0,
+      has_awq: true,
+    },
+    created_at: iso(3 * DAY),
+    dismissed: false,
+  },
+];
+
+const lease0 = {
+  model_id: 1,
+  model_name: "Qwen3 Coder 30B A3B",
+  model_slug: "qwen3-coder-30b-a3b",
+  engine: "llamacpp",
+  gpu_ids: [0],
+  gpu_index: 0,
+  state: "ready",
+  container_id: "forge-llamacpp",
+  base_url: "http://forge-llamacpp:8081/v1",
+  error: "",
+  acquired_at: iso(52 * MIN),
+};
+
+const lease1 = {
+  model_id: 2,
+  model_name: "Qwen2.5 Coder 14B AWQ",
+  model_slug: "qwen25-coder-14b-awq",
+  engine: "vllm",
+  gpu_ids: [1],
+  gpu_index: 1,
+  state: "ready",
+  container_id: "forge-vllm",
+  base_url: "http://forge-vllm:8082/v1",
+  error: "",
+  acquired_at: iso(18 * MIN),
+};
+
+const enginesStatus = {
+  gpu_count: 2,
+  lease: lease0,
+  leases: [lease0, lease1],
+  gpus: [
+    { index: 0, lease: lease0 },
+    { index: 1, lease: lease1 },
+  ],
+  engines: {
+    llamacpp: { port: 8081, active_on: [0] },
+    vllm: { port: 8082, active_on: [1] },
+    airllm: { port: 8083, active_on: [] },
+  },
+};
+
+const gpuStats = [
+  {
+    index: 0,
+    name: "NVIDIA GeForce RTX 4070 Ti SUPER",
+    vram_total_gb: 16.0,
+    vram_used_gb: 13.2,
+    utilization_pct: 87,
+  },
+  {
+    index: 1,
+    name: "NVIDIA GeForce RTX 4070 Ti SUPER",
+    vram_total_gb: 16.0,
+    vram_used_gb: 10.4,
+    utilization_pct: 54,
+  },
+];
+
+const systemStats = {
+  gpu: gpuStats[0],
+  gpus: gpuStats,
+  ram: { total_gb: 48.0, used_gb: 29.3, pct: 61 },
+  cpu_pct: 34,
+  disk: { total_gb: 931.5, used_gb: 412.7, free_gb: 518.8 },
+  engine: enginesStatus,
+  session_containers: [
+    { name: "forge-session-a1b2c3", status: "running", session_id: "sess-1" },
+    { name: "forge-session-d4e5f6", status: "running", session_id: "sess-2" },
+    { name: "forge-session-g7h8i9", status: "exited", session_id: "sess-3" },
+  ],
+  docker_ok: true,
+  budgets: { vram_gb: 15, ram_offload_gb: 32 },
+};
+
+const sessions = [
+  {
+    id: "sess-1",
+    name: "fix flaky auth tests",
+    container_id: "forge-session-a1b2c3",
+    state: "running",
+    workspace_path: "/workspace",
+    model_id: 1,
+    created_at: iso(3 * HOUR),
+    last_active_at: iso(2 * MIN),
+    repo_url: "https://github.com/acme/api-server",
+    last_error: "",
+  },
+  {
+    id: "sess-2",
+    name: "add dark mode",
+    container_id: "forge-session-d4e5f6",
+    state: "idle",
+    workspace_path: "/workspace",
+    model_id: 3,
+    created_at: iso(26 * HOUR),
+    last_active_at: iso(38 * MIN),
+    repo_url: "https://github.com/acme/webapp",
+    last_error: "",
+  },
+  {
+    id: "sess-3",
+    name: "profile slow ingest job",
+    container_id: "forge-session-g7h8i9",
+    state: "stopped",
+    workspace_path: "/workspace",
+    model_id: 2,
+    created_at: iso(4 * DAY),
+    last_active_at: iso(26 * HOUR),
+    repo_url: "https://github.com/acme/data-pipeline",
+    last_error: "",
+  },
+];
+
+// ── Curated OpenCode conversation for sess-1 ────────────────────────────────
+
+const OC_ID = "oc-1";
+
+const ocSessions = [
+  {
+    id: OC_ID,
+    title: "fix flaky auth tests",
+    time: { created: now - 3 * HOUR, updated: now - 2 * MIN },
+  },
+];
+
+const analysisText = [
+  "I reproduced it by running the test in a loop — it fails whenever the refresh lands in the **same second** the token was issued.",
+  "",
+  "The bug is in `services/auth/token.py`: `is_expired()` compares with `<`, so a token that expires exactly at `now()` is still considered valid and never rotated:",
+  "",
+  "```python",
+  "def is_expired(self, now: datetime) -> bool:",
+  "    return self.expires_at < now  # boundary: equal timestamps pass",
+  "```",
+  "",
+  "CI runners are fast enough to hit that boundary regularly, which is why it only flakes there. I'll make expiry inclusive and freeze time in the test so the assertion stops depending on runner speed.",
+].join("\n");
+
+const summaryText = [
+  "**Fixed.** The flake was a boundary condition, not test infrastructure:",
+  "",
+  "- `is_expired()` now treats a token expiring exactly at `now` as expired (`<=` instead of `<`)",
+  "- `test_token_refresh` freezes time with `freezegun`, so same-second refreshes are deterministic",
+  "- 20 consecutive runs of the auth suite pass cleanly",
+  "",
+  "Want me to commit this on `fix/flaky-token-refresh` and open a PR?",
+].join("\n");
+
+const ocMessages = [
+  {
+    info: {
+      id: "msg-1",
+      role: "user",
+      sessionID: OC_ID,
+      time: { created: now - 21 * MIN },
+    },
+    parts: [
+      {
+        id: "prt-u1",
+        messageID: "msg-1",
+        sessionID: OC_ID,
+        type: "text",
+        text: "The auth suite keeps flaking in CI — test_token_refresh fails roughly 1 in 5 runs with `AssertionError: token was not refreshed`. Can you track down the root cause and fix it?",
+      },
+    ],
+  },
+  {
+    info: {
+      id: "msg-2",
+      role: "assistant",
+      sessionID: OC_ID,
+      time: { created: now - 20 * MIN, completed: now - 14 * MIN },
+    },
+    parts: [
+      {
+        id: "prt-a1",
+        messageID: "msg-2",
+        sessionID: OC_ID,
+        type: "text",
+        text: analysisText,
+      },
+      {
+        id: "prt-t1",
+        messageID: "msg-2",
+        sessionID: OC_ID,
+        type: "tool",
+        tool: "read",
+        callID: "call-1",
+        state: {
+          status: "completed",
+          title: "tests/auth/test_token_refresh.py",
+          input: { filePath: "tests/auth/test_token_refresh.py" },
+          output:
+            "def test_token_refresh(client):\n    token = issue_token(ttl=1)\n    time.sleep(1)\n    refreshed = client.post(\"/auth/refresh\", token=token)\n    assert refreshed.token != token, \"token was not refreshed\"",
+        },
+      },
+      {
+        id: "prt-t2",
+        messageID: "msg-2",
+        sessionID: OC_ID,
+        type: "tool",
+        tool: "edit",
+        callID: "call-2",
+        state: {
+          status: "completed",
+          title: "services/auth/token.py",
+          input: {
+            filePath: "services/auth/token.py",
+            oldString: "return self.expires_at < now",
+            newString: "return self.expires_at <= now",
+          },
+          output:
+            "Edited services/auth/token.py (1 replacement).\n\nis_expired() now treats a token expiring exactly at `now` as expired, so a refresh that lands in the same second still rotates the token.",
+        },
+      },
+      {
+        id: "prt-t3",
+        messageID: "msg-2",
+        sessionID: OC_ID,
+        type: "tool",
+        tool: "bash",
+        callID: "call-3",
+        state: {
+          status: "completed",
+          title: "pytest tests/auth -q ×20",
+          input: { command: "for i in $(seq 20); do pytest tests/auth -q || break; done" },
+          output:
+            "run 20/20 — 84 passed in 6.21s\nno failures across 20 consecutive runs\nslowest: test_token_refresh 0.41s",
+        },
+      },
+    ],
+  },
+  {
+    info: {
+      id: "msg-3",
+      role: "assistant",
+      sessionID: OC_ID,
+      time: { created: now - 14 * MIN, completed: now - 13 * MIN },
+    },
+    parts: [
+      {
+        id: "prt-a2",
+        messageID: "msg-3",
+        sessionID: OC_ID,
+        type: "text",
+        text: summaryText,
+      },
+    ],
+  },
+];
+
+// ── Files / git / tasks for sess-1 ──────────────────────────────────────────
+
+const fileTree = {
+  "": [
+    { name: "src", type: "dir", size: 0 },
+    { name: "tests", type: "dir", size: 0 },
+    { name: "README.md", type: "file", size: 2481 },
+    { name: "pyproject.toml", type: "file", size: 914 },
+  ],
+  src: [
+    { name: "auth", type: "dir", size: 0 },
+    { name: "main.py", type: "file", size: 3720 },
+  ],
+  "src/auth": [
+    { name: "token.py", type: "file", size: 1980 },
+    { name: "routes.py", type: "file", size: 4102 },
+  ],
+  tests: [
+    { name: "auth", type: "dir", size: 0 },
+    { name: "conftest.py", type: "file", size: 1204 },
+  ],
+  "tests/auth": [
+    { name: "test_token_refresh.py", type: "file", size: 1480 },
+  ],
+};
+
+const fileContents = {
+  "README.md":
+    "# acme/api-server\n\nFastAPI backend for the Acme platform.\n\n## Development\n\n```bash\nuv sync\nuv run pytest\nuv run uvicorn src.main:app --reload\n```\n",
+  "src/auth/token.py":
+    "from datetime import datetime, timedelta\n\n\nclass Token:\n    def __init__(self, value: str, expires_at: datetime) -> None:\n        self.value = value\n        self.expires_at = expires_at\n\n    def is_expired(self, now: datetime) -> bool:\n        return self.expires_at <= now\n",
+};
+
+const gitStatus = {
+  branch: "fix/flaky-token-refresh",
+  changes: [
+    { status: "M", path: "services/auth/token.py" },
+    { status: "M", path: "tests/auth/test_token_refresh.py" },
+  ],
+};
+
+const gitLog = [
+  {
+    hash: "9f21c4a",
+    author: "forge-agent",
+    date: iso(15 * MIN),
+    subject: "fix(auth): make token expiry inclusive at the boundary",
+  },
+  {
+    hash: "b8305de",
+    author: "chris",
+    date: iso(2 * DAY),
+    subject: "ci: run auth suite on 3.11 and 3.12",
+  },
+  {
+    hash: "51adca9",
+    author: "chris",
+    date: iso(3 * DAY),
+    subject: "feat(auth): sliding-window refresh tokens",
+  },
+];
+
+const gitDiff = {
+  diff: [
+    "diff --git a/services/auth/token.py b/services/auth/token.py",
+    "index 4c7f2aa..9d114be 100644",
+    "--- a/services/auth/token.py",
+    "+++ b/services/auth/token.py",
+    "@@ -18,7 +18,7 @@ class Token:",
+    "     def is_expired(self, now: datetime) -> bool:",
+    '-        return self.expires_at < now',
+    '+        return self.expires_at <= now',
+    "",
+    "diff --git a/tests/auth/test_token_refresh.py b/tests/auth/test_token_refresh.py",
+    "index 77b01c2..f00d9e1 100644",
+    "--- a/tests/auth/test_token_refresh.py",
+    "+++ b/tests/auth/test_token_refresh.py",
+    "@@ -1,9 +1,10 @@",
+    "+from freezegun import freeze_time",
+    " import time",
+    "",
+    "-def test_token_refresh(client):",
+    "-    token = issue_token(ttl=1)",
+    "-    time.sleep(1)",
+    "+@freeze_time(\"2026-08-19 12:00:00\", tick=False)",
+    "+def test_token_refresh(client):",
+    "+    token = issue_token(ttl=0)",
+    "     refreshed = client.post(\"/auth/refresh\", token=token)",
+    '     assert refreshed.token != token, "token was not refreshed"',
+  ].join("\n"),
+};
+
+const tasks = [
+  {
+    id: 1,
+    session_id: "sess-1",
+    prompt: "Run the full test suite and summarize any failures",
+    state: "done",
+    opencode_session_id: "task-1",
+    result: "84 passed, 0 failed — the flaky auth test is fixed.",
+    created_at: iso(50 * MIN),
+    finished_at: iso(44 * MIN),
+    thinking: "auto",
+  },
+  {
+    id: 2,
+    session_id: "sess-1",
+    prompt: "Draft a changelog entry for the token refresh fix",
+    state: "running",
+    opencode_session_id: "task-2",
+    result: "",
+    created_at: iso(4 * MIN),
+    finished_at: null,
+    thinking: "low",
+  },
+];
+
+const skills = [
+  {
+    id: 1,
+    name: "conventional-commits",
+    description: "Commit message conventions and changelog discipline for Acme repos.",
+    source_url: "https://github.com/acme/agent-skills",
+    path: "/skills/conventional-commits",
+    installed_at: iso(9 * DAY),
+    enabled: true,
+  },
+  {
+    id: 2,
+    name: "fastapi-review",
+    description: "Review checklist for FastAPI endpoints: auth, pagination, error shapes.",
+    source_url: "https://github.com/acme/agent-skills",
+    path: "/skills/fastapi-review",
+    installed_at: iso(6 * DAY),
+    enabled: true,
+  },
+];
+
+const settings = {
+  session_idle_min: 30,
+  registry_cron: "0 6 * * 1",
+  max_parallel_sessions: 3,
+  vram_budget_gb: 15,
+  ram_offload_budget_gb: 32,
+  llamacpp_slots: 2,
+};
+
+const connectors = JSON.parse(
+  readFileSync(join(__dirname, "mock-connectors.json"), "utf8"),
+);
+
+// ── HTTP plumbing ───────────────────────────────────────────────────────────
+
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".webmanifest": "application/manifest+json",
+  ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8",
+};
+
+function sendJson(res, body, status = 200) {
+  const data = JSON.stringify(body);
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+  });
+  res.end(data);
+}
+
+function sendSse(res, { events = [] } = {}) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-store",
+    Connection: "keep-alive",
+  });
+  res.write(": connected\n\n");
+  const timers = [];
+  for (const { delayMs, payload } of events) {
+    timers.push(
+      setTimeout(() => {
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      }, delayMs),
+    );
+  }
+  const heartbeat = setInterval(() => res.write(": keepalive\n\n"), 15000);
+  res.on("close", () => {
+    clearInterval(heartbeat);
+    for (const t of timers) clearTimeout(t);
+  });
+}
+
+function handleApi(req, res, url) {
+  const p = url.pathname.replace(/\/+$/, "") || "/";
+  const q = url.searchParams;
+
+  // auth — any password unlocks the demo
+  if (p === "/api/auth/login" && req.method === "POST") {
+    return sendJson(res, { token: "demo-token" });
+  }
+
+  // global SSE — one download.progress frame makes the 62% download live
+  if (p === "/api/events/stream") {
+    return sendSse(res, {
+      events: [
+        {
+          delayMs: 250,
+          payload: {
+            kind: "download.progress",
+            ts: Date.now() / 1000,
+            model_id: 4,
+            downloaded_gb: 5.8,
+            total_gb: 9.4,
+            pct: 62,
+          },
+        },
+      ],
+    });
+  }
+
+  // per-session SSE
+  let m = p.match(/^\/api\/sessions\/([^/]+)\/events$/);
+  if (m) return sendSse(res);
+
+  if (p === "/api/system/stats") return sendJson(res, systemStats);
+  if (p === "/api/engines") return sendJson(res, enginesStatus);
+  if (p === "/api/engines/load" && req.method === "POST") {
+    return sendJson(res, { lease: lease0 });
+  }
+  if (p === "/api/engines/unload" && req.method === "POST") {
+    return sendJson(res, { leases: [lease0, lease1] });
+  }
+
+  if (p === "/api/models") return sendJson(res, models);
+  if (p === "/api/models/suggestions") return sendJson(res, suggestions);
+  m = p.match(/^\/api\/models\/(\d+)\/thinking\/(auto|off|low|high)$/);
+  if (m) {
+    const model = models.find((x) => x.id === Number(m[1]));
+    return sendJson(res, {
+      family: model?.family ?? "qwen3",
+      level: m[2],
+      system: "",
+      user_suffix: "",
+    });
+  }
+
+  if (p === "/api/sessions") return sendJson(res, sessions);
+
+  m = p.match(/^\/api\/sessions\/([^/]+)(\/.*)?$/);
+  if (m) {
+    const session = sessions.find((s) => s.id === m[1]);
+    if (!session) return sendJson(res, { detail: "session not found" }, 404);
+    const sub = m[2] ?? "";
+    if (sub === "") return sendJson(res, session);
+    if (sub === "/opencode/session") {
+      if (req.method === "POST") return sendJson(res, ocSessions[0]);
+      return sendJson(res, ocSessions);
+    }
+    const oc = sub.match(/^\/opencode\/session\/([^/]+)\/message$/);
+    if (oc) {
+      if (req.method === "POST") return sendJson(res, { ok: true });
+      return sendJson(res, ocMessages);
+    }
+    if (sub === "/files") {
+      const path = (q.get("path") ?? "").replace(/^\.?\/?/, "").replace(/\/+$/, "");
+      const entries = fileTree[path] ?? [];
+      return sendJson(res, { path: path || ".", entries });
+    }
+    if (sub === "/file") {
+      const path = (q.get("path") ?? "").replace(/^\.?\/?/, "");
+      return sendJson(res, {
+        path,
+        content: fileContents[path] ?? `// ${path}\n// (demo content)\n`,
+      });
+    }
+    if (sub === "/git/status") return sendJson(res, gitStatus);
+    if (sub === "/git/log") return sendJson(res, gitLog);
+    if (sub === "/git/diff") return sendJson(res, gitDiff);
+    if (sub === "/tasks") {
+      if (req.method === "POST") return sendJson(res, tasks[1]);
+      return sendJson(res, session.id === "sess-1" ? tasks : []);
+    }
+    // start/stop/delete etc.
+    return sendJson(res, session);
+  }
+
+  if (p === "/api/tasks") return sendJson(res, tasks);
+  if (p === "/api/skills") return sendJson(res, skills);
+  if (p === "/api/connectors") return sendJson(res, connectors);
+  if (p === "/api/settings") return sendJson(res, settings);
+  if (p === "/api/health") return sendJson(res, { ok: true });
+
+  // benign default so no page ever shows an error state during capture
+  return sendJson(res, req.method === "GET" ? [] : { ok: true });
+}
+
+function serveStatic(res, pathname) {
+  let rel = normalize(decodeURIComponent(pathname)).replace(/^([/\\])+/, "");
+  let file = join(DIST, rel);
+  if (!file.startsWith(DIST)) file = join(DIST, "index.html");
+  if (!existsSync(file) || statSync(file).isDirectory()) {
+    file = extname(file) ? null : join(DIST, "index.html"); // SPA fallback
+  }
+  if (!file || !existsSync(file)) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    return res.end("not found");
+  }
+  res.writeHead(200, {
+    "Content-Type": MIME[extname(file)] ?? "application/octet-stream",
+    "Cache-Control": "no-store",
+  });
+  res.end(readFileSync(file));
+}
+
+const server = createServer((req, res) => {
+  const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
+  if (url.pathname.startsWith("/api/")) return handleApi(req, res, url);
+  return serveStatic(res, url.pathname === "/" ? "/index.html" : url.pathname);
+});
+
+server.listen(PORT, "127.0.0.1", () => {
+  console.log(`mock forge on http://127.0.0.1:${PORT} (serving ${DIST})`);
+});
+
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => {
+    server.closeAllConnections?.();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 500).unref();
+  });
+}

@@ -35,3 +35,11 @@ Per-model `tool_call_format` → vLLM `--tool-call-parser` (`_vllm_parser`):
 
 Health/readiness: `GET http://forge-engine-vllm:8082/v1/models` → 200 (model
 load can take minutes; the EngineManager healthwaits and streams state).
+
+## Tensor parallel (multi-GPU)
+
+With more than one free GPU, `POST /api/engines/load {model_id, gpu_count: N}`
+starts vLLM with `--tensor-parallel-size N` pinned to N GPUs (device_ids), so
+models up to ~N × the per-GPU budget fit the fast lane. Only the vLLM lane
+supports this; llama.cpp and AirLLM leases stay single-GPU (llama.cpp still
+splits layers across whatever devices it is given).

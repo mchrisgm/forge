@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { api, ApiError, errorMessage } from "../api/client";
 import type {
   EngineKind,
+  EnginesStatus,
   Lease,
   ModelEntry,
   Suggestion,
@@ -30,6 +31,7 @@ import {
   ModelStatusChip,
   ProgressBar,
   Select,
+  Sheet,
   SkeletonList,
   Spinner,
   TextInput,
@@ -41,31 +43,45 @@ import { cx, formatGb } from "../lib/utils";
 
 // ── GPU lease banner ────────────────────────────────────────────────────────
 
+/** Active leases from an engines status, tolerating older backends. */
+function statusLeases(status: EnginesStatus | null | undefined): Lease[] {
+  if (!status) return [];
+  return status.leases ?? (status.lease ? [status.lease] : []);
+}
+
 function LeaseBanner() {
-  const { toast } = useToast();
-  const queryClient = useQueryClient();
   const engines = useQuery({
     queryKey: ["engines"],
     queryFn: api.enginesStatus,
   });
-  const lease = engines.data?.lease ?? null;
+  const status = engines.data ?? null;
+  const leases = statusLeases(status);
+  if (!status || leases.length === 0) return null;
+  // Single GPU keeps the original rich banner; multi-GPU gets a per-GPU stack.
+  if ((status.gpu_count ?? 1) <= 1) {
+    return <SingleGpuBanner lease={leases[0]} />;
+  }
+  return <MultiGpuBanner status={status} leases={leases} />;
+}
+
+function SingleGpuBanner({ lease }: { lease: Lease }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
   const stats = useQuery({
     queryKey: ["system"],
     queryFn: api.systemStats,
-    enabled: lease?.state === "ready",
+    enabled: lease.state === "ready",
     refetchInterval: 10000,
   });
 
   const unload = useMutation({
-    mutationFn: api.unloadEngine,
+    mutationFn: () => api.unloadEngine(),
     onSuccess: () => {
       toast("success", "Engine unloaded — GPU released");
       void queryClient.invalidateQueries({ queryKey: ["engines"] });
     },
     onError: (err) => toast("error", errorMessage(err)),
   });
-
-  if (!lease) return null;
 
   const gpu = stats.data?.gpu ?? null;
   const budget = stats.data?.budgets.vram_gb ?? null;
@@ -161,6 +177,134 @@ function LeaseBanner() {
           </Collapsible>
         </div>
       )}
+    </div>
+  );
+}
+
+function LeaseStateDot({ state }: { state: Lease["state"] }) {
+  if (state === "starting") return <Spinner size={16} />;
+  return (
+    <span
+      aria-hidden
+      className={cx(
+        "h-2.5 w-2.5 shrink-0 rounded-full",
+        state === "ready" && "animate-pulse-dot bg-ok text-ok",
+        state === "failed" && "bg-danger",
+      )}
+    />
+  );
+}
+
+function MultiGpuBanner({
+  status,
+  leases,
+}: {
+  status: EnginesStatus;
+  leases: Lease[];
+}) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const unload = useMutation({
+    mutationFn: (gpuIndex: number) => api.unloadEngine(gpuIndex),
+    onSuccess: (_res, gpuIndex) => {
+      toast("success", `GPU ${gpuIndex} released`);
+      void queryClient.invalidateQueries({ queryKey: ["engines"] });
+      void queryClient.invalidateQueries({ queryKey: ["system"] });
+    },
+    onError: (err) => toast("error", errorMessage(err)),
+  });
+
+  const rows = Array.from({ length: status.gpu_count }, (_, index) => ({
+    index,
+    lease:
+      leases.find(
+        (l) => l.state !== "failed" && l.gpu_ids.includes(index),
+      ) ??
+      leases.find((l) => l.gpu_ids.includes(index)) ??
+      null,
+  }));
+
+  return (
+    <div className="sticky top-2 z-10 mb-5 overflow-hidden rounded-xl border border-border bg-surface/95 shadow-lg shadow-black/20 backdrop-blur">
+      <ul>
+        {rows.map(({ index, lease }) => {
+          const primary = lease != null && lease.gpu_index === index;
+          const spanned = lease != null && lease.gpu_ids.length > 1;
+          return (
+            <li
+              key={index}
+              className="border-b border-border/60 last:border-none"
+            >
+              <div className="flex min-h-13 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2">
+                <span className="w-12 shrink-0 font-mono text-xs font-medium text-faint">
+                  GPU {index}
+                </span>
+                {lease == null ? (
+                  <span className="text-sm text-faint">free</span>
+                ) : primary ? (
+                  <>
+                    <LeaseStateDot state={lease.state} />
+                    <span className="min-w-0 flex-1 truncate text-sm font-semibold text-text">
+                      {lease.model_name}
+                      <span className="ml-2 align-middle">
+                        <LaneBadge engine={lease.engine} />
+                      </span>
+                    </span>
+                    <span className="text-xs text-muted">{lease.state}</span>
+                    {lease.state === "ready" && (
+                      <Link
+                        to="/chat"
+                        aria-label={`Chat with ${lease.model_name}`}
+                        className="shrink-0"
+                      >
+                        <Button size="sm" variant="primary">
+                          <IconChat size={14} />
+                          Chat
+                        </Button>
+                      </Link>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      aria-label={`Unload GPU ${index}`}
+                      loading={unload.isPending && unload.variables === index}
+                      onClick={() => unload.mutate(index)}
+                    >
+                      <IconStop size={14} />
+                      Unload
+                    </Button>
+                  </>
+                ) : (
+                  <span className="min-w-0 flex-1 truncate text-sm text-muted">
+                    {lease.model_name}
+                    <span className="ml-2 text-xs text-faint">
+                      tensor parallel with GPU {lease.gpu_index}
+                    </span>
+                  </span>
+                )}
+              </div>
+              {lease != null &&
+                primary &&
+                lease.state === "failed" &&
+                lease.error && (
+                  <div className="px-4 pb-2">
+                    <Collapsible summary="Error log tail">
+                      <pre className="max-h-48 overflow-auto rounded-md border border-danger/30 bg-bg px-3 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-danger/90">
+                        {lease.error}
+                      </pre>
+                    </Collapsible>
+                  </div>
+                )}
+              {lease != null && primary && spanned && (
+                <p className="px-4 pb-2 text-[11px] text-faint">
+                  Spans GPUs {lease.gpu_ids.join(", ")} (tensor parallel)
+                </p>
+              )}
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
@@ -291,21 +435,225 @@ function SuggestionCard({ suggestion }: { suggestion: Suggestion }) {
 
 // ── Catalog card ────────────────────────────────────────────────────────────
 
+interface LoadVars {
+  force: boolean;
+  gpu_index?: number;
+  gpu_count?: number;
+}
+
+/** GPU-target picker shown before loading when the box has several GPUs. */
+function GpuPickSheet({
+  open,
+  onClose,
+  model,
+  status,
+  busy,
+  onLoad,
+}: {
+  open: boolean;
+  onClose: () => void;
+  model: ModelEntry;
+  status: EnginesStatus;
+  busy: boolean;
+  onLoad: (vars: LoadVars) => void;
+}) {
+  const gpuCount = status.gpu_count;
+  const leases = statusLeases(status);
+  const canSpan = model.engine === "vllm" && gpuCount > 1;
+  const [mode, setMode] = useState<"auto" | "gpu" | "span">("auto");
+  const [gpuIdx, setGpuIdx] = useState(0);
+  const [span, setSpan] = useState(2);
+
+  // Fresh choices every time the sheet opens.
+  useEffect(() => {
+    if (open) {
+      setMode("auto");
+      setGpuIdx(0);
+      setSpan(Math.min(2, gpuCount));
+    }
+  }, [open, gpuCount]);
+
+  const occupant = (index: number) =>
+    leases.find((l) => l.state !== "failed" && l.gpu_ids.includes(index)) ??
+    null;
+
+  const optionClass = (active: boolean) =>
+    cx(
+      "flex min-h-12 w-full cursor-pointer items-center gap-3 rounded-lg border px-3 text-left transition-colors duration-150",
+      active
+        ? "border-accent/50 bg-accent/10"
+        : "border-border bg-raised hover:bg-overlay",
+    );
+
+  const radioDot = (active: boolean) => (
+    <span
+      aria-hidden
+      className={cx(
+        "flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-full border-2",
+        active ? "border-accent" : "border-edge",
+      )}
+    >
+      {active && <span className="h-2 w-2 rounded-full bg-accent" />}
+    </span>
+  );
+
+  const submit = () => {
+    const vars: LoadVars =
+      mode === "span"
+        ? { force: false, gpu_count: span }
+        : mode === "gpu"
+          ? { force: false, gpu_index: gpuIdx }
+          : { force: false };
+    onLoad(vars);
+  };
+
+  return (
+    <Sheet open={open} onClose={onClose} title={`Load ${model.display_name}`}>
+      <div
+        role="radiogroup"
+        aria-label="GPU target"
+        className="space-y-2"
+      >
+        <button
+          type="button"
+          role="radio"
+          aria-checked={mode === "auto"}
+          onClick={() => setMode("auto")}
+          className={optionClass(mode === "auto")}
+        >
+          {radioDot(mode === "auto")}
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-medium text-text">Auto</span>
+            <span className="block text-xs text-faint">
+              First free GPU
+            </span>
+          </span>
+        </button>
+
+        {Array.from({ length: gpuCount }, (_, index) => {
+          const active = mode === "gpu" && gpuIdx === index;
+          const holder = occupant(index);
+          return (
+            <button
+              key={index}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              onClick={() => {
+                setMode("gpu");
+                setGpuIdx(index);
+              }}
+              className={optionClass(active)}
+            >
+              {radioDot(active)}
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-medium text-text">
+                  GPU {index}
+                </span>
+                <span
+                  className={cx(
+                    "block truncate text-xs",
+                    holder ? "text-warn" : "text-faint",
+                  )}
+                >
+                  {holder ? `busy — ${holder.model_name}` : "free"}
+                </span>
+              </span>
+            </button>
+          );
+        })}
+
+        {canSpan && (
+          <div
+            role="radio"
+            aria-checked={mode === "span"}
+            tabIndex={0}
+            onClick={() => setMode("span")}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setMode("span");
+              }
+            }}
+            className={optionClass(mode === "span")}
+          >
+            {radioDot(mode === "span")}
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-medium text-text">
+                Span multiple GPUs
+              </span>
+              <span className="block text-xs text-faint">
+                vLLM tensor parallel across {span} GPUs
+              </span>
+            </span>
+            {mode === "span" && (
+              <span
+                className="flex shrink-0 items-center gap-1"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label="Fewer GPUs"
+                  disabled={span <= 2}
+                  onClick={() => setSpan((s) => Math.max(2, s - 1))}
+                >
+                  −
+                </Button>
+                <span className="w-6 text-center font-mono text-sm text-text">
+                  {span}
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label="More GPUs"
+                  disabled={span >= gpuCount}
+                  onClick={() => setSpan((s) => Math.min(gpuCount, s + 1))}
+                >
+                  +
+                </Button>
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      <Button
+        variant="primary"
+        className="mt-4 w-full"
+        loading={busy}
+        onClick={submit}
+      >
+        <IconPlay size={15} />
+        Load model
+      </Button>
+    </Sheet>
+  );
+}
+
 function ModelCard({
   model,
-  lease,
+  status,
 }: {
   model: ModelEntry;
-  lease: Lease | null;
+  status: EnginesStatus | null;
 }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const { downloads } = useGlobalEvents();
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [busyHolder, setBusyHolder] = useState<Lease | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [conflict, setConflict] = useState<{
+    holders: Lease[];
+    vars: LoadVars;
+  } | null>(null);
 
   const progress = downloads[model.id];
-  const isHolder = lease?.model_id === model.id && lease.state !== "failed";
+  const leases = statusLeases(status);
+  const gpuCount = status?.gpu_count ?? 1;
+  const holder =
+    leases.find((l) => l.model_id === model.id && l.state !== "failed") ?? null;
+  const isHolder = holder != null;
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["models"] });
@@ -313,17 +661,23 @@ function ModelCard({
   };
 
   const load = useMutation({
-    mutationFn: (force: boolean) => api.loadEngine(model.id, force),
+    mutationFn: (vars: LoadVars) => api.loadEngine(model.id, vars),
     onSuccess: () => {
-      setBusyHolder(null);
+      setConflict(null);
+      setPickerOpen(false);
       toast("info", `Loading ${model.display_name} onto the GPU…`);
       invalidate();
     },
-    onError: (err) => {
+    onError: (err, vars) => {
       if (err instanceof ApiError && err.status === 409) {
-        const detail = err.detail as { holder?: Lease } | null;
-        if (detail?.holder) {
-          setBusyHolder(detail.holder);
+        const detail = err.detail as {
+          holders?: Lease[];
+          holder?: Lease;
+        } | null;
+        const holders =
+          detail?.holders ?? (detail?.holder ? [detail.holder] : []);
+        if (holders.length > 0) {
+          setConflict({ holders, vars });
           return;
         }
       }
@@ -332,7 +686,10 @@ function ModelCard({
   });
 
   const unload = useMutation({
-    mutationFn: api.unloadEngine,
+    mutationFn: () =>
+      api.unloadEngine(
+        gpuCount > 1 && holder ? holder.gpu_index : undefined,
+      ),
     onSuccess: () => invalidate(),
     onError: (err) => toast("error", errorMessage(err)),
   });
@@ -418,8 +775,12 @@ function ModelCard({
           <Button
             size="sm"
             variant="primary"
-            loading={load.isPending}
-            onClick={() => load.mutate(false)}
+            loading={load.isPending && !pickerOpen && conflict == null}
+            onClick={() =>
+              gpuCount > 1
+                ? setPickerOpen(true)
+                : load.mutate({ force: false })
+            }
           >
             <IconPlay size={14} />
             Load
@@ -433,7 +794,7 @@ function ModelCard({
             onClick={() => unload.mutate()}
           >
             <IconStop size={14} />
-            Unload
+            {gpuCount > 1 && holder ? `Unload GPU ${holder.gpu_index}` : "Unload"}
           </Button>
         )}
         <Button
@@ -456,19 +817,37 @@ function ModelCard({
         onConfirm={() => remove.mutate()}
       />
 
+      {status && (
+        <GpuPickSheet
+          open={pickerOpen}
+          onClose={() => setPickerOpen(false)}
+          model={model}
+          status={status}
+          busy={load.isPending}
+          onLoad={(vars) => load.mutate(vars)}
+        />
+      )}
+
       <ConfirmDialog
-        open={busyHolder != null}
-        title="GPU is busy"
+        open={conflict != null}
+        title={gpuCount > 1 ? "All GPUs are busy" : "GPU is busy"}
         body={
-          busyHolder
-            ? `The GPU is serving ${busyHolder.model_name} (${busyHolder.engine}). Switch to ${model.display_name}? The current engine stops first.`
+          conflict
+            ? `Serving now: ${conflict.holders
+                .map(
+                  (h) =>
+                    `GPU ${h.gpu_ids.join("+")} — ${h.model_name} (${h.engine})`,
+                )
+                .join("; ")}. Switch to ${model.display_name}? The affected engine${
+                conflict.holders.length > 1 ? "s stop" : " stops"
+              } first.`
             : ""
         }
         confirmLabel="Switch model"
         danger={false}
         busy={load.isPending}
-        onCancel={() => setBusyHolder(null)}
-        onConfirm={() => load.mutate(true)}
+        onCancel={() => setConflict(null)}
+        onConfirm={() => conflict && load.mutate({ ...conflict.vars, force: true })}
       />
     </div>
   );
@@ -691,7 +1070,7 @@ export default function Models() {
     onError: (err) => toast("error", errorMessage(err)),
   });
 
-  const lease = engines.data?.lease ?? null;
+  const enginesStatus = engines.data ?? null;
   const catalog = useMemo(
     () => (models.data ?? []).filter((m) => m.status !== "suggested"),
     [models.data],
@@ -770,7 +1149,7 @@ export default function Models() {
           <ul className="space-y-3">
             {catalog.map((m) => (
               <li key={m.id}>
-                <ModelCard model={m} lease={lease} />
+                <ModelCard model={m} status={enginesStatus} />
               </li>
             ))}
           </ul>

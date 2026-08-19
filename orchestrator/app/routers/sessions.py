@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from ..db import read_session
-from ..models import Session, Task
+from ..models import Session, Task, ThinkingLevel
 from ..services import exec_service, opencode_client, task_runner
 from ..services.exec_service import ExecError
 from ..services.session_manager import (
@@ -52,6 +52,7 @@ class CommitBody(BaseModel):
 
 class TaskBody(BaseModel):
     prompt: str
+    thinking: ThinkingLevel = ThinkingLevel.auto
 
 
 @router.get("/sessions")
@@ -292,5 +293,5 @@ async def create_task(session_id: str, body: TaskBody) -> dict:
     _get_session(session_id)
     if not body.prompt.strip():
         raise HTTPException(400, "prompt required")
-    task = await task_runner.create_task(session_id, body.prompt)
+    task = await task_runner.create_task(session_id, body.prompt, body.thinking)
     return task.model_dump(mode="json")

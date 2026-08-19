@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, errorMessage } from "../../api/client";
-import type { Session, Task } from "../../api/types";
+import type { Session, Task, ThinkingLevel } from "../../api/types";
 import { useToast } from "../../hooks/toast";
 import { formatDuration, relativeTime } from "../../lib/utils";
 import { IconSend } from "../icons";
+import { ThinkingSelect } from "../ThinkingSelect";
 import {
   Button,
   Collapsible,
@@ -50,6 +51,7 @@ export default function TasksTab({ session }: { session: Session }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [prompt, setPrompt] = useState("");
+  const [thinking, setThinking] = useState<ThinkingLevel>("auto");
 
   const tasks = useQuery({
     queryKey: ["tasks", session.id],
@@ -58,7 +60,7 @@ export default function TasksTab({ session }: { session: Session }) {
   });
 
   const create = useMutation({
-    mutationFn: () => api.createTask(session.id, prompt.trim()),
+    mutationFn: () => api.createTask(session.id, prompt.trim(), thinking),
     onSuccess: () => {
       setPrompt("");
       toast("success", "Task queued — it runs in the background");
@@ -85,19 +87,26 @@ export default function TasksTab({ session }: { session: Session }) {
           placeholder="e.g. Add unit tests for the parser module and run them"
         />
         <div className="mt-2.5 flex items-center justify-between gap-3">
-          <p className="text-xs text-faint">
+          <p className="min-w-0 flex-1 text-xs text-faint">
             Runs in its own agent turn; watch progress here.
           </p>
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={!prompt.trim()}
-            loading={create.isPending}
-            onClick={() => create.mutate()}
-          >
-            <IconSend size={14} />
-            Run task
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            <ThinkingSelect
+              value={thinking}
+              onChange={setThinking}
+              direction="down"
+            />
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={!prompt.trim()}
+              loading={create.isPending}
+              onClick={() => create.mutate()}
+            >
+              <IconSend size={14} />
+              Run task
+            </Button>
+          </div>
         </div>
       </div>
 

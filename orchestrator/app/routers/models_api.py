@@ -178,6 +178,29 @@ async def downloads_stream() -> StreamingResponse:
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+@router.get("/{model_id}/thinking/{level}")
+def thinking_directives(model_id: int, level: str) -> dict:
+    """Per-family reasoning directives for a thinking level — the PWA applies
+    these to session-chat prompts (which go through the OpenCode proxy)."""
+    from ..models import ThinkingLevel
+    from ..services.thinking import directives_for, model_thinking_family
+
+    try:
+        thinking_level = ThinkingLevel(level)
+    except ValueError as exc:
+        valid = ", ".join(entry.value for entry in ThinkingLevel)
+        raise HTTPException(400, f"level must be one of: {valid}") from exc
+    with read_session() as db:
+        entry = db.get(ModelEntry, model_id)
+    if entry is None:
+        raise HTTPException(404, "model not found")
+    return {
+        "family": model_thinking_family(entry),
+        "level": thinking_level.value,
+        **directives_for(entry, thinking_level).as_dict(),
+    }
+
+
 @router.post("/{model_id}/download")
 async def download_model(model_id: int) -> dict:
     with read_session() as db:
@@ -194,8 +217,9 @@ async def download_model(model_id: int) -> dict:
 async def delete_model(model_id: int) -> dict:
     if downloader.is_downloading(model_id):
         raise HTTPException(409, "download in progress")
-    lease = engine_manager.lease
-    if lease and lease.model_id == model_id and lease.state != "failed":
+    if any(
+        lease.model_id == model_id for lease in engine_manager.active_leases()
+    ):
         raise HTTPException(409, "model is loaded — unload the engine first")
     with read_session() as db:
         entry = db.get(ModelEntry, model_id)

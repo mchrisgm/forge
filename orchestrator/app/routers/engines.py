@@ -1,21 +1,22 @@
-import httpx
+import json
+
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from ..db import read_session
-from ..models import ModelEntry, ModelStatus
+from ..models import ModelEntry, ModelStatus, ThinkingLevel
 from ..services.engine_manager import LeaseHeldError, engine_manager
+from ..services.openai_proxy import proxy_openai_request
+from ..services.thinking import apply_to_openai_messages, directives_for
 
 router = APIRouter(prefix="/engines")
-
-# AirLLM can take minutes-to-hours per reply (PLAN §6.2) — no read timeout.
-_CHAT_TIMEOUT = httpx.Timeout(connect=10, read=None, write=30, pool=10)
 
 
 class LoadBody(BaseModel):
     model_id: int
     force: bool = False
+    gpu_index: int | None = None  # None = auto-pick a free GPU
+    gpu_count: int = 1  # >1 = tensor-parallel (vLLM lane only)
 
 
 @router.get("")
@@ -32,60 +33,62 @@ async def load(body: LoadBody) -> dict:
     if model.status != ModelStatus.ready:
         raise HTTPException(409, f"model is not ready (status: {model.status.value})")
     try:
-        lease = await engine_manager.load(model, force=body.force)
+        lease = await engine_manager.load(
+            model, force=body.force, gpu_index=body.gpu_index, gpu_count=body.gpu_count
+        )
     except LeaseHeldError as exc:
         raise HTTPException(
             status_code=409,
-            detail={"message": "GPU lease is held", "holder": exc.holder},
+            detail={"message": "all GPUs are leased", "holders": exc.holders},
         ) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"lease": lease.as_dict()}
 
 
 @router.post("/unload")
-async def unload() -> dict:
-    await engine_manager.unload()
-    return {"lease": None}
+async def unload(gpu_index: int | None = None) -> dict:
+    await engine_manager.unload(gpu_index)
+    return {"leases": [lease.as_dict() for lease in engine_manager.active_leases()]}
 
 
 @router.post("/chat")
 async def engine_chat(request: Request):
-    """Direct chat with whatever model holds the GPU lease — the only surface
-    for the chat-only AirLLM lane (PLAN §6.2), works for all three lanes.
-    Body is an OpenAI chat-completions request, passed through verbatim."""
-    lease = engine_manager.lease
-    if lease is None or lease.state != "ready":
-        state = lease.state if lease else "none"
-        raise HTTPException(409, f"no engine is serving (lease state: {state})")
-
-    body = await request.body()
-    url = f"{lease.base_url}/chat/completions"
-    client = httpx.AsyncClient(timeout=_CHAT_TIMEOUT)
-    try:
-        upstream_request = client.build_request(
-            "POST", url, content=body, headers={"content-type": "application/json"}
-        )
-        upstream = await client.send(upstream_request, stream=True)
-    except httpx.HTTPError as exc:
-        await client.aclose()
-        raise HTTPException(502, f"engine unreachable: {exc}") from exc
-
-    content_type = upstream.headers.get("content-type", "application/json")
-    if "text/event-stream" in content_type:
-        async def stream():
-            try:
-                async for chunk in upstream.aiter_raw():
-                    yield chunk
-            finally:
-                await upstream.aclose()
-                await client.aclose()
-
-        return StreamingResponse(
-            stream(), status_code=upstream.status_code, media_type="text/event-stream"
+    """Direct chat with a served model — the only surface for the chat-only
+    AirLLM lane (PLAN §6.2), works for all lanes. Body is an OpenAI
+    chat-completions request; `model` (slug) picks the lease when several are
+    serving; an optional `thinking` field maps to per-family reasoning
+    directives before forwarding."""
+    if not engine_manager.ready_leases():
+        states = [lease.as_dict() for lease in engine_manager.active_leases()]
+        raise HTTPException(
+            409, {"message": "no engine is serving", "leases": states}
         )
 
+    raw = await request.body()
     try:
-        content = await upstream.aread()
-    finally:
-        await upstream.aclose()
-        await client.aclose()
-    return Response(content, status_code=upstream.status_code, media_type=content_type)
+        payload = json.loads(raw or b"{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "body must be JSON") from exc
+
+    from .openai_router import resolve_lease
+
+    lease = resolve_lease(payload.get("model"))
+
+    thinking_raw = payload.pop("thinking", None)
+    if thinking_raw:
+        try:
+            level = ThinkingLevel(thinking_raw)
+        except ValueError as exc:
+            valid = ", ".join(level.value for level in ThinkingLevel)
+            raise HTTPException(400, f"thinking must be one of: {valid}") from exc
+        with read_session() as db:
+            model = db.get(ModelEntry, lease.model_id)
+        if model is not None and level != ThinkingLevel.auto:
+            payload["messages"] = apply_to_openai_messages(
+                payload.get("messages", []), directives_for(model, level)
+            )
+    payload["model"] = lease.model_slug
+    return await proxy_openai_request(
+        lease.base_url, "chat/completions", json.dumps(payload).encode()
+    )

@@ -47,6 +47,29 @@ The PWA never talks to session containers directly — the orchestrator proxies
 every OpenCode call and streams events over SSE, so one bearer token guards
 everything.
 
+## Screenshots
+
+| | |
+|---|---|
+| **Sessions** — one sandboxed OpenCode container per task | **Session chat** — streamed tool calls: read, edit, test |
+| <img src="docs/screenshots/sessions-desktop.png" alt="Sessions list showing three coding sessions in running, idle and stopped states, each with its model, engine lane and repository"> | <img src="docs/screenshots/session-chat-desktop.png" alt="Session chat where the agent diagnoses a flaky test, shows an expanded file-edit tool call with arguments and result, and posts a markdown summary"> |
+| **Models** — registry suggestions and per-GPU engine leases | **System** — live gauges for every GPU, RAM, disk and CPU |
+| <img src="docs/screenshots/models-desktop.png" alt="Models page with two GPU lease rows serving different models, registry suggestions with score breakdown bars, and the local catalog"> | <img src="docs/screenshots/system-desktop.png" alt="System page with per-GPU VRAM gauges, RAM, disk and CPU stats, the GPU lease list and session container table"> |
+
+**Connectors** — the MCP catalog: the five core connectors plus one-toggle
+integrations (Notion, Linear, Sentry, Stripe, Figma, …) and custom MCP servers.
+
+<img src="docs/screenshots/connectors-desktop.png" alt="Connectors page listing the five enabled core MCP connectors with toggles and credential forms, grouped by category">
+
+On a phone the same PWA installs from the browser and gets a bottom tab bar:
+
+<p>
+  <img src="docs/screenshots/sessions-mobile.png" width="220" alt="Mobile sessions list with bottom tab bar">
+  <img src="docs/screenshots/session-chat-mobile.png" width="220" alt="Mobile session chat with the agent's diagnosis and tool calls">
+  <img src="docs/screenshots/models-mobile.png" width="220" alt="Mobile model load sheet offering auto, per-GPU or vLLM tensor-parallel placement across two GPUs">
+  <img src="docs/screenshots/system-mobile.png" width="220" alt="Mobile system page with GPU VRAM gauges and lease list">
+</p>
+
 ## Hardware target
 
 Built for a single-GPU workstation; the reference box is:
@@ -100,8 +123,13 @@ in the parallel-runs view.
 ## Engine lanes
 
 Three inference lanes sit behind the same OpenAI-compatible surface; the
-orchestrator enforces that only **one** GPU engine runs at a time (loading a
-second returns HTTP 409 with the current lease holder). From PLAN §9:
+orchestrator enforces **one engine per GPU** (loading onto a busy GPU returns
+HTTP 409 with the lease holders). With one GPU that means one engine at a
+time; with several, each GPU serves its own model concurrently, and the vLLM
+lane can span N free GPUs with tensor parallelism (`gpu_count` on load).
+Sessions never care where a model landed — the orchestrator's `/v1` model
+router forwards each request to whichever engine serves its model. From
+PLAN §9 (budgets are per GPU):
 
 | Lane | What fits (approx) | Example |
 |---|---|---|
@@ -121,6 +149,16 @@ Notes:
   token, no tool calling, chat only — it never appears in the session model
   picker. Talk to it (or any loaded model) via **Chat with model** on the
   Models page once its lease is ready.
+
+## Thinking levels
+
+Every prompt — session chat, fire-and-forget tasks, and the model chat page —
+takes a **thinking level**: `Auto` (the model's native default), `Off`, `Low`,
+or `High`. Forge maps the level to each model family's real mechanism: Qwen3
+gets its official `/think` · `/no_think` soft switches, gpt-oss gets a
+`Reasoning: low|high` system line, and other instruct models get plain-language
+directives. Pick it from the brain icon next to the composer; chats remember
+the level per session.
 
 ## Adding models
 
@@ -156,8 +194,8 @@ support files.
 
 ## Connectors (MCP)
 
-Sessions come wired with MCP servers (toggle per connector on the Connectors
-page):
+Sessions come wired with MCP servers, toggled per connector on the Connectors
+page. Five **core** connectors ship with Forge:
 
 | Connector | What it does | Needs |
 |---|---|---|
@@ -167,9 +205,18 @@ page):
 | `playwright` | Browser automation (headless, shared service) | — |
 | `skills` | The skills server described above | — |
 
-The GitHub PAT is stored in SQLite and injected into session containers as an
-environment variable — see the security model below before pasting a
-broadly-scoped token.
+Beyond those, the catalog covers **25+ public integrations** — Notion, Linear,
+Figma, Sentry, Stripe, Asana, Atlassian, Slack, Airtable, Supabase, Vercel,
+HubSpot, Gmail (experimental), and more — plus **custom MCP servers** you
+define yourself (remote URL + headers, or a local command). Enable one, paste
+its token, and every new session gets the tools. See
+[docs/connectors.md](docs/connectors.md) for the full table, per-service token
+guidance (several vendors are OAuth-only — the notes are honest about it), and
+the custom-connector how-to.
+
+Tokens are stored in SQLite and injected into session containers as
+environment variables (never written into config files) — see the security
+model below before pasting broadly-scoped credentials.
 
 ## Security model (v1 — LAN threat model)
 

@@ -1,0 +1,693 @@
+[
+  {
+    "kind": "playwright",
+    "name": "Browser",
+    "description": "Drive a real browser: open pages, click, fill forms, screenshot.",
+    "category": "core",
+    "mcp_type": "remote",
+    "enabled": true,
+    "auth_fields": [],
+    "auth_note": "",
+    "docs_url": "https://github.com/microsoft/playwright-mcp",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "fetch",
+    "name": "Fetch",
+    "description": "Retrieve web pages as markdown for the agent to read.",
+    "category": "core",
+    "mcp_type": "local",
+    "enabled": true,
+    "auth_fields": [],
+    "auth_note": "",
+    "docs_url": "https://pypi.org/project/mcp-server-fetch/",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "github",
+    "name": "GitHub",
+    "description": "Repos, issues, and pull requests via the official GitHub MCP server.",
+    "category": "core",
+    "mcp_type": "local",
+    "enabled": true,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Personal access token",
+        "secret": true,
+        "placeholder": "ghp_…",
+        "value": "••••••",
+        "configured": true
+      }
+    ],
+    "auth_note": "Fine-grained or classic PAT. Also enables git push from sessions.",
+    "docs_url": "https://github.com/github/github-mcp-server",
+    "is_custom": false,
+    "has_token": true
+  },
+  {
+    "kind": "skills",
+    "name": "Skills",
+    "description": "Installed Claude Code-format skills, with progressive disclosure.",
+    "category": "core",
+    "mcp_type": "local",
+    "enabled": true,
+    "auth_fields": [],
+    "auth_note": "",
+    "docs_url": "",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "searxng",
+    "name": "Web search",
+    "description": "Web search through your private SearXNG instance — no tracking.",
+    "category": "core",
+    "mcp_type": "local",
+    "enabled": true,
+    "auth_fields": [],
+    "auth_note": "",
+    "docs_url": "https://pypi.org/project/mcp-searxng/",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "airtable",
+    "name": "Airtable",
+    "description": "Read and write Airtable bases.",
+    "category": "productivity",
+    "mcp_type": "local",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Personal access token",
+        "secret": true,
+        "placeholder": "pat…",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Airtable personal access token with the scopes you need.",
+    "docs_url": "https://github.com/domdomegg/airtable-mcp-server",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "asana",
+    "name": "Asana",
+    "description": "Tasks and projects in Asana.",
+    "category": "productivity",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Access token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "OAuth-only per Asana's docs — paste an OAuth access token. The old /sse endpoint is deprecated (shutdown 05/11/2026); this is the v2 endpoint.",
+    "docs_url": "https://developers.asana.com/docs/using-asanas-mcp-server",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "atlassian",
+    "name": "Atlassian",
+    "description": "Jira issues and Confluence pages.",
+    "category": "productivity",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Access token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "OAuth 2.1 is the primary flow (paste an OAuth access token); Atlassian also documents optional API-token auth — see their setup guide.",
+    "docs_url": "https://support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server/",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "box",
+    "name": "Box",
+    "description": "Search and query files and enterprise content in Box.",
+    "category": "productivity",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Access token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "OAuth 2.1 only — no API-key auth; paste an OAuth access token minted for a Box app with the MCP integration enabled.",
+    "docs_url": "https://developer.box.com/guides/box-mcp/remote/",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "clickup",
+    "name": "ClickUp",
+    "description": "Tasks, lists, docs, and comments in ClickUp.",
+    "category": "productivity",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Access token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "OAuth-only (public beta) with a vetted client list — personal API keys are rejected; paste an OAuth access token and expect friction outside approved clients.",
+    "docs_url": "https://developer.clickup.com/docs/connect-an-ai-assistant-to-clickups-mcp-server",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "discord",
+    "name": "Discord",
+    "description": "Read channels and send messages through a Discord bot.",
+    "category": "productivity",
+    "mcp_type": "local",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Bot token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Bot token from the Discord Developer Portal; invite the bot to your server with the permissions you want it to have (community server).",
+    "docs_url": "https://github.com/barryyip0625/mcp-discord",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "gmail",
+    "name": "Gmail",
+    "description": "Read, search, draft, and send Gmail (community server).",
+    "category": "productivity",
+    "mcp_type": "local",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "client_id",
+        "label": "OAuth client ID",
+        "secret": false,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      },
+      {
+        "key": "client_secret",
+        "label": "OAuth client secret",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      },
+      {
+        "key": "refresh_token",
+        "label": "Refresh token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Experimental — Google has no public remote MCP. Create a Google Cloud OAuth client (Desktop) with the Gmail API enabled, run `npx @shinzolabs/gmail-mcp auth` once on your own machine to mint a refresh token, then paste all three values here.",
+    "docs_url": "https://github.com/shinzo-labs/gmail-mcp",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "linear",
+    "name": "Linear",
+    "description": "Issues, projects, and cycles in Linear.",
+    "category": "productivity",
+    "mcp_type": "remote",
+    "enabled": true,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "API key",
+        "secret": true,
+        "placeholder": "lin_api_…",
+        "value": "••••••",
+        "configured": true
+      }
+    ],
+    "auth_note": "Linear API key (Settings → Security & access → API keys) or an OAuth access token — both are accepted as Authorization: Bearer.",
+    "docs_url": "https://linear.app/docs/mcp",
+    "is_custom": false,
+    "has_token": true
+  },
+  {
+    "kind": "monday",
+    "name": "monday.com",
+    "description": "Boards and items in monday.com.",
+    "category": "productivity",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "API token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Personal API token (monday.com → Developers → My access tokens) as bearer, or OAuth 2.1.",
+    "docs_url": "https://developer.monday.com/api-reference/docs/integrate-with-monday-mcp",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "notion",
+    "name": "Notion",
+    "description": "Search, read, and write Notion pages and databases.",
+    "category": "productivity",
+    "mcp_type": "local",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Integration secret",
+        "secret": true,
+        "placeholder": "ntn_…",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Internal integration secret from notion.so/profile/integrations; share the target pages with the integration. (Notion's hosted mcp.notion.com is OAuth-only, so Forge runs the official local server instead.)",
+    "docs_url": "https://github.com/makenotion/notion-mcp-server",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "slack",
+    "name": "Slack",
+    "description": "Read channels, threads, and DMs; posting is off until you allow it.",
+    "category": "productivity",
+    "mcp_type": "local",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "xoxp_token",
+        "label": "User OAuth token",
+        "secret": true,
+        "placeholder": "xoxp-…",
+        "value": "",
+        "configured": false
+      },
+      {
+        "key": "xoxb_token",
+        "label": "Bot token",
+        "secret": true,
+        "placeholder": "xoxb-…",
+        "value": "",
+        "configured": false
+      },
+      {
+        "key": "add_message_tool",
+        "label": "Enable posting (true / channel IDs)",
+        "secret": false,
+        "placeholder": "true or C0123…,C0456…",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Set a user token (xoxp) or a bot token (xoxb) from a Slack app — user tokens unlock search; bots must be invited to channels. Message posting stays disabled unless the third field is set.",
+    "docs_url": "https://github.com/korotovsky/slack-mcp-server",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "todoist",
+    "name": "Todoist",
+    "description": "Tasks, projects, and filters in Todoist.",
+    "category": "productivity",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "API token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Todoist API token (Settings → Integrations → Developer) sent as bearer; OAuth is also supported.",
+    "docs_url": "https://github.com/Doist/todoist-mcp",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "zapier",
+    "name": "Zapier",
+    "description": "Trigger thousands of app actions through your Zapier MCP endpoint.",
+    "category": "productivity",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "url",
+        "label": "Your Zapier MCP URL",
+        "secret": true,
+        "placeholder": "https://mcp.zapier.com/api/mcp/…",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Zapier issues a per-account MCP URL (credentials embedded) — paste it here.",
+    "docs_url": "https://zapier.com/mcp",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "cloudflare",
+    "name": "Cloudflare docs",
+    "description": "Search Cloudflare's documentation.",
+    "category": "developer",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [],
+    "auth_note": "No auth needed — public docs server.",
+    "docs_url": "https://github.com/cloudflare/mcp-server-cloudflare",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "hugging-face",
+    "name": "Hugging Face",
+    "description": "Search models, datasets, spaces, and papers on the Hub.",
+    "category": "developer",
+    "mcp_type": "remote",
+    "enabled": true,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "HF token (optional)",
+        "secret": true,
+        "placeholder": "hf_…",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Works anonymously; add a token for private/gated repos.",
+    "docs_url": "https://huggingface.co/settings/mcp",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "netlify",
+    "name": "Netlify",
+    "description": "Create, deploy, and manage Netlify sites and env vars.",
+    "category": "developer",
+    "mcp_type": "local",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Personal access token",
+        "secret": true,
+        "placeholder": "nfp_…",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Netlify PAT (User settings → OAuth → New access token). The official local server is used because Netlify's remote MCP is OAuth-only.",
+    "docs_url": "https://docs.netlify.com/build/build-with-ai/netlify-mcp-server/",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "sentry",
+    "name": "Sentry",
+    "description": "Query errors, issues, and traces from your Sentry org.",
+    "category": "developer",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Access token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "OAuth-only per Sentry's docs — paste an OAuth access token; plain user auth tokens are not documented to work here.",
+    "docs_url": "https://mcp.sentry.dev/",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "supabase",
+    "name": "Supabase",
+    "description": "Query databases, manage migrations, and inspect Supabase projects.",
+    "category": "developer",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Personal access token",
+        "secret": true,
+        "placeholder": "sbp_…",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Personal access token (supabase.com/dashboard/account/tokens) as bearer — documented for CI use; OAuth login is the interactive default.",
+    "docs_url": "https://supabase.com/docs/guides/getting-started/mcp",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "vercel",
+    "name": "Vercel",
+    "description": "Projects, deployments, logs, and docs search on Vercel.",
+    "category": "developer",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Access token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "OAuth-only, and Vercel only approves reviewed MCP clients — no API-token auth; some tools (docs search) work without authentication.",
+    "docs_url": "https://vercel.com/docs/agent-resources/vercel-mcp",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "canva",
+    "name": "Canva",
+    "description": "Create and edit Canva designs.",
+    "category": "design",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Access token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "OAuth-only — Canva's MCP authenticates via its OAuth consent flow.",
+    "docs_url": "https://www.canva.com/help/mcp-agent-setup/",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "figma",
+    "name": "Figma",
+    "description": "Read designs, components, and variables from Figma files.",
+    "category": "design",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Access token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "OAuth-only — the remote server authenticates via Figma's OAuth flow; personal access tokens are not documented to work.",
+    "docs_url": "https://developers.figma.com/docs/figma-mcp-server/",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "hubspot",
+    "name": "HubSpot",
+    "description": "CRM contacts, companies, deals, and tickets in HubSpot.",
+    "category": "business",
+    "mcp_type": "local",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Private app token",
+        "secret": true,
+        "placeholder": "pat-na1-…",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Private app access token (Settings → Integrations → Private apps). The official local server is used because HubSpot's remote MCP is OAuth-only.",
+    "docs_url": "https://developers.hubspot.com/mcp",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "intercom",
+    "name": "Intercom",
+    "description": "Conversations and customer data from Intercom.",
+    "category": "business",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Access token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Intercom access token (Developer Hub app) as bearer, or OAuth. EU-hosted workspaces should use https://mcp.eu.intercom.com/mcp via a custom connector.",
+    "docs_url": "https://developers.intercom.com/docs/guides/mcp",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "paypal",
+    "name": "PayPal",
+    "description": "Invoices, payments, and disputes via PayPal's MCP.",
+    "category": "business",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Access token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "OAuth access token generated from your PayPal app's client ID + secret (developer.paypal.com), passed as bearer.",
+    "docs_url": "https://developer.paypal.com/tools/mcp-server/",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "plaid",
+    "name": "Plaid",
+    "description": "Inspect Plaid integrations and API usage.",
+    "category": "business",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Access token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "OAuth client-credentials token (scope mcp:dashboard) as bearer — tokens expire after ~15 minutes, so expect frequent re-auth.",
+    "docs_url": "https://plaid.com/docs/resources/mcp/",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "square",
+    "name": "Square",
+    "description": "Payments, catalog, and customers in Square.",
+    "category": "business",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "Access token",
+        "secret": true,
+        "placeholder": "",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "OAuth is the documented flow for the remote server — paste an OAuth access token; developer-dashboard access tokens are not documented to work here.",
+    "docs_url": "https://developer.squareup.com/docs/mcp",
+    "is_custom": false,
+    "has_token": false
+  },
+  {
+    "kind": "stripe",
+    "name": "Stripe",
+    "description": "Customers, invoices, payments, and docs search.",
+    "category": "business",
+    "mcp_type": "remote",
+    "enabled": false,
+    "auth_fields": [
+      {
+        "key": "token",
+        "label": "API key",
+        "secret": true,
+        "placeholder": "rk_live_… / sk_test_…",
+        "value": "",
+        "configured": false
+      }
+    ],
+    "auth_note": "Restricted API key as bearer is officially supported (recommended for agents); OAuth is the interactive default.",
+    "docs_url": "https://docs.stripe.com/mcp",
+    "is_custom": false,
+    "has_token": false
+  }
+]

@@ -35,6 +35,28 @@ def init_db() -> None:
     for d in (settings.models_dir, settings.skills_dir, settings.workspaces_dir):
         Path(d).mkdir(parents=True, exist_ok=True)
     SQLModel.metadata.create_all(get_engine())
+    _apply_column_migrations()
+
+
+# create_all never alters existing tables; this adds columns introduced after
+# a DB was first created. (key: (table, column) -> ADD COLUMN clause)
+_COLUMN_MIGRATIONS: dict[tuple[str, str], str] = {
+    ("task", "thinking"): "ALTER TABLE task ADD COLUMN thinking VARCHAR DEFAULT 'auto'",
+}
+
+
+def _apply_column_migrations() -> None:
+    from sqlalchemy import text
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        for (table, column), ddl in _COLUMN_MIGRATIONS.items():
+            existing = {
+                row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")
+            }
+            if existing and column not in existing:
+                conn.execute(text(ddl))
+                conn.commit()
 
 
 @contextmanager

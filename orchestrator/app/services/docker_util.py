@@ -16,10 +16,6 @@ def client() -> docker.DockerClient:
     return docker.from_env()
 
 
-def gpu_device_requests() -> list:
-    return [docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])]
-
-
 def find_by_label(label: str, value: str | None = None) -> list[Container]:
     selector = f"{label}={value}" if value is not None else label
     return client().containers.list(all=True, filters={"label": selector})

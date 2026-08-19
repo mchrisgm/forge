@@ -159,14 +159,28 @@ class SessionManager:
         }
         if session.repo_url:
             env["FORGE_REPO_URL"] = session.repo_url
-        # The PAT reaches a session ONLY while the GitHub connector is enabled —
-        # the toggle must actually cut access (env fallback included).
-        github = next((c for c in connectors if c.kind == ConnectorKind.github), None)
-        if github and github.enabled:
-            token = json.loads(github.config_json or "{}").get("token", "")
-            pat = token or settings.github_pat
-            if pat:
-                env["GITHUB_PAT"] = pat
+        # Connector secrets travel as env vars only (never inside the config
+        # JSON), and ONLY while the connector is enabled — the toggle must
+        # actually cut access.
+        from ..connector_catalog import CATALOG, secret_env_for
+
+        for connector in connectors:
+            if not connector.enabled:
+                continue
+            entry = CATALOG.get(connector.kind)
+            if entry is None:
+                continue
+            try:
+                conn_config = json.loads(connector.config_json or "{}")
+            except json.JSONDecodeError:
+                conn_config = {}
+            env.update(secret_env_for(entry, conn_config))
+            if connector.kind == ConnectorKind.github.value:
+                # Legacy var consumed by the github MCP env template and the
+                # entrypoint's git credential store.
+                pat = conn_config.get("token", "") or settings.github_pat
+                if pat:
+                    env["GITHUB_PAT"] = pat
 
         # Disabled skills are filtered out by the skills MCP server inside the
         # container (the /skills volume mount itself is shared and read-only).
