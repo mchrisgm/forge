@@ -97,9 +97,14 @@ class SessionManager:
         session.workspace_path = str(local_ws)
         with write_session() as db:
             db.add(session)
+            db.flush()
+            session_id = session.id
+        # Re-fetch: the added instance is expired+detached after commit.
+        with read_session() as db:
+            session = db.get(Session, session_id)
         _publish_state(session)
 
-        asyncio.get_running_loop().create_task(self._spawn(session.id))
+        asyncio.get_running_loop().create_task(self._spawn(session_id))
         return session
 
     async def _spawn(self, session_id: str) -> None:
