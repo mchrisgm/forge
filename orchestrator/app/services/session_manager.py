@@ -52,7 +52,12 @@ def opencode_base_url(session_id: str) -> str:
 def _publish_state(session: Session) -> None:
     bus.publish(
         "session.state",
-        {"session_id": session.id, "state": session.state.value, "name": session.name},
+        {
+            "session_id": session.id,
+            "user_id": session.user_id,
+            "state": session.state.value,
+            "name": session.name,
+        },
     )
 
 
@@ -300,6 +305,7 @@ class SessionManager:
             session = db.get(Session, session_id)
         if session is None:
             raise SessionError("session not found", 404)
+        owner_id = session.user_id
         container = await asyncio.to_thread(self._get_container, session)
         if container is not None:
             await asyncio.to_thread(docker_util.remove_container, container)
@@ -316,7 +322,9 @@ class SessionManager:
             session = db.get(Session, session_id)
             if session:
                 db.delete(session)
-        bus.publish("session.deleted", {"session_id": session_id})
+        bus.publish(
+            "session.deleted", {"session_id": session_id, "user_id": owner_id}
+        )
 
     def touch(self, session_id: str) -> None:
         with write_session() as db:

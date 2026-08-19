@@ -6,7 +6,7 @@ from sqlmodel import select
 
 from ..connector_catalog import CATALOG, DEFAULT_ENABLED
 from ..db import read_session, write_session
-from ..models import Connector, User
+from ..models import Connector, Session, Task, User
 
 log = logging.getLogger(__name__)
 
@@ -20,14 +20,20 @@ def on_user_created(user_id: int, adopt_legacy: bool = False) -> None:
     keeps its configured tokens."""
     with write_session() as db:
         if adopt_legacy:
-            legacy = db.exec(
-                select(Connector).where(Connector.user_id == None)  # noqa: E711
-            ).all()
-            for row in legacy:
-                row.user_id = user_id
-                db.add(row)
-            if legacy:
-                log.info("adopted %d legacy connector rows for first user", len(legacy))
+            adopted = 0
+            for model in (Connector, Session, Task):
+                rows = db.exec(
+                    select(model).where(model.user_id == None)  # noqa: E711
+                ).all()
+                for row in rows:
+                    row.user_id = user_id
+                    db.add(row)
+                adopted += len(rows)
+            if adopted:
+                log.info(
+                    "first user adopted %d legacy rows (connectors/sessions/tasks)",
+                    adopted,
+                )
 
         existing = {
             c.kind

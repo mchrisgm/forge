@@ -277,13 +277,27 @@ async def send_message(
     if entries:
         memory.record_use(entries)
 
+    # Retry idempotence: re-sending the SAME content AND attachments while it
+    # is still the (unanswered) last message reuses that turn instead of
+    # duplicating it. Attachments must match — an attachment-only follow-up
+    # with different files is a new turn, not a retry.
+    new_attachments_json = json.dumps([a.id for a in attachments])
+    with read_session() as db:
+        last = db.exec(
+            select(ChatMessage)
+            .where(ChatMessage.conversation_id == conversation_id)
+            .order_by(ChatMessage.id.desc())  # type: ignore[union-attr]
+        ).first()
+    reused_last = (
+        last is not None
+        and last.role == "user"
+        and last.content == body.content
+        and (last.attachments_json or "[]") == new_attachments_json
+    )
+
     history = _history_for(conversation)
-    if (
-        history
-        and history[-1]["role"] == "user"
-        and history[-1]["content"] == body.content
-    ):
-        history = history[:-1]  # retry of an unanswered turn — don't double it
+    if reused_last and history:
+        history = history[:-1]  # the retried turn re-enters via body.content
     messages = chat_service.assemble(
         user,
         history,
@@ -296,26 +310,15 @@ async def send_message(
     )
 
     # Persist the user turn before streaming so a dropped connection still
-    # leaves a consistent history. Retry-idempotent: re-sending the same
-    # content while it is still the (unanswered) last message reuses it
-    # instead of duplicating the turn (e.g. retry after an engine error).
+    # leaves a consistent history (skipped when reusing a retried turn).
     with write_session() as db:
-        last = db.exec(
-            select(ChatMessage)
-            .where(ChatMessage.conversation_id == conversation_id)
-            .order_by(ChatMessage.id.desc())  # type: ignore[union-attr]
-        ).first()
-        if not (
-            last is not None
-            and last.role == "user"
-            and last.content == body.content
-        ):
+        if not reused_last:
             db.add(
                 ChatMessage(
                     conversation_id=conversation_id,
                     role="user",
                     content=body.content,
-                    attachments_json=json.dumps([a.id for a in attachments]),
+                    attachments_json=new_attachments_json,
                     token_estimate=memory.estimate_tokens(body.content),
                 )
             )

@@ -38,6 +38,7 @@ def _publish(task: Task) -> None:
         {
             "task_id": task.id,
             "session_id": task.session_id,
+            "user_id": task.user_id,
             "state": task.state.value,
             "result": task.result[:500],
         },

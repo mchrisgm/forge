@@ -89,8 +89,15 @@ def register_user(username: str, password: str, display_name: str = "") -> User:
     if not registration_allowed():
         raise HTTPException(403, "registration is disabled — ask the admin to enable it")
 
-    first = user_count() == 0
+    # First-user and allow-registration decisions are re-made INSIDE the write
+    # lock: concurrent first-run registrations must yield exactly one admin,
+    # and a just-flipped registration toggle must not be racy.
     with write_session() as db:
+        first = len(db.exec(select(User.id)).all()) == 0
+        if not first and get_setting("allow_registration", "true") == "false":
+            raise HTTPException(
+                403, "registration is disabled — ask the admin to enable it"
+            )
         if db.exec(select(User).where(User.username == username)).first():
             raise HTTPException(409, "that username is taken")
         user = User(
