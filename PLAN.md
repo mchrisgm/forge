@@ -296,51 +296,59 @@ Pick current best-in-class at implementation time; as of this plan's writing the
 
 ## 11. Milestones
 
+> **Status note (implementation session, 2026-08):** all implementation tasks
+> below are done and checked off. Everything verifiable without the target GPU
+> box has been verified (200 pytest tests, ruff, UI typecheck + production
+> build, compose config validation, image/package pins checked against live
+> registries). The **Accept** lines that need real hardware (GPU model loads,
+> compose up, phone-on-LAN checks, `make smoke`) remain unchecked — run them on
+> the dev box as the final gate.
+
 ### M0 — Scaffold & skeleton
 
-- [ ] Repo layout from §3; `.env.example`; Makefile (`up`, `down`, `logs`, `test`, `smoke`)
-- [ ] Orchestrator FastAPI app with `/api/health`, config, SQLModel tables from §5, auth login/token
-- [ ] Compose with gateway + orchestrator + searxng + mcp-playwright; UI placeholder built and served
+- [x] Repo layout from §3; `.env.example`; Makefile (`up`, `down`, `logs`, `test`, `smoke`)
+- [x] Orchestrator FastAPI app with `/api/health`, config, SQLModel tables from §5, auth login/token
+- [x] Compose with gateway + orchestrator + searxng + mcp-playwright; UI placeholder built and served
 - [ ] **Accept:** `docker compose up -d` → `curl -s localhost:8080/api/health` returns `{"status":"ok"}`; login returns a token; all containers healthy.
 
 ### M1 — Inference lane 1 (llama.cpp) + manual catalog
 
-- [ ] `engine_manager.py`: start/stop llamacpp container via docker-py with computed `--n-gpu-layers`; healthwait; lease state
-- [ ] `POST /models` manual add (hf_repo + gguf filename) + `downloader.py` with SSE progress
-- [ ] `/engines/load`, `/engines/unload`, `/system/stats` (pynvml)
-- [ ] Unit tests: `test_fit_rules.py` (ngl computation, lane assignment) pass
+- [x] `engine_manager.py`: start/stop llamacpp container via docker-py with computed `--n-gpu-layers`; healthwait; lease state
+- [x] `POST /models` manual add (hf_repo + gguf filename) + `downloader.py` with SSE progress
+- [x] `/engines/load`, `/engines/unload`, `/system/stats` (pynvml)
+- [x] Unit tests: `test_fit_rules.py` (ngl computation, lane assignment) pass
 - [ ] **Accept:** download a small GGUF via API, load it, `curl` an OpenAI chat completion through `http://llamacpp:8081/v1/chat/completions` from inside the network and get a coherent reply; loading a second model while loaded returns 409.
 
 ### M2 — Sessions + PWA core
 
-- [ ] `session-runner` image; `session_manager.py` spawn/stop/delete with limits + labels; reaper job
-- [ ] `opencode_config.py` renders provider block (MCP block empty for now); OpenCode proxy routes + SSE event stream; file/git endpoints via exec
-- [ ] PWA: Sessions, Chat (streaming), Files, Git, System pages; PWA installable on phone over LAN
+- [x] `session-runner` image; `session_manager.py` spawn/stop/delete with limits + labels; reaper job
+- [x] `opencode_config.py` renders provider block (MCP block empty for now); OpenCode proxy routes + SSE event stream; file/git endpoints via exec
+- [x] PWA: Sessions, Chat (streaming), Files, Git, System pages; PWA installable on phone over LAN
 - [ ] **Accept:** from a phone browser on LAN — create session, ask the agent to create and run a Python script in the workspace, watch streamed tool calls, see the file in Files, commit in Git. Two sessions run in parallel against llama-server slots.
 
 ### M3 — Engine lanes 2 & 3 + GPU lease UX
 
-- [ ] vLLM lifecycle with per-model parser flags; AirLLM `server.py` + image; lease arbitration across all three
-- [ ] Models page: load/unload with VRAM gauge, lane badges, AirLLM chat-only restriction
+- [x] vLLM lifecycle with per-model parser flags; AirLLM `server.py` + image; lease arbitration across all three
+- [x] Models page: load/unload with VRAM gauge, lane badges, AirLLM chat-only restriction
 - [ ] **Accept:** switch llamacpp→vLLM from UI (old stops, new healthy); AirLLM answers one prompt (however slowly) via chat page; session picker never offers AirLLM models.
 
 ### M4 — Model registry
 
-- [ ] `registry.py` scan + scoring per §6.4 with tests (`test_registry_scoring.py` uses fixture JSON of HF API responses); APScheduler wiring
-- [ ] Suggestions inbox UI (score breakdown, approve/dismiss), approval → download → ready
+- [x] `registry.py` scan + scoring per §6.4 with tests (`test_registry_scoring.py` uses fixture JSON of HF API responses); APScheduler wiring
+- [x] Suggestions inbox UI (score breakdown, approve/dismiss), approval → download → ready
 - [ ] **Accept:** trigger scan manually via API; ≥1 plausible suggestion appears with reasons; approving downloads it and it becomes loadable.
 
 ### M5 — Connectors & skills
 
-- [ ] MCP block in generated opencode.json per §6.3 (pin working package versions); Connectors page with GitHub PAT
-- [ ] `skills-server` MCP + installer + Skills page; mount `/skills:ro` into sessions
+- [x] MCP block in generated opencode.json per §6.3 (pin working package versions); Connectors page with GitHub PAT
+- [x] `skills-server` MCP + installer + Skills page; mount `/skills:ro` into sessions
 - [ ] **Accept:** in a session — agent uses SearXNG search and fetch to answer a current-events question; opens a page via Playwright MCP; lists a GitHub repo's issues with PAT; `list_skills` shows an installed skill from a public skills repo and `load_skill` injects it, observably changing behavior.
 
 ### M6 — Parallel tasks, polish, hardening
 
-- [ ] Task queue (fire prompt at session, track state) + parallel runs view; global events wiring everywhere
-- [ ] `scripts/smoke.sh`: compose up → login → load seed model → create session → run task → assert file exists in workspace → teardown
-- [ ] README: install (Docker + NVIDIA toolkit), first-run, adding models, adding skills, future VPN slot
+- [x] Task queue (fire prompt at session, track state) + parallel runs view; global events wiring everywhere
+- [x] `scripts/smoke.sh`: compose up → login → load seed model → create session → run task → assert file exists in workspace → teardown
+- [x] README: install (Docker + NVIDIA toolkit), first-run, adding models, adding skills, future VPN slot
 - [ ] **Accept:** `make smoke` passes clean on a fresh checkout; two tasks in two sessions complete in parallel; idle session gets reaped and resumes correctly.
 
 ## 12. Testing strategy
