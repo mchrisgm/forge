@@ -3,6 +3,7 @@ temporary (unsaved) chats, attachments, and memory integration."""
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,7 +21,7 @@ from ..models import (
     Upload,
     User,
 )
-from ..services import chat_service, memory
+from ..services import chat_service, image_service, memory, uploads
 from ..services.engine_manager import engine_manager
 
 log = logging.getLogger(__name__)
@@ -103,6 +104,8 @@ def _attachment_meta(ids: list[str]) -> list[dict]:
             "kind": u.kind,
             "mime": u.mime,
             "size_bytes": u.size_bytes,
+            "generated": u.generated,
+            "prompt": u.prompt,
         }
         for u in rows
         if u is not None
@@ -379,6 +382,71 @@ async def send_message(
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+class ImageBody(BaseModel):
+    prompt: str
+    conversation_id: str | None = None
+    provider: str = "local"  # "local" or an enabled remote connector kind
+    size: str = "1024x1024"
+
+
+@router.post("/image")
+async def generate_image(body: ImageBody, user: User = Depends(current_user)) -> dict:
+    """Generate an image (local imagegen lane or a connector like Higgsfield)
+    and, when a conversation is given, record the exchange with the image
+    attached to the assistant turn."""
+    prompt = body.prompt.strip()
+    if not prompt:
+        raise HTTPException(400, "prompt required")
+    if not re.fullmatch(r"\d{2,4}x\d{2,4}", body.size):
+        raise HTTPException(400, "size must look like 1024x1024")
+    conversation = (
+        _own_conversation(body.conversation_id, user) if body.conversation_id else None
+    )
+
+    data, mime = await image_service.generate(user.id, prompt, body.provider, body.size)
+    upload = uploads.save_generated(user.id, data, prompt, mime)
+
+    user_message_id: int | None = None
+    assistant_message_id: int | None = None
+    if conversation is not None:
+        with write_session() as db:
+            user_message = ChatMessage(
+                conversation_id=conversation.id,
+                role="user",
+                content=prompt,
+                token_estimate=memory.estimate_tokens(prompt),
+            )
+            assistant_message = ChatMessage(
+                conversation_id=conversation.id,
+                role="assistant",
+                content=f"[Generated image: {prompt}]",
+                attachments_json=json.dumps([upload.id]),
+            )
+            db.add(user_message)
+            db.add(assistant_message)
+            row = db.get(Conversation, conversation.id)
+            if row:
+                row.updated_at = datetime.now(UTC)
+                db.add(row)
+            db.flush()
+            user_message_id = user_message.id
+            assistant_message_id = assistant_message.id
+    return {
+        "upload": {
+            "id": upload.id,
+            "filename": upload.filename,
+            "kind": upload.kind,
+            "mime": upload.mime,
+            "size_bytes": upload.size_bytes,
+            "generated": True,
+            "prompt": upload.prompt,
+        },
+        "conversation_id": conversation.id if conversation else None,
+        "user_message_id": user_message_id,
+        "assistant_message_id": assistant_message_id,
+    }
+
+
 @router.post("/temporary")
 async def temporary_chat(body: TemporaryBody, user: User = Depends(current_user)):
     """Incognito: streams a reply, stores nothing, reads no memory."""
@@ -419,5 +487,9 @@ async def temporary_chat(body: TemporaryBody, user: User = Depends(current_user)
 @router.get("/status")
 def chat_status(user: User = Depends(current_user)) -> dict:
     """What the chat composer needs: which models are serving right now."""
-    leases = [lease.as_dict() for lease in engine_manager.ready_leases()]
-    return {"serving": leases}
+    leases = [lease.as_dict() for lease in engine_manager.ready_text_leases()]
+    image_lease = engine_manager.ready_image_lease()
+    return {
+        "serving": leases,
+        "image": image_lease.as_dict() if image_lease else None,
+    }

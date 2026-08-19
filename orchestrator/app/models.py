@@ -19,12 +19,14 @@ class EngineKind(str, Enum):
     llamacpp = "llamacpp"
     vllm = "vllm"
     airllm = "airllm"
+    imagegen = "imagegen"  # diffusers-based text-to-image lane
 
 
 class Quant(str, Enum):
     gguf_q4_k_m = "gguf-q4_k_m"
     awq = "awq"
     fp16_airllm = "fp16-airllm"
+    fp16_diffusers = "fp16-diffusers"
 
 
 class ToolCallFormat(str, Enum):
@@ -130,6 +132,8 @@ class Upload(SQLModel, table=True):
     kind: str = "other"  # image | text | pdf | other
     size_bytes: int = 0
     path: str = ""  # under uploads_dir
+    generated: bool = False  # produced by Forge (image gen), not user-uploaded
+    prompt: str = ""  # generation prompt, when generated
     created_at: datetime = Field(default_factory=utcnow)
 
 

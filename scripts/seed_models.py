@@ -151,7 +151,32 @@ SEED_MODELS: list[ModelEntry] = [
             "agentic sessions."
         ),
     ),
-    # (e) small utility lane — 7B coder for quick tasks (4.36 GiB, fully
+    # (e) imagegen lane — SDXL-Turbo, 1-4 step distilled SDXL for near-realtime
+    #     text-to-image. The downloader prunes the snapshot to the fp16
+    #     component set (~7 GiB); the fp16 UNet + VAE fit the 12 GB card with
+    #     room to spare.
+    ModelEntry(
+        hf_repo="stabilityai/sdxl-turbo",
+        display_name="SDXL Turbo",
+        family="sdxl",
+        params_b=3.5,
+        quant=Quant.fp16_diffusers,
+        file_path="",  # snapshot download (imagegen lane)
+        size_gb=6.9,
+        engine=EngineKind.imagegen,
+        ctx_max=0,
+        n_layers=0,
+        is_moe=False,
+        tool_call_format=ToolCallFormat.none,
+        status=ModelStatus.approved,
+        note=(
+            "Distilled SDXL for 1-4 step generation — seconds per image on "
+            "this hardware. Powers chat image generation without any external "
+            "connector. Non-commercial license (stability.ai membership "
+            "needed for commercial use)."
+        ),
+    ),
+    # (f) small utility lane — 7B coder for quick tasks (4.36 GiB, fully
     #     VRAM-resident, fast even with parallel slots).
     ModelEntry(
         hf_repo="bartowski/Qwen2.5-Coder-7B-Instruct-GGUF",

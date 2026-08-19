@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -21,7 +22,12 @@ from ..models import (
 from ..services import downloader
 from ..services.engine_manager import engine_manager
 from ..services.events import bus, sse_stream
-from ..services.registry import scan
+from ..services.registry import (
+    resolve_text_candidate,
+    scan,
+    search_hub,
+    snapshot_size_gb,
+)
 
 router = APIRouter(prefix="/models")
 
@@ -166,6 +172,115 @@ def dismiss_suggestion(suggestion_id: int) -> dict:
 @router.post("/registry/scan")
 async def trigger_scan() -> dict:
     return await asyncio.to_thread(scan)
+
+
+# ── Hub search: find a SPECIFIC model by name and add it in one click ───────
+
+
+@router.get("/search")
+async def search_models(q: str, kind: str = "text", limit: int = 20) -> list[dict]:
+    if kind not in ("text", "image"):
+        raise HTTPException(400, "kind must be 'text' or 'image'")
+    if not q.strip():
+        raise HTTPException(400, "q required")
+    try:
+        return await asyncio.to_thread(search_hub, q.strip(), kind, limit)
+    except Exception as exc:
+        raise HTTPException(502, f"Hugging Face search failed: {exc}") from exc
+
+
+class SearchAddBody(BaseModel):
+    hf_repo: str
+    kind: str = "text"  # text | image
+    auto_download: bool = True
+
+
+LANE_NOTE = {
+    "vllm": "Added from Hub search — AWQ build assigned to the vLLM fast lane.",
+    "llamacpp-full-gpu": "Added from Hub search — GGUF fits fully in VRAM.",
+    "llamacpp-offload": "Added from Hub search — GGUF runs with CPU offload.",
+    "airllm": "Added from Hub search — AirLLM slow lane (chat-only).",
+}
+
+
+@router.post("/search/add")
+async def add_from_search(body: SearchAddBody) -> dict:
+    """Resolve a searched repo into a runnable catalog entry: text models get
+    artifact discovery + lane assignment (GGUF/AWQ hunt, same as suggestions);
+    image models become imagegen-lane snapshot entries."""
+    hf_repo = body.hf_repo.strip()
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", hf_repo):
+        raise HTTPException(400, "hf_repo must look like owner/name")
+    with read_session() as db:
+        exists = db.exec(
+            select(ModelEntry).where(ModelEntry.hf_repo == hf_repo)
+        ).first()
+    if exists:
+        raise HTTPException(409, f"{hf_repo} is already in the catalog")
+
+    if body.kind == "image":
+        size_gb = await asyncio.to_thread(snapshot_size_gb, hf_repo)
+        entry = ModelEntry(
+            hf_repo=hf_repo,
+            display_name=hf_repo.split("/")[-1],
+            engine=EngineKind.imagegen,
+            quant=Quant.fp16_diffusers,
+            file_path="",
+            size_gb=size_gb,
+            tool_call_format=ToolCallFormat.none,
+            status=ModelStatus.approved,
+            note="Added from Hub search — text-to-image (diffusers snapshot).",
+        )
+    elif body.kind == "text":
+        try:
+            resolved = await asyncio.to_thread(resolve_text_candidate, hf_repo)
+        except Exception as exc:
+            raise HTTPException(502, f"could not resolve {hf_repo}: {exc}") from exc
+        lane = resolved["lane"]
+        if lane is None:
+            raise HTTPException(
+                409,
+                f"{hf_repo} does not fit this hardware in any lane (no usable "
+                "GGUF/AWQ artifact within the VRAM+RAM budgets)",
+            )
+        if lane == "vllm":
+            engine, quant = EngineKind.vllm, Quant.awq
+            repo, file_path = hf_repo, ""
+        elif lane == "airllm":
+            engine, quant = EngineKind.airllm, Quant.fp16_airllm
+            repo, file_path = hf_repo, ""
+        else:
+            engine, quant = EngineKind.llamacpp, Quant.gguf_q4_k_m
+            repo = resolved["gguf_repo"] or hf_repo
+            file_path = resolved["gguf_file"] or ""
+            if not file_path:
+                raise HTTPException(409, f"no single-file GGUF found for {hf_repo}")
+        entry = ModelEntry(
+            hf_repo=repo,
+            display_name=hf_repo.split("/")[-1],
+            engine=engine,
+            quant=quant,
+            file_path=file_path,
+            params_b=float(resolved["params_b"] or 0),
+            size_gb=float(resolved["gguf_size_gb"] or 0),
+            is_moe=bool(resolved["is_moe"]),
+            tool_call_format=ToolCallFormat.hermes,
+            status=ModelStatus.approved,
+            note=LANE_NOTE[lane],
+        )
+    else:
+        raise HTTPException(400, "kind must be 'text' or 'image'")
+
+    with write_session() as db:
+        db.add(entry)
+        db.flush()
+        entry_id = entry.id
+    with read_session() as db:
+        entry = db.get(ModelEntry, entry_id)
+    if body.auto_download:
+        await downloader.start_download(entry)
+    bus.publish("model.added", {"model_id": entry_id, "hf_repo": entry.hf_repo})
+    return entry.model_dump(mode="json")
 
 
 @router.get("/downloads/stream")

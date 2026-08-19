@@ -11,7 +11,7 @@ up: ## Build and start the full stack (gateway on :8080)
 	# Profile-gated images are invisible to plain `up` — build them explicitly
 	# so the orchestrator can spawn sessions/engines from them.
 	$(COMPOSE) --profile build-only build session-runner
-	$(COMPOSE) --profile engines build airllm
+	$(COMPOSE) --profile engines build airllm imagegen
 
 down: ## Stop the stack (volumes are kept)
 	$(COMPOSE) down --remove-orphans
@@ -19,10 +19,11 @@ down: ## Stop the stack (volumes are kept)
 logs: ## Tail logs from all compose-managed services
 	$(COMPOSE) logs -f --tail=200
 
-build: ## Build all images, including session-runner and airllm
+build: ## Build all images, including session-runner and the engine lanes
 	$(COMPOSE) build
 	docker build -t forge-session-runner ./session-runner
 	docker build -t forge-airllm ./engines/airllm
+	docker build -t forge-imagegen ./engines/imagegen
 
 test: ## Run orchestrator unit tests + UI typecheck
 	cd orchestrator && uv run --extra dev pytest -q

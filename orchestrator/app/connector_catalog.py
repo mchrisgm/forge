@@ -48,8 +48,12 @@ class CatalogEntry:
     command: tuple[str, ...] = ()
     environment: dict[str, str] = field(default_factory=dict)
     auth_fields: tuple[AuthField, ...] = ()
-    # For remote entries with a "token" auth field: the Authorization scheme.
+    # For remote entries with a "token" auth field: whether to send it as a
+    # request header at all, which header carries it, and the scheme prefix
+    # ("" = the raw token, e.g. X-API-Key style headers).
     bearer: bool = True
+    auth_header: str = "Authorization"
+    auth_scheme: str = "Bearer"
     auth_note: str = ""
     docs_url: str = ""
 
@@ -576,9 +580,11 @@ def render_block(entry: CatalogEntry, enabled: bool, config: dict) -> dict:
         block: dict = {"type": "remote", "url": url, "enabled": bool(enabled and url)}
         has_token = any(f.key == "token" for f in entry.auth_fields)
         if has_token and entry.bearer and config.get("token"):
-            block["headers"] = {
-                "Authorization": f"Bearer {{env:{env_var(entry.id, 'token')}}}"
-            }
+            token_ref = f"{{env:{env_var(entry.id, 'token')}}}"
+            value = (
+                f"{entry.auth_scheme} {token_ref}" if entry.auth_scheme else token_ref
+            )
+            block["headers"] = {entry.auth_header: value}
         return block
     block = {
         "type": "local",
@@ -588,6 +594,20 @@ def render_block(entry: CatalogEntry, enabled: bool, config: dict) -> dict:
     if entry.environment:
         block["environment"] = dict(entry.environment)
     return block
+
+
+def request_headers(entry: CatalogEntry, config: dict) -> dict[str, str]:
+    """Auth headers for an ORCHESTRATOR-side call to a remote entry — carries
+    the real secret value (render_block's {env:...} indirection only exists
+    for configs written into session containers)."""
+    if entry.mcp_type != "remote":
+        return {}
+    token = config.get("token")
+    has_token = any(f.key == "token" for f in entry.auth_fields)
+    if not (token and has_token and entry.bearer):
+        return {}
+    value = f"{entry.auth_scheme} {token}" if entry.auth_scheme else str(token)
+    return {entry.auth_header: value}
 
 
 def secret_env_for(entry: CatalogEntry, config: dict) -> dict[str, str]:

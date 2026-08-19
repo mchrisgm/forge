@@ -105,5 +105,6 @@ def render_opencode_config_json(
 
 
 def airllm_blocked(model: ModelEntry) -> bool:
-    """AirLLM lane is chat-only — never a session model (PLAN §2)."""
-    return model.engine == EngineKind.airllm
+    """Lanes that can never power a coding session: AirLLM (chat-only,
+    PLAN §2) and imagegen (not a language model at all)."""
+    return model.engine in (EngineKind.airllm, EngineKind.imagegen)

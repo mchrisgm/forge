@@ -131,6 +131,21 @@ services:
               count: 1
               capabilities: [gpu]
 
+  imagegen:
+    profiles: ["engines"]
+    build: ./engines/imagegen
+    image: ${FORGE_IMAGEGEN_IMAGE:-forge-imagegen}
+    volumes:
+      - models:/data/models
+    networks: [forge-internal]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   # Built here so `make up` produces the image the orchestrator spawns
   # sessions from; never started by compose itself.
   session-runner:

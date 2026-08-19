@@ -89,6 +89,53 @@ async def save_upload(user_id: int, file: UploadFile) -> Upload:
         return db.get(Upload, upload_id)
 
 
+_GEN_EXT = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "application/pdf": ".pdf",
+}
+
+
+def save_generated(
+    user_id: int, data: bytes, prompt: str, mime: str = "image/png"
+) -> Upload:
+    """Persist a Forge-generated file (image generation etc.) as an Upload row
+    so it serves, attaches, and deletes exactly like a user upload."""
+    settings = get_settings()
+    if not data:
+        raise HTTPException(502, "generation returned an empty file")
+    if len(data) > settings.upload_max_mb * 1024 * 1024:
+        raise HTTPException(
+            502, f"generated file exceeds the {settings.upload_max_mb} MB limit"
+        )
+    mime, kind = _sniff(data[:16], "", mime)
+    stem = re.sub(r"[^\w]+", "-", prompt.lower()).strip("-")[:48] or "generated"
+    upload_id = str(uuid.uuid4())
+    user_dir = Path(settings.uploads_dir) / str(user_id)
+    user_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{stem}{_GEN_EXT.get(mime, '.bin')}"
+    dest = user_dir / f"{upload_id}-{filename}"
+    dest.write_bytes(data)
+
+    upload = Upload(
+        id=upload_id,
+        user_id=user_id,
+        filename=filename,
+        mime=mime,
+        kind=kind,
+        size_bytes=len(data),
+        path=str(dest),
+        generated=True,
+        prompt=prompt[:2000],
+    )
+    with write_session() as db:
+        db.add(upload)
+    with read_session() as db:
+        return db.get(Upload, upload_id)
+
+
 def get_owned(upload_id: str, user_id: int) -> Upload:
     with read_session() as db:
         upload = db.get(Upload, upload_id)

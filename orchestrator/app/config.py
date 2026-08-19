@@ -66,11 +66,13 @@ class Settings(BaseSettings):
     llamacpp_image: str = "ghcr.io/ggml-org/llama.cpp:server-cuda"
     vllm_image: str = "vllm/vllm-openai:v0.10.1"
     airllm_image: str = "forge-airllm"
+    imagegen_image: str = "forge-imagegen"
 
     # Engine ports (fixed per lane, PLAN §4)
     llamacpp_port: int = 8081
     vllm_port: int = 8082
     airllm_port: int = 8083
+    imagegen_port: int = 8084
 
     # Where session containers reach the orchestrator's /v1 model router
     # (forge-internal DNS name of the compose service).

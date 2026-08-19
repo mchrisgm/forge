@@ -243,3 +243,96 @@ def scan(limit: int | None = None) -> dict[str, Any]:
         "considered": len(seen),
         "skipped_no_coding_signal": skipped,
     }
+
+
+# ── on-demand Hub search (Models page search box) ───────────────────────────
+
+SEARCH_PIPELINES = {"text": "text-generation", "image": "text-to-image"}
+
+
+def search_hub(query: str, kind: str = "text", limit: int = 20) -> list[dict[str, Any]]:
+    """Search the Hub for a specific model by name. Blocking — run in a
+    worker thread. `kind` picks the pipeline: text (chat/code) or image
+    (text-to-image for the imagegen lane)."""
+    from huggingface_hub import HfApi
+
+    settings = get_settings()
+    api = HfApi(token=settings.hf_token or None)
+    listing = list(
+        api.list_models(
+            search=query,
+            pipeline_tag=SEARCH_PIPELINES[kind],
+            sort="downloads",
+            direction=-1,
+            limit=max(1, min(limit, 50)),
+        )
+    )
+    with read_session() as db:
+        in_catalog = set(db.exec(select(ModelEntry.hf_repo)).all())
+    results = []
+    for m in listing:
+        tags = list(m.tags or [])
+        created_at = getattr(m, "created_at", None)
+        results.append(
+            {
+                "hf_repo": m.id,
+                "downloads": int(getattr(m, "downloads", 0) or 0),
+                "likes": int(getattr(m, "likes", 0) or 0),
+                "tags": tags[:10],
+                "gated": bool(getattr(m, "gated", False)),
+                "created_at": created_at.isoformat() if created_at else None,
+                "params_b": estimate_params_b(m.id) if kind == "text" else 0.0,
+                "in_catalog": m.id in in_catalog,
+            }
+        )
+    return results
+
+
+def resolve_text_candidate(hf_repo: str) -> dict[str, Any]:
+    """Artifact discovery + lane assignment for one repo the user picked from
+    search — the same pipeline scan() runs per suggestion. Blocking."""
+    from huggingface_hub import HfApi
+
+    settings = get_settings()
+    token = settings.hf_token or None
+    api = HfApi(token=token)
+    info = api.model_info(hf_repo)
+    tags = list(info.tags or [])
+    params_b = estimate_params_b(
+        hf_repo, getattr(getattr(info, "safetensors", None), "total", None)
+    )
+    gguf_repo, gguf_file, gguf_size = _find_gguf(api, hf_repo, token)
+    budgets = Budgets(settings.vram_budget_gb, settings.ram_offload_budget_gb)
+    lane = assign_lane(
+        params_b,
+        gguf_size or None,
+        _has_awq(hf_repo, tags),
+        is_moe(hf_repo, tags),
+        budgets=budgets,
+    )
+    return {
+        "lane": lane,
+        "params_b": params_b,
+        "is_moe": is_moe(hf_repo, tags),
+        "gguf_repo": gguf_repo,
+        "gguf_file": gguf_file,
+        "gguf_size_gb": gguf_size,
+    }
+
+
+def snapshot_size_gb(hf_repo: str) -> float:
+    """Total weight size of a repo snapshot (safetensors preferred), GiB."""
+    from huggingface_hub import HfApi
+
+    settings = get_settings()
+    try:
+        info = HfApi(token=settings.hf_token or None).model_info(
+            hf_repo, files_metadata=True
+        )
+    except Exception:
+        return 0.0
+    siblings = info.siblings or []
+    total = sum(
+        s.size or 0 for s in siblings if s.rfilename.endswith(".safetensors")
+    ) or sum(s.size or 0 for s in siblings if s.size)
+    return round(total / 1024**3, 2)
