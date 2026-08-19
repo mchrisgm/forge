@@ -56,6 +56,30 @@ def _validate_git_url(git_url: str) -> None:
         raise SkillError("only http(s) git URLs are supported")
 
 
+def _validate_pack_url(git_url: str) -> None:
+    # Pack imports copy many directories at once, so hold them to the
+    # stricter https-only shape (no plaintext http, no ssh/scp forms).
+    if not re.match(r"^https://[\w.-]+(:\d+)?/", git_url):
+        raise SkillError("only https git URLs are supported")
+
+
+def _clone(git_url: str, clone_dir: Path) -> None:
+    """Shallow-clone git_url into clone_dir (list-args subprocess, no shell)."""
+    try:
+        subprocess.run(
+            ["git", "clone", "--depth", "1", git_url, str(clone_dir)],
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SkillError(
+            f"git clone failed: {exc.stderr.decode(errors='replace')[-400:]}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise SkillError("git clone timed out") from exc
+
+
 def _reject_escaping_symlinks(skill_dir: Path, clone_root: Path) -> None:
     """A malicious repo could ship symlinks to orchestrator files (DB with the
     JWT signing key and PAT); shutil.copytree dereferences them by default,
@@ -95,51 +119,43 @@ def _find_skill_dir(repo_root: Path, subdir: str | None) -> Path:
     )
 
 
-def install(git_url: str, subdir: str | None = None) -> Skill:
-    _validate_git_url(git_url)
-    settings = get_settings()
-    skills_root = Path(settings.skills_dir)
-    skills_root.mkdir(parents=True, exist_ok=True)
+def _install_skill_dir(
+    skill_dir: Path,
+    clone_root: Path,
+    git_url: str,
+    skills_root: Path,
+    *,
+    enabled: bool = True,
+) -> Skill:
+    """Validate a SKILL.md-bearing directory inside a clone, copy it into the
+    skills volume, and create the Skill row. Shared by single installs and
+    bulk pack imports so both go through the same symlink/name checks."""
+    _reject_escaping_symlinks(skill_dir, clone_root)
+    skill_md = (skill_dir / "SKILL.md").read_text(encoding="utf-8", errors="replace")
+    meta = parse_frontmatter(skill_md)
+    name = str(meta.get("name") or skill_dir.name)
+    description = str(meta.get("description") or "")
+    slug = slugify(name)
 
-    with tempfile.TemporaryDirectory(prefix="forge-skill-") as tmp:
-        clone_dir = Path(tmp) / "repo"
-        try:
-            subprocess.run(
-                ["git", "clone", "--depth", "1", git_url, str(clone_dir)],
-                check=True,
-                capture_output=True,
-                timeout=120,
-            )
-        except subprocess.CalledProcessError as exc:
-            raise SkillError(
-                f"git clone failed: {exc.stderr.decode(errors='replace')[-400:]}"
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise SkillError("git clone timed out") from exc
+    with read_session() as db:
+        if db.exec(select(Skill).where(Skill.name == name)).first():
+            raise SkillError(f"skill '{name}' is already installed", 409)
 
-        skill_dir = _find_skill_dir(clone_dir, subdir)
-        _reject_escaping_symlinks(skill_dir, clone_dir)
-        skill_md = (skill_dir / "SKILL.md").read_text(encoding="utf-8", errors="replace")
-        meta = parse_frontmatter(skill_md)
-        name = str(meta.get("name") or skill_dir.name)
-        description = str(meta.get("description") or "")
-        slug = slugify(name)
+    dest = skills_root / slug
+    if dest.exists():
+        shutil.rmtree(dest)
+    # symlinks=True copies links verbatim (intra-repo links keep working,
+    # anything else dangles harmlessly inside the read-only volume) instead
+    # of dereferencing them into the shared volume.
+    shutil.copytree(skill_dir, dest, symlinks=True, ignore=shutil.ignore_patterns(".git"))
 
-        with read_session() as db:
-            if db.exec(select(Skill).where(Skill.name == name)).first():
-                raise SkillError(f"skill '{name}' is already installed", 409)
-
-        dest = skills_root / slug
-        if dest.exists():
-            shutil.rmtree(dest)
-        # symlinks=True copies links verbatim (intra-repo links keep working,
-        # anything else dangles harmlessly inside the read-only volume) instead
-        # of dereferencing them into the shared volume.
-        shutil.copytree(
-            skill_dir, dest, symlinks=True, ignore=shutil.ignore_patterns(".git")
-        )
-
-    skill = Skill(name=name, description=description, source_url=git_url, path=str(dest))
+    skill = Skill(
+        name=name,
+        description=description,
+        source_url=git_url,
+        path=str(dest),
+        enabled=enabled,
+    )
     with write_session() as db:
         db.add(skill)
         db.flush()
@@ -149,6 +165,98 @@ def install(git_url: str, subdir: str | None = None) -> Skill:
         skill = db.get(Skill, skill_id)
     bus.publish("skill.installed", {"name": name})
     return skill
+
+
+def install(git_url: str, subdir: str | None = None) -> Skill:
+    _validate_git_url(git_url)
+    settings = get_settings()
+    skills_root = Path(settings.skills_dir)
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="forge-skill-") as tmp:
+        clone_dir = Path(tmp) / "repo"
+        _clone(git_url, clone_dir)
+        skill_dir = _find_skill_dir(clone_dir, subdir)
+        return _install_skill_dir(skill_dir, clone_dir, git_url, skills_root)
+
+
+PACK_SCAN_CAP = 500
+PACK_INSTALL_CAP = 100
+
+
+def _enumerate_pack(clone_dir: Path) -> list[dict]:
+    """List every skill directory (SKILL.md at depth 1 or 2) in a clone."""
+    found: list[dict] = []
+    paths = sorted(clone_dir.glob("*/SKILL.md")) + sorted(clone_dir.glob("*/*/SKILL.md"))
+    for skill_md in paths:
+        if len(found) >= PACK_SCAN_CAP:
+            log.warning("pack scan capped at %d skills", PACK_SCAN_CAP)
+            break
+        skill_dir = skill_md.parent
+        subdir = str(skill_dir.relative_to(clone_dir))
+        if ".git" in skill_dir.relative_to(clone_dir).parts:
+            continue
+        try:
+            meta = parse_frontmatter(skill_md.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            meta = {}
+        entry = {
+            "name": str(meta.get("name") or skill_dir.name),
+            "description": str(meta.get("description") or ""),
+            "subdir": subdir,
+        }
+        if not meta:
+            # Tolerated, not fatal: install falls back to the directory name.
+            entry["note"] = "SKILL.md frontmatter missing or malformed"
+        found.append(entry)
+    return found
+
+
+def scan_pack(git_url: str) -> list[dict]:
+    """Shallow-clone a skill monorepo and list its installable skills as
+    [{name, description, subdir}] (plus a 'note' on malformed frontmatter),
+    capped at PACK_SCAN_CAP. The temp clone is removed before returning."""
+    _validate_pack_url(git_url)
+    with tempfile.TemporaryDirectory(prefix="forge-pack-") as tmp:
+        clone_dir = Path(tmp) / "repo"
+        _clone(git_url, clone_dir)
+        return _enumerate_pack(clone_dir)
+
+
+def install_from_pack(git_url: str, subdirs: list[str]) -> dict:
+    """Install a batch of skills from one repo with a single clone. Each
+    subdir goes through the same validation as a single install (symlink
+    escape, SKILL.md presence, duplicate name). Bulk-imported skills start
+    disabled so a large import cannot flood the session tool listing."""
+    _validate_pack_url(git_url)
+    if not subdirs:
+        raise SkillError("no subdirs selected")
+    if len(subdirs) > PACK_INSTALL_CAP:
+        raise SkillError(f"at most {PACK_INSTALL_CAP} skills per pack install")
+    settings = get_settings()
+    skills_root = Path(settings.skills_dir)
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    installed: list[str] = []
+    skipped: list[dict] = []
+    with tempfile.TemporaryDirectory(prefix="forge-pack-") as tmp:
+        clone_dir = Path(tmp) / "repo"
+        _clone(git_url, clone_dir)
+        for subdir in subdirs:
+            try:
+                skill_dir = _find_skill_dir(clone_dir, subdir)
+                skill = _install_skill_dir(
+                    skill_dir, clone_dir, git_url, skills_root, enabled=False
+                )
+                installed.append(skill.name)
+            except SkillError as exc:
+                skipped.append({"subdir": subdir, "reason": exc.detail})
+    return {
+        "installed": installed,
+        "skipped": skipped,
+        "note": "bulk-imported skills start disabled — enable the ones you want "
+        "sessions to load",
+    }
 
 
 def remove(skill_id: int) -> None:
