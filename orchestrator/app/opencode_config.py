@@ -51,7 +51,7 @@ def render_mcp_block(connectors: list[Connector]) -> dict[str, Any]:
     }
     mcp["playwright"] = {
         "type": "remote",
-        "url": "http://mcp-playwright:8931/sse",
+        "url": "http://mcp-playwright:8931/mcp",
         "enabled": bool(enabled.get(ConnectorKind.playwright, True)),
     }
     mcp["skills"] = {

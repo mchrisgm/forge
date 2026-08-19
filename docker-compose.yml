@@ -55,7 +55,7 @@ services:
       start_period: 20s
 
   searxng:
-    image: searxng/searxng:2025.7.25-b8860d156
+    image: searxng/searxng:2026.8.17-374939b88
     restart: unless-stopped
     environment:
       SEARXNG_BASE_URL: http://searxng:8080/
@@ -65,7 +65,7 @@ services:
     networks: [forge-internal]
 
   mcp-playwright:
-    image: mcr.microsoft.com/playwright/mcp:v0.0.32
+    image: mcr.microsoft.com/playwright/mcp:v0.0.49
     restart: unless-stopped
     command: ["--host", "0.0.0.0", "--port", "8931", "--headless", "--isolated"]
     networks: [forge-internal]
