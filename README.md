@@ -191,6 +191,27 @@ Notes:
   sessions, and it is excluded from the `/v1` chat router. SDXL-Turbo ships
   in the seed catalog (1-4 step generation — seconds per image).
 
+### Context compression
+
+On a 12 GB card the scarcest resource is context (KV-cache VRAM). Forge chains
+all chat-completion traffic through
+[Headroom](https://github.com/headroomlabs-ai/headroom), a self-hosted
+compression proxy that shrinks tool outputs, logs, JSON, and code before they
+reach the model — so agent sessions overflow the window less and prefill
+faster. It runs offline (no model downloads) and is a toggle on the Settings
+page. If the proxy is down, traffic **automatically falls back** to the direct
+engine path, so a stopped container degrades to plain Forge rather than
+breaking chat.
+
+### Run code safely
+
+The optional **sandbox lane** ([smolvm](https://github.com/smol-machines/smolvm))
+boots hardware-isolated microVMs to run untrusted code — the Chat **run**
+button on a Python/JavaScript/Bash block executes it with **no network**, a
+hard timeout, and captured output. It needs `/dev/kvm` on the host and is
+opt-in: `make sandbox`. Its control API has no auth and stays strictly on the
+internal network.
+
 ## Profiles, chat & memory
 
 Forge is **multi-user**: every person on the LAN gets their own profile with
@@ -262,6 +283,13 @@ support files.
 - **Install:** Skills page → install from a git URL (optionally a subdir), or
   `POST /api/skills/install {"git_url": "...", "subdir": "..."}`. Community
   repos following the anthropics/skills layout work as-is.
+- **Suggested skills:** the Skills page also offers a curated one-click catalog
+  of ~40 vetted skills from [ECC](https://github.com/affaan-m/ECC) (MIT) —
+  TDD, verification loops, security review, and language/framework patterns for
+  Python, TypeScript, React, Go, Rust, Docker and more — grouped by category.
+- **Import a skill pack:** point the importer at any git repo of skills, scan
+  it, and batch-install a selection. Bulk-imported skills arrive **disabled**
+  (so they don't flood the model's tool listing) — toggle on the ones you want.
 - **Use:** every session container gets a read-only `/skills` mount and a
   built-in skills MCP server exposing `list_skills` / `load_skill`. Models see
   only names and descriptions until a skill is loaded — the same progressive
@@ -275,10 +303,17 @@ page. Five **core** connectors ship with Forge:
 | Connector | What it does | Needs |
 |---|---|---|
 | `github` | Repo/issue/PR operations via github-mcp-server | A GitHub PAT (Connectors page). Off until one is set. |
-| `fetch` | Fetch/convert web pages | — |
+| `scrapling` | Stealth web fetching — TLS-fingerprint HTTP plus a Cloudflare-capable headless browser, returning markdown | — |
 | `searxng` | Web search via the bundled self-hosted SearXNG | — |
 | `playwright` | Browser automation (headless, shared service) | — |
 | `skills` | The skills server described above | — |
+
+The plain `fetch` connector still exists but ships **off** — `scrapling`
+([Scrapling](https://github.com/D4Vinci/Scrapling), a shared `mcp-scrapling`
+container) supersedes it on JS-heavy and bot-protected pages. The Chat
+composer's **read a page** button uses the same engine server-side: paste a
+URL and Forge fetches it (escalating to the stealth browser automatically),
+attaching the page as markdown to your next message.
 
 Beyond those, the catalog covers **80+ public integrations** — every
 officially hosted, publicly reachable remote MCP server we could verify
@@ -295,6 +330,11 @@ the custom-connector how-to.
 Tokens are stored in SQLite and injected into session containers as
 environment variables (never written into config files) — see the security
 model below before pasting broadly-scoped credentials.
+
+Forge folds in several open-source projects (Scrapling, ECC skills, Headroom
+compression, smolvm sandbox) rather than reinventing them — see
+[docs/integrations.md](docs/integrations.md) for what each does, how it's
+wired, and what was deliberately left out.
 
 ## Security model (v1 — LAN threat model)
 
@@ -371,8 +411,10 @@ make smoke   # full end-to-end gate (needs GPU + a downloaded model)
 
 Layout: `orchestrator/` (FastAPI + SQLModel + APScheduler + docker-py),
 `ui/` (React 18 + TS + Vite PWA), `session-runner/` (OpenCode session image),
-`engines/` (llama.cpp/vLLM wrappers + AirLLM server), `mcp/skills-server/`
-(skills MCP), `gateway/` (Caddy), `scripts/` (smoke + seed). `PLAN.md` is the
+`engines/` (llama.cpp/vLLM wrappers + AirLLM + imagegen servers),
+`sandbox/smolvm/` (microVM sandbox image), `skills-bundled/` (vendored agent
+skills seeded on first boot), `mcp/skills-server/` (skills MCP), `gateway/`
+(Caddy), `scripts/` (preflight + smoke + seed). `PLAN.md` is the
 authoritative spec. CI (GitHub Actions) runs ruff, pytest, and the UI
 typecheck/build — no GPU steps; GPU paths are covered by `make smoke` on the
 real host.
@@ -385,8 +427,10 @@ pinned (and checksum-verified where applicable) in
 is the single source of truth recording the M5 research: `opencode-ai`,
 `github-mcp-server`, `uv`/`uvx`, `mcp-server-fetch`, and `mcp-searxng`. Engine
 images (`vllm/vllm-openai`, `mcr.microsoft.com/playwright/mcp`, `searxng`) are
-pinned in `docker-compose.yml` / `.env.example`. Bump deliberately: OpenCode
-API drift is the main integration risk (PLAN §14), and
+pinned in `docker-compose.yml` / `.env.example` — including the wave-5
+services `ghcr.io/d4vinci/scrapling` (web scraper), `headroom` (compression
+proxy), and the `smolvm` sandbox build. Bump deliberately: OpenCode API drift
+is the main integration risk (PLAN §14), and
 `orchestrator/app/services/opencode_client.py` is the single integration
 point to re-verify after an upgrade.
 
