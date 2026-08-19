@@ -49,8 +49,10 @@ def isolated_env(tmp_path, monkeypatch):
     events_module.bus._loop = None
     events_module.bus._subscribers.clear()
     # The engine-lease singleton must not leak between tests.
-    engine_manager_module.engine_manager._lease = None
-    engine_manager_module.engine_manager._load_task = None
+    engine_manager_module.engine_manager._leases = {}
+    engine_manager_module.engine_manager._load_tasks = {}
+    engine_manager_module.engine_manager._generations = {}
+    engine_manager_module.engine_manager._gpu_count = None
 
     yield
 

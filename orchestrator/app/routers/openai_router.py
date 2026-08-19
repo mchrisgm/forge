@@ -40,13 +40,15 @@ def list_served_models() -> dict:
 
 
 def resolve_lease(model_slug: str | None):
-    """Lease serving `model_slug`; single-ready-lease fallback when absent."""
+    """Lease serving `model_slug`. The single-ready-lease fallback applies
+    ONLY to slug-less requests — an explicit slug that matches nothing is a
+    404, never a silent answer from a different model."""
+    ready = engine_manager.ready_leases()
     if model_slug:
         lease = engine_manager.lease_for_slug(model_slug)
         if lease:
             return lease
-    ready = engine_manager.ready_leases()
-    if len(ready) == 1:
+    elif len(ready) == 1:
         return ready[0]
     served = ", ".join(le.model_slug for le in ready) or "(none)"
     raise HTTPException(

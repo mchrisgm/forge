@@ -1,6 +1,7 @@
-"""EngineManager tests (PLAN §2, §6.2): command construction for both GPU
-lanes, single-GPU lease arbitration, and the healthwait failure paths — all
-with docker faked and httpx routed through a MockTransport."""
+"""EngineManager tests (PLAN §2, §6.2, extended to multiple GPUs): command
+construction for both GPU lanes, per-GPU lease arbitration (single- and
+multi-GPU), and the healthwait failure paths — all with docker faked and httpx
+routed through a MockTransport."""
 
 import asyncio
 
@@ -40,6 +41,19 @@ def make_model(**overrides) -> ModelEntry:
 
 def flag_value(cmd: list[str], flag: str) -> str:
     return cmd[cmd.index(flag) + 1]
+
+
+def make_manager(gpu_count: int) -> EngineManager:
+    manager = EngineManager()
+    manager._gpu_count = gpu_count  # what detect_gpu_count() would have found
+    return manager
+
+
+async def settle(manager: EngineManager, timeout: float = 10) -> None:
+    """Wait for every in-flight load task to finish."""
+    tasks = list(manager._load_tasks.values())
+    if tasks:
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout)
 
 
 # ── build_llamacpp_command ──────────────────────────────────────────────────
@@ -159,8 +173,18 @@ class TestVllmCommand:
         cmd = build_vllm_command(model, Settings())
         assert flag_value(cmd, "--model") == model.hf_repo
 
+    def test_single_gpu_has_no_tensor_parallel_flag(self):
+        model = make_model(engine=EngineKind.vllm, file_path="")
+        cmd = build_vllm_command(model, Settings(), tensor_parallel=1)
+        assert "--tensor-parallel-size" not in cmd
 
-# ── engine addressing ───────────────────────────────────────────────────────
+    def test_tensor_parallel_flag_for_multi_gpu(self):
+        model = make_model(engine=EngineKind.vllm, file_path="")
+        cmd = build_vllm_command(model, Settings(), tensor_parallel=2)
+        assert flag_value(cmd, "--tensor-parallel-size") == "2"
+
+
+# ── engine addressing (per-GPU container names) ─────────────────────────────
 
 
 class TestEngineAddressing:
@@ -168,15 +192,22 @@ class TestEngineAddressing:
         settings = Settings()
         assert (
             engine_base_url(EngineKind.llamacpp, settings)
-            == "http://forge-engine-llamacpp:8081/v1"
+            == "http://forge-engine-llamacpp-gpu0:8081/v1"
         )
         assert (
             engine_base_url(EngineKind.vllm, settings)
-            == "http://forge-engine-vllm:8082/v1"
+            == "http://forge-engine-vllm-gpu0:8082/v1"
         )
         assert (
             engine_base_url(EngineKind.airllm, settings)
-            == "http://forge-engine-airllm:8083/v1"
+            == "http://forge-engine-airllm-gpu0:8083/v1"
+        )
+
+    def test_base_url_carries_the_gpu_index(self):
+        settings = Settings()
+        assert (
+            engine_base_url(EngineKind.llamacpp, settings, gpu_index=1)
+            == "http://forge-engine-llamacpp-gpu1:8081/v1"
         )
 
     def test_ports_follow_settings(self):
@@ -186,16 +217,21 @@ class TestEngineAddressing:
         assert engine_base_url(EngineKind.airllm, settings).endswith(":9003/v1")
 
     def test_container_names(self):
-        assert engine_container_name(EngineKind.llamacpp) == "forge-engine-llamacpp"
-        assert engine_container_name(EngineKind.vllm) == "forge-engine-vllm"
+        assert engine_container_name(EngineKind.llamacpp) == "forge-engine-llamacpp-gpu0"
+        assert engine_container_name(EngineKind.vllm, 1) == "forge-engine-vllm-gpu1"
 
 
-# ── the single-GPU lease ────────────────────────────────────────────────────
+# ── lease arbitration on a single GPU (the classic behaviors) ───────────────
 
 
 @pytest.fixture
 def manager() -> EngineManager:
-    return EngineManager()
+    return make_manager(1)
+
+
+@pytest.fixture
+def manager2() -> EngineManager:
+    return make_manager(2)
 
 
 @pytest.fixture
@@ -203,7 +239,7 @@ def stub_healthwait(monkeypatch):
     """Replace the container-start/healthwait coroutine so lease-arbitration
     tests run instantly and touch neither docker nor HTTP."""
 
-    async def stub(self, model, lease, generation):
+    async def stub(self, model, lease, snapshot):
         lease.state = "ready"
         lease.container_id = f"stub-{model.id}"
 
@@ -218,13 +254,14 @@ class TestLeaseArbitration:
         second = make_model(id=2, display_name="Second Model")
 
         lease = await manager.load(first)
-        await asyncio.wait_for(manager._load_task, 5)
+        await settle(manager)
         assert lease.state == "ready"
 
         with pytest.raises(LeaseHeldError) as excinfo:
             await manager.load(second)
-        assert excinfo.value.holder["model_id"] == 1
-        assert excinfo.value.holder["model_name"] == "First Model"
+        (holder,) = excinfo.value.holders
+        assert holder["model_id"] == 1
+        assert holder["model_name"] == "First Model"
         # The original lease is untouched.
         assert manager.lease is lease
 
@@ -234,7 +271,7 @@ class TestLeaseArbitration:
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def slow_stub(self, model, lease, generation):
+        async def slow_stub(self, model, lease, snapshot):
             started.set()
             await release.wait()
             lease.state = "ready"
@@ -243,40 +280,41 @@ class TestLeaseArbitration:
         await manager.load(make_model(id=1))
         await asyncio.wait_for(started.wait(), 5)
         with pytest.raises(LeaseHeldError):
-            await manager.load(make_model(id=2))
+            await manager.load(make_model(id=2, display_name="Other Model"))
         release.set()
-        await asyncio.wait_for(manager._load_task, 5)
+        await settle(manager)
 
     async def test_force_load_replaces_the_lease(
         self, manager, stub_healthwait, fake_docker
     ):
         await manager.load(make_model(id=1, display_name="First Model"))
-        await asyncio.wait_for(manager._load_task, 5)
+        await settle(manager)
 
         lease = await manager.load(
             make_model(id=2, display_name="Second Model"), force=True
         )
         assert lease.model_id == 2
         assert manager.lease.model_name == "Second Model"
+        assert [le.model_id for le in manager.active_leases()] == [2]
 
     async def test_failed_lease_does_not_block_the_next_load(
         self, manager, monkeypatch
     ):
-        async def failing_stub(self, model, lease, generation):
+        async def failing_stub(self, model, lease, snapshot):
             lease.state = "failed"
             lease.error = "boom"
 
         monkeypatch.setattr(EngineManager, "_start_and_healthwait", failing_stub)
         await manager.load(make_model(id=1))
-        await asyncio.wait_for(manager._load_task, 5)
-        assert manager.lease.state == "failed"
+        await settle(manager)
+        assert manager.lease is None  # failed lease is not active
 
-        async def ok_stub(self, model, lease, generation):
+        async def ok_stub(self, model, lease, snapshot):
             lease.state = "ready"
 
         monkeypatch.setattr(EngineManager, "_start_and_healthwait", ok_stub)
-        lease = await manager.load(make_model(id=2))
-        await asyncio.wait_for(manager._load_task, 5)
+        lease = await manager.load(make_model(id=2, display_name="Other Model"))
+        await settle(manager)
         assert lease.model_id == 2
         assert lease.state == "ready"
 
@@ -287,13 +325,149 @@ class TestLeaseArbitration:
         httpx_mock.set_handler(lambda request: httpx.Response(200, json={"data": []}))
 
         await manager.load(make_model(id=1))
-        await asyncio.wait_for(manager._load_task, 10)
+        await settle(manager)
         assert manager.lease.state == "ready"
         assert len(fake_docker.containers.list(filters={"label": "forge.engine"})) == 1
 
         await manager.unload()
         assert manager.lease is None
+        assert manager.active_leases() == []
         assert fake_docker.containers.list(filters={"label": "forge.engine"}) == []
+
+
+# ── multi-GPU leases ────────────────────────────────────────────────────────
+
+
+class TestMultiGpu:
+    async def test_two_models_serve_concurrently_on_distinct_gpus(
+        self, manager2, fake_docker, httpx_mock
+    ):
+        httpx_mock.set_handler(lambda request: httpx.Response(200, json={"data": []}))
+        first = await manager2.load(make_model(id=1, display_name="First Model"))
+        second = await manager2.load(make_model(id=2, display_name="Second Model"))
+        await settle(manager2)
+
+        assert first.state == "ready" and first.gpu_ids == [0]
+        assert second.state == "ready" and second.gpu_ids == [1]
+        assert len(manager2.active_leases()) == 2
+
+        names = {c.name for c in fake_docker.containers.run_calls}
+        assert names == {"forge-engine-llamacpp-gpu0", "forge-engine-llamacpp-gpu1"}
+
+    async def test_third_load_raises_with_both_holders(
+        self, manager2, stub_healthwait
+    ):
+        await manager2.load(make_model(id=1, display_name="First Model"))
+        await manager2.load(make_model(id=2, display_name="Second Model"))
+        with pytest.raises(LeaseHeldError) as excinfo:
+            await manager2.load(make_model(id=3, display_name="Third Model"))
+        assert {h["model_id"] for h in excinfo.value.holders} == {1, 2}
+
+    async def test_gpu_index_pinning(self, manager2, stub_healthwait):
+        lease = await manager2.load(make_model(id=1), gpu_index=1)
+        assert lease.gpu_ids == [1]
+        status = manager2.status()
+        assert status["gpus"][0]["lease"] is None
+        assert status["gpus"][1]["lease"]["model_id"] == 1
+
+        # The pinned GPU is now busy; pinning there again (another model) 409s.
+        with pytest.raises(LeaseHeldError):
+            await manager2.load(
+                make_model(id=2, display_name="Other Model"), gpu_index=1
+            )
+        # An out-of-range pin can never be satisfied.
+        with pytest.raises(LeaseHeldError):
+            await manager2.load(
+                make_model(id=3, display_name="Third Model"), gpu_index=5
+            )
+        await settle(manager2)
+
+    async def test_same_slug_returns_existing_lease(self, manager2, stub_healthwait):
+        model = make_model(id=1)
+        first = await manager2.load(model)
+        again = await manager2.load(make_model(id=1))  # same display name -> same slug
+        assert again is first
+        assert len(manager2._leases) == 1  # no second GPU claimed
+        await settle(manager2)
+
+    async def test_unload_single_gpu_releases_only_that_gpu(
+        self, manager2, fake_docker, httpx_mock
+    ):
+        httpx_mock.set_handler(lambda request: httpx.Response(200, json={"data": []}))
+        await manager2.load(make_model(id=1, display_name="First Model"))
+        second = await manager2.load(make_model(id=2, display_name="Second Model"))
+        await settle(manager2)
+
+        await manager2.unload(gpu_index=0)
+
+        assert [le.model_id for le in manager2.active_leases()] == [2]
+        assert manager2.active_leases()[0] is second
+        remaining = fake_docker.containers.list(filters={"label": "forge.engine"})
+        assert [c.name for c in remaining] == ["forge-engine-llamacpp-gpu1"]
+
+    async def test_vllm_tensor_parallel_spans_both_gpus(
+        self, manager2, fake_docker, httpx_mock
+    ):
+        httpx_mock.set_handler(lambda request: httpx.Response(200, json={"data": []}))
+        model = make_model(id=1, engine=EngineKind.vllm, file_path="")
+        lease = await manager2.load(model, gpu_count=2)
+        await settle(manager2)
+
+        assert lease.state == "ready"
+        assert lease.gpu_ids == [0, 1]
+        (container,) = fake_docker.containers.run_calls
+        assert container.name == "forge-engine-vllm-gpu0"
+        kwargs = container.run_kwargs
+        (device_request,) = kwargs["device_requests"]
+        assert device_request["DeviceIDs"] == ["0", "1"]
+        assert flag_value(kwargs["command"], "--tensor-parallel-size") == "2"
+        assert kwargs["labels"]["forge.gpus"] == "0,1"
+
+        # Both GPUs are held by the one lease — nothing else fits.
+        with pytest.raises(LeaseHeldError):
+            await manager2.load(make_model(id=2, display_name="Other Model"))
+
+    async def test_multi_gpu_outside_vllm_lane_raises(self, manager2):
+        with pytest.raises(ValueError):
+            await manager2.load(make_model(id=1), gpu_count=2)
+        with pytest.raises(ValueError):
+            await manager2.load(
+                make_model(id=2, engine=EngineKind.airllm), gpu_count=2
+            )
+
+
+# ── status() shape ──────────────────────────────────────────────────────────
+
+
+class TestStatusShape:
+    async def test_status_reports_gpus_leases_and_engines(
+        self, manager2, stub_healthwait
+    ):
+        lease = await manager2.load(make_model(id=1))
+        await settle(manager2)
+
+        status = manager2.status()
+        assert status["gpu_count"] == 2
+        # Backcompat single-lease view: the first active lease.
+        assert status["lease"] == lease.as_dict()
+        assert status["leases"] == [lease.as_dict()]
+        assert [gpu["index"] for gpu in status["gpus"]] == [0, 1]
+        assert status["gpus"][0]["lease"] == lease.as_dict()
+        assert status["gpus"][1]["lease"] is None
+
+        settings = get_settings()
+        engines = status["engines"]
+        assert set(engines) == {"llamacpp", "vllm", "airllm"}
+        assert engines["llamacpp"]["port"] == settings.llamacpp_port
+        assert engines["llamacpp"]["active_on"] == [0]
+        assert engines["vllm"]["active_on"] == []
+
+    def test_empty_status(self, manager):
+        status = manager.status()
+        assert status["gpu_count"] == 1
+        assert status["lease"] is None
+        assert status["leases"] == []
+        assert status["gpus"] == [{"index": 0, "lease": None}]
 
 
 # ── real healthwait paths (fake docker + mock transport) ────────────────────
@@ -306,26 +480,27 @@ class TestHealthwait:
 
         lease = await manager.load(model)
         assert lease.state == "starting"
-        await asyncio.wait_for(manager._load_task, 10)
+        await settle(manager)
         assert lease.state == "ready"
         assert lease.error == ""
 
         # The engine container was created with the GPU + lane wiring.
         settings = get_settings()
         (container,) = fake_docker.containers.run_calls
-        assert container.name == "forge-engine-llamacpp"
+        assert container.name == "forge-engine-llamacpp-gpu0"
         assert container.image == settings.llamacpp_image
         kwargs = container.run_kwargs
         assert kwargs["network"] == settings.docker_network
         assert kwargs["labels"]["forge.engine"] == "llamacpp"
         assert kwargs["labels"]["forge.model_id"] == "5"
+        assert kwargs["labels"]["forge.gpus"] == "0"
         assert kwargs["device_requests"], "engine containers must request the GPU"
         assert kwargs["restart_policy"] == {"Name": "no"}
         assert "--jinja" in kwargs["command"]
 
-        # Healthcheck polled the lane's OpenAI surface.
+        # Healthcheck polled the lane's OpenAI surface on the per-GPU name.
         health = httpx_mock.requests[-1]
-        assert health.url.host == "forge-engine-llamacpp"
+        assert health.url.host == "forge-engine-llamacpp-gpu0"
         assert health.url.port == settings.llamacpp_port
         assert health.url.path == "/v1/models"
 
@@ -334,7 +509,7 @@ class TestHealthwait:
     ):
         fake_docker.containers.fail_run = RuntimeError("no NVIDIA driver")
         lease = await manager.load(make_model(id=1))
-        await asyncio.wait_for(manager._load_task, 10)
+        await settle(manager)
         assert lease.state == "failed"
         assert "container start failed" in lease.error
         assert "no NVIDIA driver" in lease.error
@@ -346,7 +521,7 @@ class TestHealthwait:
         fake_docker.containers.logs_text = b"CUDA error: out of memory"
 
         lease = await manager.load(make_model(id=1))
-        await asyncio.wait_for(manager._load_task, 10)
+        await settle(manager)
         assert lease.state == "failed"
         assert "engine exited during load" in lease.error
         assert "out of memory" in lease.error
@@ -361,7 +536,7 @@ class TestHealthwait:
         get_settings.cache_clear()
 
         lease = await manager.load(make_model(id=1))
-        await asyncio.wait_for(manager._load_task, 10)
+        await settle(manager)
         assert lease.state == "failed"
         assert "timed out" in lease.error
         (container,) = fake_docker.containers.run_calls

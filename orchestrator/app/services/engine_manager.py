@@ -239,8 +239,14 @@ class EngineManager:
             "gpus": [
                 {
                     "index": i,
-                    "lease": (
-                        self._leases[i].as_dict() if i in self._leases else None
+                    # A tensor-parallel lease appears on EVERY GPU it spans.
+                    "lease": next(
+                        (
+                            lease.as_dict()
+                            for lease in self._leases.values()
+                            if i in lease.gpu_ids and lease.state != "failed"
+                        ),
+                        None,
                     ),
                 }
                 for i in range(self.gpu_count)
