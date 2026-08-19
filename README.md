@@ -143,7 +143,7 @@ in the parallel-runs view.
 
 ## Engine lanes
 
-Three inference lanes sit behind the same OpenAI-compatible surface; the
+Four engine lanes sit behind the same OpenAI-compatible surface; the
 orchestrator enforces **one engine per GPU** (loading onto a busy GPU returns
 HTTP 409 with the lease holders). With one GPU that means one engine at a
 time; with several, each GPU serves its own model concurrently, and the vLLM
@@ -158,6 +158,7 @@ PLAN §9 (budgets are per GPU):
 | llama.cpp full-GPU | GGUF ≤ ~10 GB file | 14B Q4_K_M |
 | llama.cpp offload | GGUF ≤ ~40 GB file (VRAM + 32 GB RAM), MoE strongly preferred | 30B-A3B class Q4/Q5 |
 | AirLLM | ≤ 70B fp16-from-disk, **chat-only** | 70B instruct |
+| imagegen | diffusers text-to-image, fp16 | SDXL-Turbo |
 
 Notes:
 
@@ -170,6 +171,10 @@ Notes:
   token, no tool calling, chat only — it never appears in the session model
   picker. Talk to it (or any loaded model) via **Chat with model** on the
   Models page once its lease is ready.
+- **imagegen** serves a diffusers text-to-image pipeline behind the OpenAI
+  Images API for chat image generation. Like AirLLM it never powers coding
+  sessions, and it is excluded from the `/v1` chat router. SDXL-Turbo ships
+  in the seed catalog (1-4 step generation — seconds per image).
 
 ## Profiles, chat & memory
 
@@ -188,6 +193,10 @@ holds a GPU lease:
 - **Attachments** — drop in images and files. Text and PDFs are read into
   context; images go to the model when it is vision-capable (and are honestly
   labeled as not-viewable otherwise).
+- **Image generation** — ask for an image right in chat (image mode or
+  `/imagine …`). Forge renders it on the local imagegen lane (SDXL-Turbo out
+  of the box) or through an enabled connector like Higgsfield, and saves the
+  result into the conversation as a downloadable attachment.
 - **Memory** — Forge learns durable facts, preferences, and projects from
   your saved chats, retrieves the relevant ones per message under a strict
   token budget, and compresses long conversations into rolling summaries so
@@ -206,6 +215,12 @@ directives. Pick it from the brain icon next to the composer; chats remember
 the level per session.
 
 ## Adding models
+
+**By search:** Models page → search box (or `GET /api/models/search?q=…&kind=text|image`)
+finds a specific model on Hugging Face — chat/code models or text-to-image
+models. One click on **Add** resolves the right artifact and lane
+automatically (AWQ → vLLM, single-file GGUF → llama.cpp full-GPU or offload,
+otherwise AirLLM; image models → the imagegen lane) and starts the download.
 
 **Manually:** Models page → **Add model** (or `POST /api/models`) with the
 Hugging Face repo id, engine lane, and — for llama.cpp — the exact `.gguf`
