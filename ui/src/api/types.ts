@@ -11,12 +11,15 @@ export type ModelStatus =
   | "failed";
 export type SessionState = "creating" | "running" | "idle" | "stopped" | "error";
 export type TaskState = "queued" | "running" | "done" | "failed";
-export type ConnectorKind =
-  | "github"
-  | "searxng"
-  | "fetch"
-  | "playwright"
-  | "skills";
+export type ThinkingLevel = "auto" | "off" | "low" | "high";
+export type ConnectorCategory =
+  | "core"
+  | "productivity"
+  | "developer"
+  | "design"
+  | "business"
+  | "custom";
+export type McpType = "remote" | "local";
 
 export interface ModelEntry {
   id: number;
@@ -83,6 +86,15 @@ export interface Task {
   result: string;
   created_at: string;
   finished_at: string | null;
+  thinking?: ThinkingLevel;
+}
+
+/** GET /api/models/{id}/thinking/{level} — per-family reasoning directives. */
+export interface ThinkingDirectives {
+  family: string;
+  level: ThinkingLevel;
+  system: string;
+  user_suffix: string;
 }
 
 export interface Skill {
@@ -95,18 +107,48 @@ export interface Skill {
   enabled: boolean;
 }
 
+/** One credential/config field a connector needs (GET /api/connectors). */
+export interface ConnectorAuthField {
+  key: string;
+  label: string;
+  secret: boolean;
+  placeholder: string;
+  /** Secret + configured fields come back as the "••••••" mask. */
+  value: string;
+  configured: boolean;
+}
+
 export interface Connector {
-  id: number;
-  kind: ConnectorKind;
+  kind: string;
+  name: string;
+  description: string;
+  category: ConnectorCategory;
+  mcp_type: McpType;
   enabled: boolean;
-  config: Record<string, string>;
+  auth_fields: ConnectorAuthField[];
+  auth_note: string;
+  docs_url: string;
+  is_custom: boolean;
   has_token: boolean;
+}
+
+/** POST /api/connectors/custom body. */
+export interface CustomConnectorBody {
+  name: string;
+  mcp_type: McpType;
+  url?: string;
+  command?: string[];
+  headers?: Record<string, string>;
+  environment?: Record<string, string>;
 }
 
 export interface Lease {
   model_id: number;
   model_name: string;
+  model_slug: string;
   engine: EngineKind;
+  gpu_ids: number[];
+  gpu_index: number;
   state: "starting" | "ready" | "failed";
   container_id: string;
   base_url: string;
@@ -114,15 +156,22 @@ export interface Lease {
   acquired_at: string;
 }
 
-export interface EnginesStatus {
+export interface GpuSlot {
+  index: number;
   lease: Lease | null;
-  engines: Record<
-    string,
-    { port: number; container: string; active: boolean }
-  >;
+}
+
+export interface EnginesStatus {
+  gpu_count: number;
+  /** Backcompat: first active lease (single-GPU view). */
+  lease: Lease | null;
+  leases: Lease[];
+  gpus: GpuSlot[];
+  engines: Record<string, { port: number; active_on: number[] }>;
 }
 
 export interface GpuStats {
+  index: number;
   name: string;
   vram_total_gb: number;
   vram_used_gb: number;
@@ -130,7 +179,9 @@ export interface GpuStats {
 }
 
 export interface SystemStats {
+  /** Backcompat: first GPU. */
   gpu: GpuStats | null;
+  gpus: GpuStats[] | null;
   ram: { total_gb: number; used_gb: number; pct: number };
   cpu_pct: number;
   disk: { total_gb: number; used_gb: number; free_gb: number } | null;
@@ -195,6 +246,7 @@ export interface ForgeEvent {
   ts: number;
   // engine.state
   lease?: Lease | null;
+  gpu_index?: number;
   // download.*
   model_id?: number;
   hf_repo?: string;

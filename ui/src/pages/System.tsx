@@ -18,6 +18,7 @@ function Semicircle({
   unit = "GB",
   marker,
   tone = "info",
+  sub,
 }: {
   label: string;
   used: number;
@@ -25,6 +26,7 @@ function Semicircle({
   unit?: string;
   marker?: number | null;
   tone?: "info" | "accent" | "ok";
+  sub?: string;
 }) {
   const pct = total > 0 ? Math.min(1, used / total) : 0;
   const R = 44;
@@ -89,6 +91,11 @@ function Semicircle({
         </text>
       </svg>
       <p className="mt-1 text-xs font-medium text-muted">{label}</p>
+      {sub && (
+        <p className="mt-0.5 max-w-full truncate text-[10px] text-faint">
+          {sub}
+        </p>
+      )}
     </div>
   );
 }
@@ -124,7 +131,9 @@ export default function System() {
   }
 
   const s = stats.data;
-  const lease = s.engine.lease;
+  const gpus = s.gpus ?? [];
+  const leases = s.engine.leases ?? (s.engine.lease ? [s.engine.lease] : []);
+  const gpuCount = Math.max(s.engine.gpu_count ?? 1, gpus.length, 1);
 
   return (
     <div>
@@ -140,16 +149,20 @@ export default function System() {
         </div>
       )}
 
-      {/* Gauges */}
+      {/* Gauges — one VRAM card per GPU, then RAM / disk / CPU */}
       <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {s.gpu ? (
-          <Semicircle
-            label="VRAM"
-            used={s.gpu.vram_used_gb}
-            total={s.gpu.vram_total_gb}
-            marker={s.budgets.vram_gb}
-            tone="accent"
-          />
+        {gpus.length > 0 ? (
+          gpus.map((gpu) => (
+            <Semicircle
+              key={gpu.index}
+              label={gpus.length > 1 ? `GPU ${gpu.index} VRAM` : "VRAM"}
+              used={gpu.vram_used_gb}
+              total={gpu.vram_total_gb}
+              marker={s.budgets.vram_gb}
+              tone="accent"
+              sub={`${gpu.utilization_pct}% util · ${gpu.name}`}
+            />
+          ))
         ) : (
           <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border p-4 text-center">
             <p className="text-sm font-medium text-muted">No GPU</p>
@@ -175,43 +188,61 @@ export default function System() {
             <span className="text-sm text-faint">%</span>
           </p>
           <p className="mt-1 text-xs font-medium text-muted">CPU</p>
-          {s.gpu && (
-            <p className="mt-1.5 max-w-full truncate text-[10px] text-faint">
-              {s.gpu.name}
-            </p>
-          )}
         </div>
       </div>
 
-      {/* Engine lease */}
+      {/* Engine leases */}
       <section className="mb-5 rounded-xl border border-border bg-surface p-4">
-        <h2 className="mb-2 text-sm font-semibold text-muted">GPU lease</h2>
-        {lease ? (
-          <div className="flex flex-wrap items-center gap-3">
-            <span
-              aria-hidden
-              className={cx(
-                "h-2.5 w-2.5 rounded-full",
-                lease.state === "ready" && "bg-ok",
-                lease.state === "starting" && "animate-pulse-dot bg-warn text-warn",
-                lease.state === "failed" && "bg-danger",
-              )}
-            />
-            <span className="text-sm font-semibold text-text">
-              {lease.model_name}
-            </span>
-            <LaneBadge engine={lease.engine} />
-            <span className="text-xs text-muted">{lease.state}</span>
-            {s.gpu && lease.state === "ready" && (
-              <span className="ml-auto font-mono text-xs text-faint">
-                {formatGb(s.gpu.vram_used_gb)} VRAM · {s.gpu.utilization_pct}% util
-              </span>
-            )}
-          </div>
-        ) : (
+        <h2 className="mb-2 text-sm font-semibold text-muted">
+          {gpuCount > 1 ? "GPU leases" : "GPU lease"}
+        </h2>
+        {leases.length === 0 ? (
           <p className="text-sm text-muted">
-            GPU is free — load a model from the Models page.
+            {gpuCount > 1 ? "All GPUs are free" : "GPU is free"} — load a model
+            from the Models page.
           </p>
+        ) : (
+          <ul className="space-y-2">
+            {leases.map((lease) => {
+              const gpu =
+                lease.state === "ready" && gpus.length > 0
+                  ? (gpus.find((g) => g.index === lease.gpu_index) ?? null)
+                  : null;
+              return (
+                <li
+                  key={lease.gpu_index}
+                  className="flex flex-wrap items-center gap-3"
+                >
+                  <span
+                    aria-hidden
+                    className={cx(
+                      "h-2.5 w-2.5 rounded-full",
+                      lease.state === "ready" && "bg-ok",
+                      lease.state === "starting" &&
+                        "animate-pulse-dot bg-warn text-warn",
+                      lease.state === "failed" && "bg-danger",
+                    )}
+                  />
+                  {gpuCount > 1 && (
+                    <span className="font-mono text-xs text-faint">
+                      GPU {lease.gpu_ids.join("+")}
+                    </span>
+                  )}
+                  <span className="text-sm font-semibold text-text">
+                    {lease.model_name}
+                  </span>
+                  <LaneBadge engine={lease.engine} />
+                  <span className="text-xs text-muted">{lease.state}</span>
+                  {gpu && (
+                    <span className="ml-auto font-mono text-xs text-faint">
+                      {formatGb(gpu.vram_used_gb)} VRAM · {gpu.utilization_pct}%
+                      util
+                    </span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
         )}
       </section>
 

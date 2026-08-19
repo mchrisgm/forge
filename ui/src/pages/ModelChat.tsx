@@ -20,6 +20,7 @@ import {
   errorMessage,
   type ChatCompletionMessage,
 } from "../api/client";
+import type { ThinkingLevel } from "../api/types";
 import {
   IconAlert,
   IconChevronLeft,
@@ -28,8 +29,15 @@ import {
   IconTrash,
 } from "../components/icons";
 import { Markdown } from "../components/lazy-markdown";
+import {
+  loadStoredThinking,
+  storeThinking,
+  ThinkingSelect,
+} from "../components/ThinkingSelect";
 import { Button, EmptyState, LaneBadge, Spinner } from "../components/ui";
 import { cx } from "../lib/utils";
+
+const THINKING_STORAGE_KEY = "forge.thinking.model-chat";
 
 interface ChatError {
   kind: "no-engine" | "other";
@@ -92,13 +100,30 @@ export default function ModelChat() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  const [modelSlug, setModelSlug] = useState<string | null>(null);
+  const [thinking, setThinkingState] = useState<ThinkingLevel>(() =>
+    loadStoredThinking(THINKING_STORAGE_KEY),
+  );
+  const setThinking = (level: ThinkingLevel) => {
+    setThinkingState(level);
+    storeThinking(THINKING_STORAGE_KEY, level);
+  };
+
   const engines = useQuery({
     queryKey: ["engines"],
     queryFn: api.enginesStatus,
     refetchInterval: 15000,
   });
-  const lease = engines.data?.lease ?? null;
-  const leaseReady = lease?.state === "ready";
+  const leases = engines.data?.leases ?? [];
+  const readyLeases = leases.filter((l) => l.state === "ready");
+  // The lease messages go to: the picked slug when it is still serving,
+  // otherwise the first ready lease; fall back to any lease for the header.
+  const selected =
+    readyLeases.find((l) => l.model_slug === modelSlug) ??
+    readyLeases[0] ??
+    null;
+  const lease = selected ?? leases[0] ?? null;
+  const leaseReady = selected != null;
 
   // Abort any in-flight generation when leaving the page.
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -150,7 +175,11 @@ export default function ModelChat() {
 
     void (async () => {
       try {
-        const resp = await engineChatStream(history, controller.signal);
+        const resp = await engineChatStream(history, {
+          signal: controller.signal,
+          model: selected?.model_slug,
+          thinking,
+        });
         const contentType = resp.headers.get("content-type") ?? "";
         if (contentType.includes("application/json")) {
           // Engine ignored stream:true — take the full completion at once.
@@ -180,7 +209,7 @@ export default function ModelChat() {
         setStreaming(false);
       }
     })();
-  }, [draft, streaming, messages]);
+  }, [draft, streaming, messages, selected, thinking]);
 
   const stop = () => abortRef.current?.abort();
 
@@ -243,6 +272,44 @@ export default function ModelChat() {
           </Button>
         </div>
       </header>
+
+      {/* Model picker — several leases serving at once */}
+      {readyLeases.length > 1 && (
+        <div
+          role="radiogroup"
+          aria-label="Model to chat with"
+          className="mt-3 flex flex-wrap items-center gap-1.5"
+        >
+          <span className="mr-1 text-xs font-medium text-faint">Model</span>
+          {readyLeases.map((l) => {
+            const active = selected?.model_slug === l.model_slug;
+            return (
+              <button
+                key={l.model_slug}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => setModelSlug(l.model_slug)}
+                className={cx(
+                  "inline-flex min-h-9 cursor-pointer items-center gap-1.5 rounded-full border px-3 font-mono text-xs font-medium transition-colors duration-150",
+                  active
+                    ? "border-accent/50 bg-accent/15 text-accent"
+                    : "border-border bg-raised text-muted hover:text-text",
+                )}
+              >
+                <span
+                  aria-hidden
+                  className={cx(
+                    "h-1.5 w-1.5 rounded-full",
+                    active ? "bg-accent" : "bg-ok",
+                  )}
+                />
+                {l.model_slug}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* Lane / lease warnings */}
       {lease?.engine === "airllm" && (
@@ -362,6 +429,7 @@ export default function ModelChat() {
             onKeyDown={onComposerKeyDown}
             className="max-h-40 min-h-11 flex-1 resize-none rounded-xl border border-edge bg-raised px-3.5 py-2.5 text-sm text-text placeholder:text-faint focus:border-accent focus:outline-none"
           />
+          <ThinkingSelect value={thinking} onChange={setThinking} />
           {streaming ? (
             <Button
               variant="danger"

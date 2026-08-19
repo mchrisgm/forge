@@ -141,7 +141,8 @@ export const opencode = {
    * Fire a prompt. Blocks server-side until the agent turn completes; stream
    * updates arrive via the session SSE feed, so callers should not await this
    * for UI updates. Sends both the flat and nested model reference so either
-   * OpenCode input schema accepts it.
+   * OpenCode input schema accepts it. `opts.system` maps to PromptInput.system
+   * (extra system-prompt text, used for thinking-level directives).
    */
   sendMessage: (
     sessionId: string,
@@ -149,6 +150,7 @@ export const opencode = {
     providerID: string,
     modelID: string,
     text: string,
+    opts: { system?: string } = {},
   ) =>
     ocFetch<unknown>(sessionId, `session/${ocSessionId}/message`, {
       method: "POST",
@@ -157,6 +159,7 @@ export const opencode = {
         modelID,
         model: { providerID, modelID },
         parts: [{ type: "text", text }],
+        ...(opts.system ? { system: opts.system } : {}),
       }),
     }),
 

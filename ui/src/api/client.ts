@@ -1,7 +1,7 @@
 import { announceUnauthorized, getToken } from "../lib/auth";
 import type {
   Connector,
-  ConnectorKind,
+  CustomConnectorBody,
   EnginesStatus,
   FileResponse,
   FilesResponse,
@@ -16,6 +16,8 @@ import type {
   Suggestion,
   SystemStats,
   Task,
+  ThinkingDirectives,
+  ThinkingLevel,
 } from "./types";
 
 export class ApiError extends Error {
@@ -149,8 +151,8 @@ export const api = {
 
   // tasks
   listSessionTasks: (id: string) => get<Task[]>(`/api/sessions/${id}/tasks`),
-  createTask: (id: string, prompt: string) =>
-    post<Task>(`/api/sessions/${id}/tasks`, { prompt }),
+  createTask: (id: string, prompt: string, thinking: ThinkingLevel = "auto") =>
+    post<Task>(`/api/sessions/${id}/tasks`, { prompt, thinking }),
 
   // models
   listModels: () => get<ModelEntry[]>("/api/models"),
@@ -167,15 +169,30 @@ export const api = {
     post<{ new_suggestions: number; considered: number }>(
       "/api/models/registry/scan",
     ),
+  thinkingDirectives: (modelId: number, level: ThinkingLevel) =>
+    get<ThinkingDirectives>(`/api/models/${modelId}/thinking/${level}`),
 
   // engines
   enginesStatus: () => get<EnginesStatus>("/api/engines"),
-  loadEngine: (modelId: number, force = false) =>
+  loadEngine: (
+    modelId: number,
+    opts: { force?: boolean; gpu_index?: number; gpu_count?: number } = {},
+  ) =>
     post<{ lease: Lease }>("/api/engines/load", {
       model_id: modelId,
-      force,
+      force: opts.force ?? false,
+      ...(opts.gpu_index != null ? { gpu_index: opts.gpu_index } : {}),
+      ...(opts.gpu_count != null && opts.gpu_count > 1
+        ? { gpu_count: opts.gpu_count }
+        : {}),
     }),
-  unloadEngine: () => post<{ lease: null }>("/api/engines/unload"),
+  /** Unload one GPU's engine, or everything when gpuIndex is omitted. */
+  unloadEngine: (gpuIndex?: number) =>
+    post<{ leases: Lease[] }>(
+      gpuIndex == null
+        ? "/api/engines/unload"
+        : `/api/engines/unload?gpu_index=${gpuIndex}`,
+    ),
 
   // system
   systemStats: () => get<SystemStats>("/api/system/stats"),
@@ -191,9 +208,13 @@ export const api = {
   // connectors
   listConnectors: () => get<Connector[]>("/api/connectors"),
   patchConnector: (
-    kind: ConnectorKind,
+    kind: string,
     body: { enabled?: boolean; config?: Record<string, string> },
-  ) => patch<Connector>(`/api/connectors/${kind}`, body),
+  ) => patch<Connector>(`/api/connectors/${encodeURIComponent(kind)}`, body),
+  addCustomConnector: (body: CustomConnectorBody) =>
+    post<Connector>("/api/connectors/custom", body),
+  deleteConnector: (kind: string) =>
+    del<{ ok: boolean }>(`/api/connectors/${encodeURIComponent(kind)}`),
 
   // settings
   getSettings: () => get<SettingsPayload>("/api/settings"),
@@ -208,6 +229,31 @@ export const api = {
     }),
 };
 
+// ── Thinking directives (cached per model+level) ────────────────────────────
+
+const thinkingCache = new Map<string, Promise<ThinkingDirectives>>();
+
+/**
+ * GET /api/models/{id}/thinking/{level}, memoized per model+level — the
+ * directives are pure functions of the model family, so one fetch per
+ * combination is enough for the whole app session.
+ */
+export function getThinkingDirectives(
+  modelId: number,
+  level: ThinkingLevel,
+): Promise<ThinkingDirectives> {
+  const key = `${modelId}:${level}`;
+  let hit = thinkingCache.get(key);
+  if (!hit) {
+    hit = api.thinkingDirectives(modelId, level).catch((err: unknown) => {
+      thinkingCache.delete(key); // don't cache failures
+      throw err;
+    });
+    thinkingCache.set(key, hit);
+  }
+  return hit;
+}
+
 // ── Engine scratch chat (POST /api/engines/chat, OpenAI-compatible) ─────────
 
 export interface ChatCompletionMessage {
@@ -215,17 +261,25 @@ export interface ChatCompletionMessage {
   content: string;
 }
 
+export interface EngineChatOptions {
+  signal?: AbortSignal;
+  maxTokens?: number;
+  /** Lease slug — picks the serving engine when several models are loaded. */
+  model?: string;
+  /** Reasoning level; "auto" (default) sends no directive. */
+  thinking?: ThinkingLevel;
+}
+
 /**
- * Start a streaming chat completion against the currently loaded engine.
+ * Start a streaming chat completion against a loaded engine.
  * Returns the raw Response (text/event-stream of OpenAI chunk frames ending
  * with `data: [DONE]`) so callers can consume `response.body` incrementally.
  * Throws ApiError on HTTP failure — 409 means no engine lease is ready.
- * An AbortError from `signal` is rethrown untouched.
+ * An AbortError from `opts.signal` is rethrown untouched.
  */
 export async function engineChatStream(
   messages: ChatCompletionMessage[],
-  signal?: AbortSignal,
-  maxTokens?: number,
+  opts: EngineChatOptions = {},
 ): Promise<Response> {
   const headers = new Headers({ "Content-Type": "application/json" });
   const token = getToken();
@@ -236,11 +290,15 @@ export async function engineChatStream(
     resp = await fetch("/api/engines/chat", {
       method: "POST",
       headers,
-      signal,
+      signal: opts.signal,
       body: JSON.stringify({
         messages,
         stream: true,
-        ...(maxTokens != null ? { max_tokens: maxTokens } : {}),
+        ...(opts.maxTokens != null ? { max_tokens: opts.maxTokens } : {}),
+        ...(opts.model ? { model: opts.model } : {}),
+        ...(opts.thinking && opts.thinking !== "auto"
+          ? { thinking: opts.thinking }
+          : {}),
       }),
     });
   } catch (err) {
