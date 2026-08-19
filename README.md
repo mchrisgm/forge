@@ -265,11 +265,14 @@ page. Five **core** connectors ship with Forge:
 | `playwright` | Browser automation (headless, shared service) | — |
 | `skills` | The skills server described above | — |
 
-Beyond those, the catalog covers **25+ public integrations** — Notion, Linear,
-Figma, Sentry, Stripe, Asana, Atlassian, Slack, Airtable, Supabase, Vercel,
-HubSpot, Gmail (experimental), and more — plus **custom MCP servers** you
-define yourself (remote URL + headers, or a local command). Enable one, paste
-its token, and every new session gets the tools. See
+Beyond those, the catalog covers **80+ public integrations** — every
+officially hosted, publicly reachable remote MCP server we could verify
+(Notion, Linear, Figma, Sentry, Stripe, GitHub remote, GitLab, Neon,
+Cloudflare, Grafana, Exa, Context7, DeepWiki, Microsoft Learn, AWS Knowledge,
+Higgsfield, and many more) plus a handful of high-value official local
+servers — and **custom MCP servers** you define yourself (remote URL +
+headers, or a local command). Enable one, paste its token, and every new
+session gets the tools. See
 [docs/connectors.md](docs/connectors.md) for the full table, per-service token
 guidance (several vendors are OAuth-only — the notes are honest about it), and
 the custom-connector how-to.
