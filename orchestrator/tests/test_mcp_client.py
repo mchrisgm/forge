@@ -114,6 +114,12 @@ class TestParseSseResponse:
         body = 'data: {"id": 3,\ndata: "result": {"ok": true}}\n\n'
         assert _parse_sse_response(body, 3)["result"] == {"ok": True}
 
+    def test_crlf_line_endings_parse(self):
+        # SSE permits CRLF; a ping event ahead of the response must not hide it.
+        message = {"jsonrpc": "2.0", "id": 3, "result": {"ok": True}}
+        body = f"event: ping\r\ndata: {{}}\r\n\r\ndata: {json.dumps(message)}\r\n\r\n"
+        assert _parse_sse_response(body, 3)["result"] == {"ok": True}
+
     def test_missing_id_raises(self):
         body = sse_body({"jsonrpc": "2.0", "id": 1, "result": {}})
         with pytest.raises(MCPError, match="no JSON-RPC response"):
@@ -194,6 +200,17 @@ class TestInitialize:
                 await client.initialize()
         finally:
             await client.close()
+
+    async def test_non_json_initialize_body_is_wrapped(self, mcp_server):
+        # A custom connector URL pointing at a non-MCP endpoint that answers
+        # 200 HTML must surface as MCPError (→ friendly 502), never a raw
+        # JSONDecodeError (→ 500).
+        mcp_server.responders["initialize"] = lambda rid, payload: httpx.Response(
+            200, text="<html>login</html>", headers={"Content-Type": "text/html"}
+        )
+        with pytest.raises(MCPError, match="non-JSON initialize"):
+            async with MCPClient(MCP_URL):
+                pass
 
     async def test_missing_result_raises(self, mcp_server):
         mcp_server.responders["initialize"] = lambda request_id, payload: httpx.Response(

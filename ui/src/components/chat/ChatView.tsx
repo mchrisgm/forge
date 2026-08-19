@@ -390,6 +390,9 @@ export function ChatView({
         conversation_id: id,
         provider,
         size: IMAGE_SIZE,
+        // Temporary mode stores nothing server-side — the image arrives
+        // inline as a data URI and lives only in this tab.
+        temporary: tempMode,
       });
 
       // Show the image right away; the placeholder content mirrors what the
@@ -401,7 +404,10 @@ export function ChatView({
                 ...m,
                 pendingImage: undefined,
                 content: `[Generated image: ${prompt}]`,
-                attachments: [result.upload],
+                attachments: result.upload ? [result.upload] : [],
+                tempImage: result.image_data_uri
+                  ? { dataUri: result.image_data_uri, prompt }
+                  : undefined,
               }
             : m,
         ),

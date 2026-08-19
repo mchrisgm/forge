@@ -256,6 +256,15 @@ class TestAirllmRejected:
             await session_manager.create("chat only", model_id)
         assert excinfo.value.status_code == 400
         assert "chat-only" in excinfo.value.detail
+
+    async def test_imagegen_model_gets_a_lane_accurate_rejection(self, fake_docker):
+        model_id = add_model(engine=EngineKind.imagegen, display_name="SDXL Turbo")
+        with pytest.raises(SessionError) as excinfo:
+            await session_manager.create("art", model_id)
+        assert excinfo.value.status_code == 400
+        assert "image models" in excinfo.value.detail
+        assert "AirLLM" not in excinfo.value.detail
+        assert fake_docker.containers.run_calls == []
         # Nothing was spawned and no session row was left behind.
         assert fake_docker.containers.run_calls == []
         with read_session() as db:

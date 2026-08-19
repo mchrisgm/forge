@@ -33,6 +33,8 @@ class MCPError(RuntimeError):
 
 def _parse_sse_response(text: str, request_id: int) -> dict[str, Any]:
     """Extract the JSON-RPC response with `request_id` from an SSE body."""
+    # The SSE spec allows CRLF (and bare CR) line endings — normalize first.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     for chunk in text.split("\n\n"):
         data_lines = [
             line[5:].lstrip()
@@ -184,7 +186,12 @@ class MCPClient:
         if "text/event-stream" in content_type:
             message = _parse_sse_response(response.text, request_id)
         else:
-            message = response.json()
+            try:
+                message = response.json()
+            except json.JSONDecodeError as exc:
+                raise MCPError(
+                    f"MCP server sent a non-JSON initialize response: {exc}"
+                ) from exc
         if not isinstance(message, dict) or "result" not in message:
             raise MCPError("MCP initialize returned no result")
         await self._notify("notifications/initialized")

@@ -23,6 +23,7 @@ from ..services import downloader
 from ..services.engine_manager import engine_manager
 from ..services.events import bus, sse_stream
 from ..services.registry import (
+    is_diffusers_repo,
     resolve_text_candidate,
     scan,
     search_hub,
@@ -219,6 +220,15 @@ async def add_from_search(body: SearchAddBody) -> dict:
         raise HTTPException(409, f"{hf_repo} is already in the catalog")
 
     if body.kind == "image":
+        # Only diffusers-format repos are loadable by the imagegen server;
+        # text-to-image covers plenty of raw-checkpoint/LoRA repos that would
+        # download tens of GB and then fail at load time.
+        if not await asyncio.to_thread(is_diffusers_repo, hf_repo):
+            raise HTTPException(
+                409,
+                f"{hf_repo} is not a diffusers-format repo (no model_index.json) "
+                "— the imagegen lane cannot load raw checkpoints or LoRAs",
+            )
         size_gb = await asyncio.to_thread(snapshot_size_gb, hf_repo)
         entry = ModelEntry(
             hf_repo=hf_repo,
@@ -255,6 +265,27 @@ async def add_from_search(body: SearchAddBody) -> dict:
             file_path = resolved["gguf_file"] or ""
             if not file_path:
                 raise HTTPException(409, f"no single-file GGUF found for {hf_repo}")
+        # The llamacpp lane stores the RESOLVED quantizer repo in hf_repo, so
+        # the searched-repo dedupe above misses re-adds — check the resolved
+        # artifact too (file_path basenames survive the downloader's
+        # gguf/<slug>/ rewrite).
+        if repo != hf_repo or file_path:
+            with read_session() as db:
+                rows = db.exec(
+                    select(ModelEntry).where(ModelEntry.hf_repo == repo)
+                ).all()
+            for row in rows:
+                if row.engine != engine:
+                    continue
+                if engine != EngineKind.llamacpp or (
+                    Path(row.file_path).name == Path(file_path).name
+                ):
+                    raise HTTPException(
+                        409,
+                        f"{hf_repo} resolves to {repo} "
+                        f"{Path(file_path).name or ''}".strip()
+                        + ", which is already in the catalog",
+                    )
         entry = ModelEntry(
             hf_repo=repo,
             display_name=hf_repo.split("/")[-1],

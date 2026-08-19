@@ -268,7 +268,11 @@ def search_hub(query: str, kind: str = "text", limit: int = 20) -> list[dict[str
         )
     )
     with read_session() as db:
-        in_catalog = set(db.exec(select(ModelEntry.hf_repo)).all())
+        catalog_repos = set(db.exec(select(ModelEntry.hf_repo)).all())
+        # add() names entries after the SEARCHED repo but may store a resolved
+        # quantizer repo in hf_repo (GGUF rewrite) — match display names too,
+        # or added models would keep showing an Add button.
+        catalog_names = set(db.exec(select(ModelEntry.display_name)).all())
     results = []
     for m in listing:
         tags = list(m.tags or [])
@@ -282,10 +286,24 @@ def search_hub(query: str, kind: str = "text", limit: int = 20) -> list[dict[str
                 "gated": bool(getattr(m, "gated", False)),
                 "created_at": created_at.isoformat() if created_at else None,
                 "params_b": estimate_params_b(m.id) if kind == "text" else 0.0,
-                "in_catalog": m.id in in_catalog,
+                "in_catalog": m.id in catalog_repos
+                or m.id.split("/")[-1] in catalog_names,
             }
         )
     return results
+
+
+def is_diffusers_repo(hf_repo: str) -> bool:
+    """True when the repo is diffusers-format (model_index.json present) —
+    the only layout the imagegen server can load. Blocking."""
+    from huggingface_hub import HfApi
+
+    settings = get_settings()
+    try:
+        files = HfApi(token=settings.hf_token or None).list_repo_files(hf_repo)
+    except Exception:
+        return False
+    return "model_index.json" in files
 
 
 def resolve_text_candidate(hf_repo: str) -> dict[str, Any]:

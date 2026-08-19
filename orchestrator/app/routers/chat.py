@@ -387,6 +387,23 @@ class ImageBody(BaseModel):
     conversation_id: str | None = None
     provider: str = "local"  # "local" or an enabled remote connector kind
     size: str = "1024x1024"
+    # Incognito: the image is returned inline (data URI) and NOTHING is
+    # stored — no Upload row, no file on disk, honoring temporary chat's
+    # "stores nothing" promise.
+    temporary: bool = False
+
+
+def _validate_size(size: str) -> None:
+    """Mirror the imagegen server's real bounds (256-1536, multiples of 8)
+    instead of silently serving a different resolution than requested."""
+    match = re.fullmatch(r"(\d{2,4})x(\d{2,4})", size)
+    if match is None:
+        raise HTTPException(400, "size must look like 1024x1024")
+    for dim in map(int, match.groups()):
+        if not (256 <= dim <= 1536) or dim % 8:
+            raise HTTPException(
+                400, "size dimensions must be 256-1536 and multiples of 8"
+            )
 
 
 @router.post("/image")
@@ -397,13 +414,26 @@ async def generate_image(body: ImageBody, user: User = Depends(current_user)) ->
     prompt = body.prompt.strip()
     if not prompt:
         raise HTTPException(400, "prompt required")
-    if not re.fullmatch(r"\d{2,4}x\d{2,4}", body.size):
-        raise HTTPException(400, "size must look like 1024x1024")
+    _validate_size(body.size)
+    if body.temporary and body.conversation_id:
+        raise HTTPException(400, "temporary generation cannot target a conversation")
     conversation = (
         _own_conversation(body.conversation_id, user) if body.conversation_id else None
     )
 
     data, mime = await image_service.generate(user.id, prompt, body.provider, body.size)
+
+    if body.temporary:
+        import base64
+
+        return {
+            "upload": None,
+            "image_data_uri": f"data:{mime};base64,{base64.b64encode(data).decode()}",
+            "conversation_id": None,
+            "user_message_id": None,
+            "assistant_message_id": None,
+        }
+
     upload = uploads.save_generated(user.id, data, prompt, mime)
 
     user_message_id: int | None = None
@@ -427,6 +457,10 @@ async def generate_image(body: ImageBody, user: User = Depends(current_user)) ->
             row = db.get(Conversation, conversation.id)
             if row:
                 row.updated_at = datetime.now(UTC)
+                if row.title == "New chat":
+                    # Image-first chats would otherwise never get an
+                    # auto-title (the text-exchange gate counts these rows).
+                    row.title = " ".join(prompt.split()[:6])[:80]
                 db.add(row)
             db.flush()
             user_message_id = user_message.id

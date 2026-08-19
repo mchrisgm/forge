@@ -241,6 +241,9 @@ class TestFilesApi:
         assert fetched.status_code == 200
         assert fetched.content == PNG
         assert fetched.headers["content-type"] == "image/png"
+        # Downloads must never be content-sniffed into documents.
+        assert fetched.headers["x-content-type-options"] == "nosniff"
+        assert "attachment" in fetched.headers["content-disposition"]
 
         assert (
             api.delete(f"/api/files/{meta['id']}", headers=auth_headers).json()
@@ -308,6 +311,15 @@ class TestSaveGenerated:
         upload = uploads.save_generated(make_user(), b"\x00\x01data", "blob", mime="")
         assert upload.kind == "other"
         assert upload.filename == "blob.bin"
+
+    def test_declared_image_mime_is_never_trusted_without_magic(self):
+        # A connector claiming image/png for SVG/HTML bytes must not land in
+        # any inline-image path — magic bytes alone decide for generated files.
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>'
+        upload = uploads.save_generated(make_user(), svg, "sneaky", mime="image/png")
+        assert upload.mime == "application/octet-stream"
+        assert upload.kind == "other"
+        assert upload.filename == "sneaky.bin"
 
     def test_symbol_only_prompt_falls_back_to_generated(self):
         upload = uploads.save_generated(make_user(), PNG, "???!!!")

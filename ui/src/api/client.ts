@@ -190,11 +190,14 @@ export const api = {
   /** Generate an image in chat — can take minutes; resolves with the upload. */
   generateImage: (body: {
     prompt: string;
-    /** Null = temporary chat; the exchange is not recorded server-side. */
+    /** Null = no conversation to record into. */
     conversation_id: string | null;
     /** "local" (imagegen lane) or an enabled remote connector kind. */
     provider: string;
     size: string;
+    /** Incognito: nothing is stored server-side; the image comes back
+     *  inline as image_data_uri. */
+    temporary?: boolean;
   }) => post<ImageGenerationResult>("/api/chat/image", body),
 
   // files (chat attachments)

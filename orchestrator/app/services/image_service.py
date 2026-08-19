@@ -167,16 +167,33 @@ def _iter_urls(value: Any):
 
 
 async def _fetch_image_url(client: httpx.AsyncClient, url: str) -> tuple[bytes, str] | None:
+    """Fetch one candidate URL, streaming with a hard byte cap (a connector's
+    reply is remote-controlled data — never buffer unbounded bodies). The
+    FINAL URL must still be https: harvested URLs are https-only, and an
+    https→http redirect is the one way a reply could point this fetch at
+    plain-http internal services."""
+    from ..config import get_settings
+
+    limit = min(MAX_RESULT_BYTES, get_settings().upload_max_mb * 1024 * 1024)
     try:
-        response = await client.get(url, follow_redirects=True)
+        async with client.stream("GET", url, follow_redirects=True) as response:
+            if str(response.url.scheme) != "https":
+                return None
+            content_type = (
+                response.headers.get("content-type", "").split(";")[0].strip()
+            )
+            if response.status_code >= 400 or not content_type.startswith("image/"):
+                return None
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > limit:
+                    return None
+                chunks.append(chunk)
     except httpx.HTTPError:
         return None
-    content_type = response.headers.get("content-type", "").split(";")[0].strip()
-    if response.status_code >= 400 or not content_type.startswith("image/"):
-        return None
-    if len(response.content) > MAX_RESULT_BYTES:
-        return None
-    return response.content, content_type
+    return b"".join(chunks), content_type
 
 
 async def _extract_image(result: dict[str, Any]) -> tuple[bytes, str]:

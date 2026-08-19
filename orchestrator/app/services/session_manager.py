@@ -20,6 +20,7 @@ from ..db import read_session, write_session
 from ..models import (
     Connector,
     ConnectorKind,
+    EngineKind,
     ModelEntry,
     Session,
     SessionState,
@@ -87,7 +88,12 @@ class SessionManager:
         from ..opencode_config import airllm_blocked
 
         if airllm_blocked(model):
-            raise SessionError("AirLLM models are chat-only and cannot power sessions", 400)
+            reason = (
+                "image models cannot power coding sessions"
+                if model.engine == EngineKind.imagegen
+                else "AirLLM models are chat-only and cannot power sessions"
+            )
+            raise SessionError(reason, 400)
 
         with read_session() as db:
             from sqlmodel import select

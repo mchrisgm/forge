@@ -1145,18 +1145,34 @@ function handleApi(req, res, url) {
   if (p === "/api/chat/status") return sendJson(res, chatStatus);
   if (p === "/api/chat/image" && req.method === "POST") {
     // Happy path after a believable "diffusion" pause; the pending bubble
-    // shows meanwhile. Serves the demo garden PNG like every other upload.
-    const timer = setTimeout(
-      () =>
-        sendJson(res, {
-          upload: generatedAttachment,
-          conversation_id: null,
-          user_message_id: null,
-          assistant_message_id: null,
-        }),
-      1500,
-    );
-    req.on("close", () => clearTimeout(timer));
+    // shows meanwhile. Serves the demo garden PNG like every other upload —
+    // or inline as a data URI when the body asks for a temporary generation.
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      let temporary = false;
+      try {
+        temporary = JSON.parse(Buffer.concat(chunks).toString()).temporary === true;
+      } catch {
+        /* body optional in the mock */
+      }
+      const payload = temporary
+        ? {
+            upload: null,
+            image_data_uri: `data:image/png;base64,${gardenPngBuffer.toString("base64")}`,
+            conversation_id: null,
+            user_message_id: null,
+            assistant_message_id: null,
+          }
+        : {
+            upload: generatedAttachment,
+            conversation_id: null,
+            user_message_id: null,
+            assistant_message_id: null,
+          };
+      const timer = setTimeout(() => sendJson(res, payload), 1500);
+      req.on("close", () => clearTimeout(timer));
+    });
     return;
   }
   if (p === "/api/chat/conversations") {

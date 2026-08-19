@@ -34,14 +34,22 @@ _MAGIC = {
 }
 
 
-def _sniff(head: bytes, filename: str, declared: str) -> tuple[str, str]:
-    """(mime, kind) from magic bytes first, extension second."""
+def _sniff_magic(head: bytes) -> tuple[str, str] | None:
+    """(mime, kind) when the magic bytes identify a known format."""
     for magic, mime in _MAGIC.items():
         if head.startswith(magic):
             if mime == "image/webp" and head[8:12] != b"WEBP":
                 continue
             kind = "pdf" if mime == "application/pdf" else "image"
             return mime, kind
+    return None
+
+
+def _sniff(head: bytes, filename: str, declared: str) -> tuple[str, str]:
+    """(mime, kind) from magic bytes first, extension second."""
+    sniffed = _sniff_magic(head)
+    if sniffed:
+        return sniffed
     ext = Path(filename).suffix.lower()
     if ext in TEXT_EXTENSIONS:
         return declared or "text/plain", "text"
@@ -110,7 +118,10 @@ def save_generated(
         raise HTTPException(
             502, f"generated file exceeds the {settings.upload_max_mb} MB limit"
         )
-    mime, kind = _sniff(data[:16], "", mime)
+    # Magic bytes only — a connector's declared MIME is remote-controlled and
+    # must not put non-image bytes (SVG/HTML) into inline-render paths.
+    sniffed = _sniff_magic(data[:16])
+    mime, kind = sniffed if sniffed else ("application/octet-stream", "other")
     stem = re.sub(r"[^\w]+", "-", prompt.lower()).strip("-")[:48] or "generated"
     upload_id = str(uuid.uuid4())
     user_dir = Path(settings.uploads_dir) / str(user_id)

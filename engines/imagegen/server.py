@@ -98,18 +98,22 @@ class _PipelineState:
 
         log.info("loading diffusers pipeline %r (this can take a while)", MODEL_PATH)
         t0 = time.monotonic()
+        # use_safetensors=True refuses torch-pickle weights (arbitrary code
+        # execution on load). Set IMAGEGEN_ALLOW_PICKLE=1 only for a trusted
+        # .bin-only repo.
+        kwargs: dict[str, Any] = {"torch_dtype": torch.float16}
+        if os.environ.get("IMAGEGEN_ALLOW_PICKLE", "") != "1":
+            kwargs["use_safetensors"] = True
         try:
             # Forge's downloader keeps only .fp16 component files when a repo
             # ships both variants, so try the fp16 variant first...
             pipe = AutoPipelineForText2Image.from_pretrained(
-                MODEL_PATH, torch_dtype=torch.float16, variant="fp16"
+                MODEL_PATH, variant="fp16", **kwargs
             )
         except Exception as exc:  # noqa: BLE001 — any load error retries plain
             # ...but plenty of repos have no .fp16 files at all.
             log.info("fp16 variant load failed (%s); retrying without variant", exc)
-            pipe = AutoPipelineForText2Image.from_pretrained(
-                MODEL_PATH, torch_dtype=torch.float16
-            )
+            pipe = AutoPipelineForText2Image.from_pretrained(MODEL_PATH, **kwargs)
         if torch.cuda.is_available():
             pipe = pipe.to("cuda")
         else:
@@ -216,11 +220,9 @@ async def list_models() -> dict[str, Any]:
     }
 
 
-# The doubled-prefix alias exists because the orchestrator's image_service
-# joins lease.base_url (which already ends in /v1) with /v1/images/generations,
-# so its requests arrive at /v1/v1/images/generations. Serve both spellings.
+# The orchestrator's image_service joins lease.base_url (which already ends
+# in /v1) with /images/generations — a single /v1 prefix, matching this route.
 @app.post("/v1/images/generations")
-@app.post("/v1/v1/images/generations", include_in_schema=False)
 async def create_images(request: ImageGenerationRequest) -> dict[str, Any]:
     if not request.prompt.strip():
         raise HTTPException(status_code=400, detail="prompt is required")
@@ -251,9 +253,12 @@ async def create_images(request: ImageGenerationRequest) -> dict[str, Any]:
     except HTTPException:
         raise
     except Exception as exc:
+        # Full traceback stays in the engine logs; exception strings can
+        # embed local snapshot paths, so clients get a generic message.
         log.exception("generation failed")
         raise HTTPException(
-            status_code=500, detail=f"image generation failed: {exc}"
+            status_code=500,
+            detail="image generation failed — see the imagegen engine logs",
         ) from exc
     finally:
         GENERATION_SLOT.release()

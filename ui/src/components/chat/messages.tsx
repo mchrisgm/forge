@@ -19,6 +19,9 @@ export interface UiMessage {
   streaming?: boolean;
   /** An image generation is in flight — renders a placeholder bubble. */
   pendingImage?: { prompt: string };
+  /** Temporary-mode generation: the image exists only in this tab (data
+   *  URI) — nothing was stored server-side. */
+  tempImage?: { dataUri: string; prompt: string };
   /** In-stream error frame attached to this assistant turn. */
   error?: string | null;
 }
@@ -191,9 +194,9 @@ export function MessageBubble({
 
   // Generated-image turns carry a "[Generated image: …]" placeholder as their
   // text — the rendered image + caption say the same thing, so hide it.
-  const hasGeneratedImage = message.attachments.some(
-    (a) => a.kind === "image" && a.generated,
-  );
+  const hasGeneratedImage =
+    message.attachments.some((a) => a.kind === "image" && a.generated) ||
+    Boolean(message.tempImage);
   const placeholderOnly =
     hasGeneratedImage && GENERATED_PLACEHOLDER_RE.test(message.content.trim());
 
@@ -201,6 +204,22 @@ export function MessageBubble({
   // whatever partial text streamed in.
   return (
     <div className="w-full max-w-full space-y-2">
+      {message.tempImage && (
+        <figure className="m-0 max-w-sm">
+          {/* No open-in-new-tab link: browsers block top-level data: URLs. */}
+          <img
+            src={message.tempImage.dataUri}
+            alt={message.tempImage.prompt}
+            className="w-full rounded-lg border border-border object-cover"
+          />
+          <figcaption
+            className="mt-1.5 line-clamp-2 text-xs text-faint"
+            title={message.tempImage.prompt}
+          >
+            {message.tempImage.prompt} · temporary — not saved
+          </figcaption>
+        </figure>
+      )}
       <AssistantAttachments attachments={message.attachments} />
       {message.content && !placeholderOnly && <Markdown text={message.content} />}
       {message.error && (

@@ -392,9 +392,12 @@ export interface ChatStatus {
 }
 
 /** POST /api/chat/image response — the generated file plus, for a saved
- *  conversation, the recorded exchange's message ids. */
+ *  conversation, the recorded exchange's message ids. Temporary generations
+ *  store nothing server-side: upload is null and the image arrives inline. */
 export interface ImageGenerationResult {
-  upload: AttachmentMeta;
+  upload: AttachmentMeta | null;
+  /** Set only for temporary generations (data:image/...;base64,...). */
+  image_data_uri?: string | null;
   conversation_id: string | null;
   user_message_id: number | null;
   assistant_message_id: number | null;

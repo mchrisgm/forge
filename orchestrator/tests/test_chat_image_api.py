@@ -101,6 +101,100 @@ class TestValidation:
         assert messages_of(theirs["id"]) == []
 
 
+class TestSizeBounds:
+    @pytest.mark.parametrize("size", ["128x128", "1600x1024", "1023x512", "9999x9992"])
+    def test_out_of_range_or_unaligned_sizes_are_400(
+        self, api, auth_headers, generate_stub, size
+    ):
+        # Bounds mirror the imagegen server (256-1536, multiples of 8) so the
+        # caller is told instead of silently served a different resolution.
+        resp = api.post(
+            "/api/chat/image",
+            json={"prompt": "a fox", "size": size},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+        assert "256-1536" in resp.json()["detail"]
+        assert generate_stub == []
+
+    def test_aligned_in_range_size_is_forwarded(self, api, auth_headers, generate_stub):
+        resp = api.post(
+            "/api/chat/image",
+            json={"prompt": "a fox", "size": "512x768"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert generate_stub[0]["size"] == "512x768"
+
+
+class TestTemporaryGeneration:
+    def test_returns_a_data_uri_and_stores_nothing(
+        self, api, auth_headers, generate_stub
+    ):
+        import base64
+
+        resp = api.post(
+            "/api/chat/image",
+            json={"prompt": "a secret fox", "temporary": True},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["upload"] is None
+        prefix = "data:image/png;base64,"
+        assert body["image_data_uri"].startswith(prefix)
+        assert base64.b64decode(body["image_data_uri"][len(prefix):]) == PNG
+        # The "stores nothing" promise: no Upload row, nothing on disk.
+        with db_module.read_session() as db:
+            assert db.exec(select(Upload)).all() == []
+
+    def test_temporary_with_a_conversation_is_400(
+        self, api, auth_headers, generate_stub
+    ):
+        conversation = create_conversation(api, auth_headers)
+        resp = api.post(
+            "/api/chat/image",
+            json={
+                "prompt": "a fox",
+                "conversation_id": conversation["id"],
+                "temporary": True,
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+        assert generate_stub == []
+
+
+class TestAutoTitle:
+    def test_fresh_conversation_gets_a_prompt_derived_title(
+        self, api, auth_headers, generate_stub
+    ):
+        conversation = create_conversation(api, auth_headers)
+        assert conversation["title"] == "New chat"
+        prompt = "a watercolor fox leaping over seven misty pine ridges"
+        resp = api.post(
+            "/api/chat/image",
+            json={"prompt": prompt, "conversation_id": conversation["id"]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        with db_module.read_session() as db:
+            row = db.get(Conversation, conversation["id"])
+        assert row.title == "a watercolor fox leaping over seven"
+
+    def test_an_existing_title_is_preserved(self, api, auth_headers, generate_stub):
+        conversation = create_conversation(api, auth_headers, title="Fox art")
+        resp = api.post(
+            "/api/chat/image",
+            json={"prompt": "another fox", "conversation_id": conversation["id"]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        with db_module.read_session() as db:
+            row = db.get(Conversation, conversation["id"])
+        assert row.title == "Fox art"
+
+
 class TestStandaloneGeneration:
     def test_returns_the_generated_upload_and_persists_no_messages(
         self, api, auth_headers, generate_stub

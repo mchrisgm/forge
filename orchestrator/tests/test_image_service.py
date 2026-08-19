@@ -177,6 +177,27 @@ class TestExtractImage:
         assert await image_service._extract_image(result) == (PNG, "image/png")
         assert str(httpx_mock.requests[0].url) == "https://cdn.example.com/pic.png"
 
+    async def test_https_to_http_redirects_are_rejected(self, httpx_mock):
+        # The one way a connector reply could point the fetch at plain-http
+        # internal services is an https→http redirect — the final URL must
+        # still be https or the candidate is dropped.
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.scheme == "https":
+                return httpx.Response(
+                    302, headers={"Location": "http://internal.local/img"}
+                )
+            return httpx.Response(
+                200, content=PNG, headers={"Content-Type": "image/png"}
+            )
+
+        httpx_mock.set_handler(handler)
+        result = {
+            "content": [{"type": "text", "text": "https://cdn.example.com/gen.png"}]
+        }
+        with pytest.raises(HTTPException) as excinfo:
+            await image_service._extract_image(result)
+        assert excinfo.value.status_code == 502
+
     async def test_structured_content_urls_are_harvested(self, httpx_mock):
         httpx_mock.set_handler(
             lambda request: httpx.Response(
