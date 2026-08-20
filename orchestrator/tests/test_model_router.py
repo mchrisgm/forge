@@ -448,6 +448,32 @@ class TestAutoFlow:
         assert resp.status_code == 409
         assert "no model is ready to route to" in resp.text
 
+    def test_prepare_failure_reaches_terminal_error(
+        self, api, auth_headers, monkeypatch, stream_stub, scheduled
+    ):
+        add_model(display_name="Chat Model")
+        conversation_id = self._conversation(api, auth_headers)
+
+        async def exploding_choose(prompt):
+            raise RuntimeError("no GPU is free and nothing is serving")
+
+        monkeypatch.setattr(model_router, "choose_model", exploding_choose)
+
+        resp = api.post(
+            f"/api/chat/conversations/{conversation_id}/messages",
+            json={"content": "route me"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200  # errors surface as stream frames
+        payloads = [json.loads(p) for p in sse_payloads(resp.text)
+                    if p != "[DONE]"]
+        assert any("no GPU is free" in p.get("error", "") for p in payloads)
+        assert payloads[-1]["forge"] == "done"
+        from app.services.chat_jobs import chat_job_manager
+
+        job = chat_job_manager.get(conversation_id)
+        assert job is not None and job.state == "error"
+
     def test_routed_generation_narrates_and_persists(
         self, api, auth_headers, monkeypatch, stream_stub, scheduled
     ):
