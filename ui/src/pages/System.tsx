@@ -12,6 +12,17 @@ import {
 } from "../components/ui";
 import { cx, formatGb } from "../lib/utils";
 
+/** Friendly names for the always-on compose services (Services card). */
+const SERVICE_LABELS: Record<string, string> = {
+  gateway: "Gateway (Caddy)",
+  orchestrator: "Orchestrator",
+  searxng: "Web search (SearXNG)",
+  "mcp-playwright": "Browser (Playwright)",
+  "mcp-scrapling": "Web scraper (Scrapling)",
+  headroom: "Compression (Headroom)",
+  smolvm: "Sandbox (smolvm)",
+};
+
 function Semicircle({
   label,
   used,
@@ -274,6 +285,36 @@ export default function System() {
           </ul>
         )}
       </section>
+
+      {/* Always-on services */}
+      {s.services.length > 0 && (
+        <section className="mb-4 rounded-xl border border-border bg-surface p-4">
+          <h2 className="mb-2 text-sm font-semibold text-muted">Services</h2>
+          <ul className="grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2 lg:grid-cols-3">
+            {s.services.map((svc) => (
+              <li key={svc.service} className="flex items-center gap-2">
+                <Chip
+                  color={svc.running ? "text-ok" : "text-danger"}
+                  pulse={svc.running}
+                >
+                  {svc.status}
+                </Chip>
+                <span className="truncate text-sm text-text">
+                  {SERVICE_LABELS[svc.service] ?? svc.service}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {s.services.some((svc) => !svc.running && !svc.optional) && (
+            <p className="mt-2 text-xs text-warn">
+              A core service is down — re-run{" "}
+              <code className="font-mono">make up</code> (or{" "}
+              <code className="font-mono">docker compose up -d</code>) on the
+              host to bring it back.
+            </p>
+          )}
+        </section>
+      )}
 
       {/* Session containers */}
       <section className="rounded-xl border border-border bg-surface p-4">

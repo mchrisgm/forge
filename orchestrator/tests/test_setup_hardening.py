@@ -49,6 +49,7 @@ class TestBootstrapImageCheck:
         assert bootstrap.missing_images == []
 
     def test_missing_images_recorded_and_warned_once(self, fake_docker, caplog):
+        bootstrap.missing_images[:] = []  # transition-based: start clean
         fake_docker.images.present = {"forge-airllm"}  # session + imagegen absent
         with caplog.at_level(logging.WARNING, logger="app.services.bootstrap"):
             missing = bootstrap.check_required_images()
@@ -65,6 +66,29 @@ class TestBootstrapImageCheck:
         assert "make up" in message
         assert "--profile build-only build session-runner" in message
         assert "--profile engines build airllm imagegen" in message
+
+    def test_still_missing_does_not_warn_again(self, fake_docker, caplog):
+        bootstrap.missing_images[:] = []
+        fake_docker.images.present = set()
+        bootstrap.check_required_images()  # first probe warns
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="app.services.bootstrap"):
+            bootstrap.check_required_images()  # unchanged -> silent
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    def test_building_the_images_clears_state_and_logs_info(
+        self, fake_docker, caplog
+    ):
+        bootstrap.missing_images[:] = []
+        fake_docker.images.present = set()
+        bootstrap.check_required_images()
+        assert bootstrap.missing_images  # recorded as missing
+
+        fake_docker.images.present = None  # `make up` ran: everything exists
+        with caplog.at_level(logging.INFO, logger="app.services.bootstrap"):
+            assert bootstrap.check_required_images() == []
+        assert bootstrap.missing_images == []
+        assert any("now built" in r.getMessage() for r in caplog.records)
 
     def test_docker_unreachable_is_graceful_and_clears_state(self, monkeypatch):
         def no_docker():
@@ -92,12 +116,16 @@ class TestBootstrapImageCheck:
 
 class TestSystemStatsMissingImages:
     def test_stats_exposes_missing_images(self, api, auth_headers, monkeypatch):
+        import time as time_module
+
         resp = api.get("/api/system/stats", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json()["missing_images"] == []  # docker off -> check skipped
 
+        # Within the TTL the cached list is served verbatim.
+        bootstrap.missing_images[:] = ["forge-session-runner", "forge-imagegen"]
         monkeypatch.setattr(
-            bootstrap, "missing_images", ["forge-session-runner", "forge-imagegen"]
+            bootstrap, "_last_image_check", time_module.monotonic()
         )
         resp = api.get("/api/system/stats", headers=auth_headers)
         assert resp.status_code == 200
@@ -105,6 +133,23 @@ class TestSystemStatsMissingImages:
             "forge-session-runner",
             "forge-imagegen",
         ]
+        bootstrap.missing_images[:] = []
+
+    def test_building_the_image_clears_the_banner_without_a_restart(
+        self, api, auth_headers, fake_docker, monkeypatch
+    ):
+        # The reported bug: `make up` built the image, but the warning stuck
+        # until the orchestrator restarted. The live TTL probe must clear it.
+        settings = get_settings()
+        fake_docker.images.present = {"forge-session-runner", "forge-airllm"}
+        monkeypatch.setattr(bootstrap, "_last_image_check", 0.0)  # force probe
+        resp = api.get("/api/system/stats", headers=auth_headers)
+        assert resp.json()["missing_images"] == [settings.imagegen_image]
+
+        fake_docker.images.present = None  # image built out-of-band
+        monkeypatch.setattr(bootstrap, "_last_image_check", 0.0)  # TTL elapsed
+        resp = api.get("/api/system/stats", headers=auth_headers)
+        assert resp.json()["missing_images"] == []
 
 
 # ── session spawn: friendly failure without the session image ───────────────

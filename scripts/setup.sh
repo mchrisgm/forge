@@ -9,6 +9,10 @@
 #   3. auto-include the GPU overlay when an NVIDIA GPU is present
 #   4. build + start the stack, build the session/engine images, prefetch the
 #      big engine images
+#   5. sweep stale orchestrator-spawned lane containers and VERIFY the stack:
+#      every always-on service running, orchestrator healthy, gateway
+#      answering, all local images built (scripts/verify.sh — re-runnable
+#      standalone any time)
 #
 # Re-runnable: an existing .env is left alone and compose reconciles in place.
 #
@@ -32,7 +36,7 @@ for arg in "$@"; do
     --skip-pull) SKIP_PULL=1 ;;
     --no-gpu)    FORCE_NO_GPU=1 ;;
     -h|--help)
-      sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
@@ -43,7 +47,7 @@ info() { printf '  %s\n' "$*"; }
 die()  { printf '\n\033[31mSetup aborted:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ── 1. preflight ────────────────────────────────────────────────────────────
-bold "[1/5] Checking host prerequisites"
+bold "[1/6] Checking host prerequisites"
 if ! command -v docker >/dev/null 2>&1; then
   die "docker not found — install Docker Engine (Linux) or Docker Desktop (macOS): https://docs.docker.com/get-docker/"
 fi
@@ -61,7 +65,7 @@ if [ -x scripts/preflight.sh ]; then
 fi
 
 # ── 2. .env + secrets ───────────────────────────────────────────────────────
-bold "[2/5] Preparing .env"
+bold "[2/6] Preparing .env"
 if [ ! -f .env ]; then
   cp .env.example .env
   info "created .env from .env.example"
@@ -97,8 +101,9 @@ ensure_secret SEARXNG_SECRET
 ensure_secret FORGE_SECRET_KEY
 
 # ── 3. GPU overlay detection ────────────────────────────────────────────────
-bold "[3/5] Selecting compose files"
+bold "[3/6] Selecting compose files"
 COMPOSE=(docker compose -f docker-compose.yml)
+export FORGE_NO_GPU="$FORCE_NO_GPU"  # keep verify.sh's compose selection in step
 if [ "$FORCE_NO_GPU" = 0 ] && command -v nvidia-smi >/dev/null 2>&1; then
   COMPOSE+=(-f docker-compose.gpu.yml)
   info "NVIDIA GPU detected — including docker-compose.gpu.yml (GPU stats + leases)"
@@ -107,7 +112,7 @@ else
 fi
 
 # ── 4. build + start ────────────────────────────────────────────────────────
-bold "[4/5] Building and starting the stack"
+bold "[4/6] Building and starting the stack"
 "${COMPOSE[@]}" up -d --build
 # Profile-gated images are invisible to a plain `up` — build them so the
 # orchestrator can spawn sessions and the local engine lanes.
@@ -120,7 +125,7 @@ if [ "$SKIP_PULL" = 0 ]; then
 fi
 
 # ── 5. optional sandbox lane ────────────────────────────────────────────────
-bold "[5/5] Optional sandbox lane"
+bold "[5/6] Optional sandbox lane"
 if [ "$WANT_SANDBOX" = 1 ]; then
   if [ ! -e /dev/kvm ]; then
     info "WARNING: /dev/kvm not found — smolvm microVMs will not start on this host"
@@ -130,6 +135,10 @@ if [ "$WANT_SANDBOX" = 1 ]; then
 else
   info "skipped — run 'scripts/setup.sh --sandbox' (needs /dev/kvm) to enable the 'run code' lane"
 fi
+
+# ── 6. sweep + verify ───────────────────────────────────────────────────────
+bold "[6/6] Reconciling and verifying the stack"
+scripts/verify.sh || die "stack verification failed (see above)"
 
 host_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -n "${host_ip:-}" ] || host_ip="<host-ip>"
@@ -143,5 +152,6 @@ cat <<EOF
   Handy commands (all via docker compose, no make needed):
     docker compose logs -f --tail=200      # tail logs
     docker compose down                    # stop (volumes kept)
+    scripts/verify.sh                      # re-check services/images any time
     scripts/setup.sh --sandbox             # add the code-run sandbox lane
 EOF

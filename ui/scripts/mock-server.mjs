@@ -348,6 +348,15 @@ const systemStats = {
     { name: "forge-session-d4e5f6", status: "running", session_id: "sess-2" },
     { name: "forge-session-g7h8i9", status: "exited", session_id: "sess-3" },
   ],
+  services: [
+    { service: "gateway", status: "running", running: true, optional: false },
+    { service: "orchestrator", status: "running", running: true, optional: false },
+    { service: "searxng", status: "running", running: true, optional: false },
+    { service: "mcp-playwright", status: "running", running: true, optional: false },
+    { service: "mcp-scrapling", status: "running", running: true, optional: false },
+    { service: "headroom", status: "running", running: true, optional: false },
+    { service: "smolvm", status: "running", running: true, optional: true },
+  ],
   docker_ok: true,
   missing_images: [], // all built — no "run make up" banner in screenshots
   budgets: { vram_gb: 15, ram_offload_gb: 32 },

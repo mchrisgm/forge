@@ -297,10 +297,23 @@ export interface SystemStats {
   disk: { total_gb: number; used_gb: number; free_gb: number } | null;
   engine: EnginesStatus;
   session_containers: { name: string; status: string; session_id: string }[];
+  /** Always-on compose services with live state ([] when docker is down). */
+  services: ServiceHealth[];
   docker_ok: boolean;
-  /** Locally-built compose images absent at boot — non-empty ⇒ "run make up". */
+  /** Locally-built compose images currently absent (live-probed) —
+   *  non-empty ⇒ "run make up"; clears itself once the images are built. */
   missing_images: string[];
   budgets: { vram_gb: number; ram_offload_gb: number };
+}
+
+/** One always-on compose service's live state (System tab Services card). */
+export interface ServiceHealth {
+  service: string;
+  /** docker status, or "missing" when no container exists for the service. */
+  status: string;
+  running: boolean;
+  /** Opt-in lanes (smolvm) — listed only when their container exists. */
+  optional: boolean;
 }
 
 /** GET /api/settings "headroom" — the context-compression proxy's state.
