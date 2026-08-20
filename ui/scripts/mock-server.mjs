@@ -333,7 +333,7 @@ const lease0 = {
 const lease1 = {
   model_id: 2,
   model_name: "Qwen2.5 Coder 14B AWQ",
-  model_slug: "qwen25-coder-14b-awq",
+  model_slug: "qwen2-5-coder-14b-awq",
   engine: "vllm",
   gpu_ids: [1],
   gpu_index: 1,
@@ -997,7 +997,9 @@ const imageLease = {
   acquired_at: iso(9 * MIN),
 };
 
-const chatStatus = { serving: [lease0], image: imageLease };
+// Two text models already loaded (30B llamacpp + 14B AWQ vllm) so the picker
+// shows "loaded" dots; every other downloaded model still loads on demand.
+const chatStatus = { serving: [lease0, lease1], image: imageLease };
 
 const conv = (id, title, model_slug, updatedAgo, createdAgo, extra = {}) => ({
   id,
@@ -1016,14 +1018,14 @@ const conv = (id, title, model_slug, updatedAgo, createdAgo, extra = {}) => ({
 const conversations = [
   conv("conv-1", "Plan the garden irrigation", "qwen3-coder-30b-a3b", 8 * MIN, 2 * HOUR),
   conv("conv-2", "Debug docker compose networking", "qwen3-coder-30b-a3b", 3 * HOUR, 5 * HOUR),
-  conv("conv-3", "Trip to Lisbon in October", "qwen25-coder-14b-awq", 26 * HOUR, 28 * HOUR),
+  conv("conv-3", "Trip to Lisbon in October", "qwen2-5-coder-14b-awq", 26 * HOUR, 28 * HOUR),
   conv("conv-4", "Sourdough starter rescue", "qwen3-coder-30b-a3b", 2 * DAY, 2 * DAY + 2 * HOUR),
   conv("conv-5", "Birthday gift ideas for Maya", "qwen3-coder-30b-a3b", 4 * DAY, 4 * DAY + HOUR),
-  conv("conv-6", "Regex for log timestamps", "qwen25-coder-14b-awq", 6 * DAY, 6 * DAY + HOUR),
+  conv("conv-6", "Regex for log timestamps", "qwen2-5-coder-14b-awq", 6 * DAY, 6 * DAY + HOUR),
 ];
 
 const archivedConversations = [
-  conv("conv-7", "Compare NAS drive options", "qwen25-coder-14b-awq", 21 * DAY, 22 * DAY, {
+  conv("conv-7", "Compare NAS drive options", "qwen2-5-coder-14b-awq", 21 * DAY, 22 * DAY, {
     archived: true,
   }),
 ];

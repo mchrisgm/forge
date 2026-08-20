@@ -1,0 +1,23 @@
+# AMD/ROCm overlay — included automatically by `make up` / setup.sh when the
+# vendor-aware detector (scripts/gpu-detect.sh) finds an AMD GPU with the ROCm
+# kernel devices present. Grants the ORCHESTRATOR read access to the GPU so
+# /system/stats can report AMD VRAM/utilisation from sysfs; engine containers
+# get their GPUs separately, mounted by the orchestrator via the docker API
+# (see engine_manager.gpu_run_kwargs).
+#
+# CPU-only / NVIDIA boxes never load this file.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.rocm.yml up -d
+
+services:
+  orchestrator:
+    environment:
+      FORGE_GPU_VENDOR: amd
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      - render
+    security_opt:
+      - seccomp:unconfined

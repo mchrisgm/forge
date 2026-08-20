@@ -16,7 +16,9 @@ to whichever lease serves it, so engine placement is invisible to OpenCode.
 """
 
 import asyncio
+import glob
 import logging
+import os
 import shlex
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -45,11 +47,59 @@ def opencode_model_id_for(model: ModelEntry) -> str:
     return opencode_model_id(model)
 
 
+def detect_gpu_vendor() -> str:
+    """The host GPU vendor: 'nvidia' | 'amd' | 'cpu'. FORGE_GPU_VENDOR overrides.
+
+    AMD is identified first (the ROCm /dev/kfd device is unambiguous). Boxes we
+    cannot classify default to 'nvidia' — that preserves the historical device
+    wiring and only matters once a GPU is actually present (loads fail cleanly
+    on a true CPU box regardless of the label)."""
+    vendor = (get_settings().gpu_vendor or "auto").strip().lower()
+    if vendor in ("nvidia", "amd", "cpu"):
+        return vendor
+    if vendor == "none":
+        return "cpu"
+    if os.path.exists("/dev/kfd") or os.path.isdir("/sys/module/amdgpu"):
+        return "amd"
+    if os.path.exists("/dev/nvidia0") or os.path.exists("/dev/nvidiactl"):
+        return "nvidia"
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        try:
+            if pynvml.nvmlDeviceGetCount() > 0:
+                return "nvidia"
+        finally:
+            pynvml.nvmlShutdown()
+    except Exception:
+        pass
+    return "nvidia"
+
+
+def _amd_gpu_count() -> int:
+    """AMD GPUs by their DRI render nodes (PCI vendor 0x1002 = AMD/ATI)."""
+    count = 0
+    for path in glob.glob("/sys/class/drm/renderD*/device/vendor"):
+        try:
+            with open(path) as fh:
+                if fh.read().strip().lower() == "0x1002":
+                    count += 1
+        except OSError:
+            pass
+    return count
+
+
 def detect_gpu_count() -> int:
-    """NVML-detected GPU count; FORGE_GPU_COUNT (>0) overrides; fallback 1."""
+    """Detected GPU count; FORGE_GPU_COUNT (>0) overrides; fallback 1.
+
+    NVIDIA counts via NVML; AMD counts the amdgpu DRI render nodes from sysfs
+    (no ROCm libraries needed in the orchestrator)."""
     settings = get_settings()
     if settings.gpu_count > 0:
         return settings.gpu_count
+    if detect_gpu_vendor() == "amd":
+        return max(1, _amd_gpu_count())
     try:
         import pynvml
 
@@ -60,6 +110,42 @@ def detect_gpu_count() -> int:
             pynvml.nvmlShutdown()
     except Exception:
         return 1
+
+
+def gpu_run_kwargs(
+    vendor: str, gpu_ids: list[int]
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """(docker-run kwargs, extra env) that expose `gpu_ids` to a container for
+    the host GPU vendor.
+
+    NVIDIA uses the device-request API (the nvidia container runtime). AMD/ROCm
+    has no special runtime: it mounts the kernel-fusion device (/dev/kfd) and
+    the DRI render nodes (/dev/dri), joins the video/render groups for access,
+    and scopes visibility with HIP_VISIBLE_DEVICES. HSA_OVERRIDE_GFX_VERSION is
+    set when configured (e.g. a gfx900 MI25 on a ROCm build without gfx900)."""
+    if vendor == "amd":
+        ids = ",".join(str(g) for g in gpu_ids)
+        env: dict[str, str] = {
+            "HIP_VISIBLE_DEVICES": ids,
+            "ROCR_VISIBLE_DEVICES": ids,
+        }
+        override = get_settings().hsa_override_gfx_version.strip()
+        if override:
+            env["HSA_OVERRIDE_GFX_VERSION"] = override
+        kwargs: dict[str, Any] = {
+            "devices": ["/dev/kfd", "/dev/dri"],
+            "group_add": ["video", "render"],
+            "security_opt": ["seccomp=unconfined"],
+            "ipc_mode": "host",  # ROCm needs a large shared-memory segment
+        }
+        return kwargs, env
+    return {
+        "device_requests": [
+            docker.types.DeviceRequest(
+                device_ids=[str(g) for g in gpu_ids], capabilities=[["gpu"]]
+            )
+        ]
+    }, {}
 
 
 class LeaseHeldError(Exception):
@@ -272,6 +358,7 @@ class EngineManager:
         # cancellation cannot stop the thread itself.
         self._generations: dict[int, int] = {}
         self._gpu_count: int | None = None
+        self._gpu_vendor: str | None = None
 
     # ── inventory ───────────────────────────────────────────────────────────
 
@@ -280,6 +367,13 @@ class EngineManager:
         if self._gpu_count is None:
             self._gpu_count = detect_gpu_count()
         return self._gpu_count
+
+    @property
+    def gpu_vendor(self) -> str:
+        """'nvidia' | 'amd' | 'cpu' — cached; decides device wiring + images."""
+        if self._gpu_vendor is None:
+            self._gpu_vendor = detect_gpu_vendor()
+        return self._gpu_vendor
 
     def _occupied(self) -> set[int]:
         occupied: set[int] = set()
@@ -567,27 +661,40 @@ class EngineManager:
                 target="/data/models", source=settings.models_volume, type="volume"
             )
         ]
-        device_requests = [
-            docker.types.DeviceRequest(
-                device_ids=[str(g) for g in lease.gpu_ids], capabilities=[["gpu"]]
-            )
-        ]
+        # Device wiring depends on the host GPU vendor: NVIDIA device requests,
+        # or ROCm /dev/kfd + /dev/dri mounts (see gpu_run_kwargs).
+        vendor = self.gpu_vendor
+        gpu_kwargs, gpu_env = gpu_run_kwargs(vendor, lease.gpu_ids)
         common: dict[str, Any] = {
             "name": name,
             "labels": labels,
             "network": settings.docker_network,
             "mounts": mounts,
             "detach": True,
-            "device_requests": device_requests,
             "restart_policy": {"Name": "no"},
             "shm_size": "8g" if len(lease.gpu_ids) > 1 else "2g",
+            **gpu_kwargs,
         }
-        env: dict[str, str] = {}
+        env: dict[str, str] = dict(gpu_env)
         if settings.hf_token:
             env["HF_TOKEN"] = settings.hf_token
 
+        # On AMD/ROCm only the llama.cpp (GGUF) lane is supported — the vLLM,
+        # SGLang, TabbyAPI and AirLLM images are CUDA-only and would crash with
+        # a confusing error, so refuse early with an actionable message.
+        if vendor == "amd" and model.engine != EngineKind.llamacpp:
+            raise RuntimeError(
+                f"the {model.engine.value} lane needs an NVIDIA GPU; this box is "
+                "AMD/ROCm. Use a GGUF model on the llama.cpp lane instead "
+                "(set the model's engine to llamacpp on the Models page)."
+            )
+
         if model.engine == EngineKind.llamacpp:
-            image = settings.llamacpp_image
+            image = (
+                settings.llamacpp_rocm_image
+                if vendor == "amd"
+                else settings.llamacpp_image
+            )
             command = build_llamacpp_command(model, settings)
         elif model.engine == EngineKind.vllm:
             image = settings.vllm_image

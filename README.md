@@ -94,6 +94,30 @@ Different hardware? Adjust `FORGE_VRAM_BUDGET_GB` and
 `FORGE_RAM_OFFLOAD_BUDGET_GB` in `.env` — the fit rules, registry scoring, and
 `--n-gpu-layers` computation all read those budgets.
 
+### GPU detection (NVIDIA and AMD/ROCm)
+
+Forge identifies the GPU from the kernel devices, not from a host CLI, so a box
+that runs GPU containers is detected even without `nvidia-smi`/`rocm-smi`
+installed on the host. `scripts/gpu-detect.sh` is the single source of truth
+shared by the Makefile, `setup.sh`, `verify.sh` and `preflight.sh`:
+
+- **NVIDIA** — the NVIDIA Container Toolkit runtime is registered with Docker →
+  the `docker-compose.gpu.yml` overlay is included (NVML stats + leases).
+- **AMD/ROCm** — `/dev/kfd` + `/dev/dri` render nodes are present → the
+  `docker-compose.rocm.yml` overlay is included; the orchestrator reads AMD
+  VRAM/utilisation from sysfs and mounts the ROCm devices into engine
+  containers. **AMD support is limited to the llama.cpp (GGUF) lane** — vLLM,
+  SGLang, TabbyAPI and AirLLM stay NVIDIA-only. The ROCm llama.cpp image is
+  built locally (`engines/llamacpp-rocm`) targeting gfx900/906/908/90a/1030,
+  which covers the **Instinct MI25** (gfx900); build it with
+  `docker compose --profile rocm build llamacpp-rocm` (setup.sh does this
+  automatically on AMD boxes).
+
+Overrides: `FORGE_GPU_VENDOR=nvidia|amd|cpu` pins the vendor, `FORGE_NO_GPU=1`
+forces CPU-only, and `FORGE_HSA_OVERRIDE_GFX_VERSION` (e.g. `9.0.0`) helps a
+card the installed ROCm build doesn't list natively. Run `make preflight` (or
+`scripts/gpu-detect.sh explain`) to see exactly what was detected.
+
 ## Quick start
 
 ```bash
@@ -285,21 +309,34 @@ holds a GPU lease:
   cancels the job **on the server** (the partial reply is kept), so leaving
   and returning does not resurrect it.
 
-## Auto model routing
+## Model selection & auto routing
 
-Set a conversation's model to **Auto** and a tiny always-resident router
-model reads each prompt and picks the best downloaded model for it — small
-models for quick chat, the big ones for code and hard reasoning — then loads
-the pick onto a GPU if it isn't serving yet, narrating every stage in the
-chat ("choosing → routed to X → loading"). Choose the router model on the
+The chat's model menu is a searchable dropdown listing **every downloaded
+model** plus **Auto** — pick any one and Forge loads it onto a GPU on demand
+(narrating "loading …" in the chat) even if it wasn't already serving. The
+choice is by what you downloaded, never limited to what happens to be loaded.
+
+Set the model to **Auto** and a tiny always-resident router model *sizes each
+prompt* and routes it by capability:
+
+- **light** work — reading or summarizing text, browsing or looking things up,
+  reading the news, opening or reading files, translation, casual chat — goes
+  to the **smallest** downloaded model (fast).
+- **heavy** work — writing or debugging code, step-by-step reasoning, math,
+  planning or complex analysis — goes to the **largest** downloaded model.
+
+The pick is made across all downloaded models by parameter count, independent
+of what's currently loaded (a heavy task routes to the big cold model even
+while a small one is serving), then loaded on demand — every stage narrated in
+the chat ("choosing → routed to X → loading"). Choose the router model on the
 **Settings** page (TinyLlama / Qwen-0.6B class, any ready llama.cpp GGUF
 model). Placement follows the hardware: with several GPUs the router lives
-fully offloaded on the *smallest-VRAM* one; on a single-GPU box it runs on
-CPU beside the main lane so it never steals VRAM. Routing degrades softly —
-router unset, unhealthy, or answering nonsense falls back to a deterministic
-pick (whatever is already serving, else the largest ready model) with the
-reason shown in the chat. When every GPU is busy, Auto answers with the
-currently serving model instead of evicting someone's loaded engine.
+fully offloaded on the *smallest-VRAM* one; on a single-GPU box it runs on CPU
+beside the main lane so it never steals VRAM. Routing degrades softly — with
+the router unset, unhealthy, or answering unusably, a local keyword heuristic
+sizes the task the same way (light vs heavy), so context-aware routing still
+works with the router container down. When every GPU is busy, Auto answers
+with a currently serving model instead of evicting someone's loaded engine.
 
 ## Chat system prompt
 

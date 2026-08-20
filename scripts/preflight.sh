@@ -38,15 +38,19 @@ else
 fi
 
 # ── GPU (optional — absence means CPU-only mode, never a hard fail) ─────────
-if command -v nvidia-smi >/dev/null 2>&1; then
-  if [ "$docker_usable" = 1 ] && ! docker info 2>/dev/null | grep -qi nvidia; then
-    warn "nvidia-smi found, but docker does not list the NVIDIA runtime — engine containers will not see the GPU. Install the NVIDIA Container Toolkit, then: sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker"
-  else
-    ok "NVIDIA GPU detected (make up will include the GPU overlay)"
-  fi
-else
-  warn "no NVIDIA GPU detected (nvidia-smi missing) — continuing in CPU-only mode: the stack comes up and GPU stats show unavailable, but loading models onto an engine needs a GPU"
-fi
+# Vendor-aware: identifies NVIDIA *and* AMD/ROCm through kernel devices, not
+# just `nvidia-smi` on PATH (a GPU box can lack the host CLI yet run GPU
+# containers fine). The shared detector returns KEY\tmessage; map KEY to a line.
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+gpu_line=$("$SCRIPT_DIR/gpu-detect.sh" explain 2>/dev/null)
+gpu_key=$(printf '%s' "$gpu_line" | cut -f1)
+gpu_msg=$(printf '%s' "$gpu_line" | cut -f2-)
+case "$gpu_key" in
+  GPU_READY)              ok "$gpu_msg" ;;
+  RUNTIME_MISSING|NO_GPU) warn "$gpu_msg" ;;
+  CPU_FORCED)             note "$gpu_msg" ;;
+  *)                      warn "GPU detection unavailable — continuing in CPU-only mode" ;;
+esac
 
 # ── disk space on the docker root (warn under ~30GB) ────────────────────────
 if [ "$docker_usable" = 1 ]; then

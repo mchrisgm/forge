@@ -69,7 +69,51 @@ def _service_health() -> list[dict]:
 _nvml_warned = False
 
 
-def _gpu_stats() -> list[dict] | None:
+def _read_sysfs_int(path: str) -> int | None:
+    try:
+        with open(path) as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _amd_gpu_stats() -> list[dict] | None:
+    """Per-GPU stats for AMD cards straight from the amdgpu sysfs attributes —
+    no ROCm libraries needed in the orchestrator. VRAM and busy% are populated
+    when the kernel exposes them (docker-compose.rocm.yml mounts /dev/dri so the
+    render nodes and their sysfs are visible)."""
+    import glob
+
+    gpus: list[dict] = []
+    for dev in sorted(glob.glob("/sys/class/drm/card[0-9]*/device")):
+        try:
+            with open(f"{dev}/vendor") as fh:
+                if fh.read().strip().lower() != "0x1002":  # 0x1002 = AMD/ATI
+                    continue
+        except OSError:
+            continue
+        total = _read_sysfs_int(f"{dev}/mem_info_vram_total")
+        used = _read_sysfs_int(f"{dev}/mem_info_vram_used")
+        busy = _read_sysfs_int(f"{dev}/gpu_busy_percent")
+        name = "AMD GPU"
+        try:
+            with open(f"{dev}/product_name") as fh:
+                name = fh.read().strip() or name
+        except OSError:
+            pass
+        gpus.append(
+            {
+                "index": len(gpus),
+                "name": name,
+                "vram_total_gb": round(total / 1024**3, 2) if total else None,
+                "vram_used_gb": round(used / 1024**3, 2) if used is not None else None,
+                "utilization_pct": busy,
+            }
+        )
+    return gpus or None
+
+
+def _nvidia_gpu_stats() -> list[dict] | None:
     """Per-GPU stats for every device NVML can see (multi-GPU aware)."""
     global _nvml_warned
     try:
@@ -108,6 +152,13 @@ def _gpu_stats() -> list[dict] | None:
         return None
 
 
+def _gpu_stats() -> list[dict] | None:
+    """Per-GPU stats for the host GPU vendor (NVIDIA via NVML, AMD via sysfs)."""
+    if engine_manager.gpu_vendor == "amd":
+        return _amd_gpu_stats()
+    return _nvidia_gpu_stats()
+
+
 @router.get("/stats")
 def stats() -> dict:
     settings = get_settings()
@@ -143,6 +194,7 @@ def stats() -> dict:
     return {
         "gpu": gpus[0] if gpus else None,  # backcompat single-GPU view
         "gpus": gpus,
+        "gpu_vendor": engine_manager.gpu_vendor,  # nvidia | amd | cpu
         "ram": {
             "total_gb": round(ram.total / 1024**3, 1),
             "used_gb": round(ram.used / 1024**3, 1),

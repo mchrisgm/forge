@@ -56,6 +56,7 @@ def isolated_env(tmp_path, monkeypatch):
     engine_manager_module.engine_manager._load_tasks = {}
     engine_manager_module.engine_manager._generations = {}
     engine_manager_module.engine_manager._gpu_count = None
+    engine_manager_module.engine_manager._gpu_vendor = None
     # Boot-time image check result is process-global too.
     from app.services import bootstrap as bootstrap_module
 

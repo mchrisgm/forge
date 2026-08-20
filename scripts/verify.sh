@@ -26,8 +26,10 @@ info() { printf '  %s\n' "$*"; }
 bold() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
 COMPOSE=(docker compose -f docker-compose.yml)
-if [ "${FORGE_NO_GPU:-0}" = 0 ] && command -v nvidia-smi >/dev/null 2>&1; then
-  COMPOSE+=(-f docker-compose.gpu.yml)
+GPU_ARGS=$(sh scripts/gpu-detect.sh compose-args 2>/dev/null || true)
+if [ -n "$GPU_ARGS" ]; then
+  # shellcheck disable=SC2206
+  COMPOSE+=($GPU_ARGS)
 fi
 
 # ── 1+2. sweep stale / stray lane containers ────────────────────────────────

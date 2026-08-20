@@ -29,8 +29,9 @@ custom code) and routes it — see the README's Engine lanes section.
 
 One more container sits *beside* the lanes rather than in them: the **auto
 router** (`forge-engine-router`, label `forge.router`, port 8087) — a tiny
-llama.cpp instance serving the Settings-chosen router model that picks the
-answering model for "Auto" conversations (`app/services/model_router.py`).
+llama.cpp instance serving the Settings-chosen router model that sizes each
+"Auto" prompt (light vs heavy) so the orchestrator can pick the smallest or
+largest downloaded model to answer it (`app/services/model_router.py`).
 It never holds a GPU lease: multi-GPU boxes park it fully offloaded on the
 smallest-VRAM GPU, single-GPU boxes run it on CPU so the main lane keeps
 its VRAM.
@@ -57,6 +58,35 @@ ExLlamaV3-first (EXL2 support preserved on a branch). Image entrypoint is
 **Detection:** an EXL3/EXL2 checkpoint carries
 `quantization_config.quant_method` in its `config.json`; `detect_lane`
 routes those to this lane (SGLang/vLLM cannot load them).
+
+## AMD / ROCm (llama.cpp lane)
+
+Forge is NVIDIA-first, but the GPU is identified by vendor from the kernel
+devices (`scripts/gpu-detect.sh`), so an AMD box is detected and gets the
+`docker-compose.rocm.yml` overlay instead of the NVIDIA one. Support is scoped
+to the **llama.cpp (GGUF) lane** — it is the only engine with a mature HIP
+backend and the widest format coverage per GB, which matches the "workhorse"
+role in the roster. vLLM/SGLang/TabbyAPI/AirLLM remain CUDA-only; the engine
+manager refuses those lanes on AMD with an actionable message rather than
+letting a CUDA image crash.
+
+How it wires up:
+
+- **Detection** — `/dev/kfd` + a `/dev/dri/renderD*` node ⇒ vendor `amd`. VRAM,
+  used, and busy% come straight from amdgpu sysfs
+  (`/sys/class/drm/card*/device/mem_info_vram_*`, `gpu_busy_percent`), so the
+  orchestrator needs no ROCm libraries — only `/dev/dri` mounted (the overlay).
+- **Device wiring** — `engine_manager.gpu_run_kwargs` mounts `/dev/kfd` +
+  `/dev/dri`, joins the `video`/`render` groups, sets `HIP_VISIBLE_DEVICES`,
+  and applies `HSA_OVERRIDE_GFX_VERSION` when configured.
+- **Image** — `engines/llamacpp-rocm/Dockerfile` builds `llama-server` with
+  `GGML_HIP` for `gfx900;gfx906;gfx908;gfx90a;gfx1030` on ROCm 5.7. gfx900 is
+  the **Instinct MI25** (Vega 10); ROCm 6 dropped it, hence the 5.7 pin.
+  Override `ROCM_TAG`/`GPU_TARGETS` (build args) for newer cards.
+
+Caveat: legacy datacenter cards like the MI25 are best-effort — driver/ROCm
+version and per-card ISA support vary; `FORGE_HSA_OVERRIDE_GFX_VERSION` is the
+usual lever when HIP can't find a matching kernel.
 
 ## Evaluated and not (yet) added
 

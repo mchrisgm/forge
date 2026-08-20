@@ -71,6 +71,12 @@ def check_required_images() -> list[str]:
 
     settings = get_settings()
     required = [settings.session_image, settings.airllm_image, settings.imagegen_image]
+    # The ROCm llama.cpp image is only spawned (and only worth building) on an
+    # AMD box — don't warn NVIDIA/CPU hosts about a missing image they never use.
+    from .engine_manager import engine_manager
+
+    if engine_manager.gpu_vendor == "amd":
+        required.append(settings.llamacpp_rocm_image)
     missing: list[str] = []
     try:
         client = docker_util.client()

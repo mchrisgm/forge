@@ -10,15 +10,22 @@ from sqlmodel import select
 
 from app import db as db_module
 from app.models import ChatMessage, Conversation, EngineKind
-from app.services import chat_service, memory
+from app.services import chat_service, memory, model_router
 from app.services.engine_manager import Lease, engine_manager
+
+from .conftest import add_model
 
 CHAT_SLUG = "chat-model"
 STREAM_PIECES = ("Hello", " world")
 STREAM_TEXT = "".join(STREAM_PIECES)
 
 
-def serve(slug: str = CHAT_SLUG, state: str = "ready", model_id: int = 1) -> Lease:
+def serve(slug: str = CHAT_SLUG, state: str = "ready", model_id: int | None = None) -> Lease:
+    # A real serving lease always has a matching downloaded ModelEntry — create
+    # one (unless the caller pinned an id) so slug resolution and auto-routing,
+    # which pick from *downloaded* models, can find it.
+    if model_id is None:
+        model_id = add_model(display_name=slug.replace("-", " ").title(), params_b=14.0)
     lease = Lease(
         model_id=model_id,
         model_name="Chat Model",
@@ -237,7 +244,9 @@ class TestSendMessage:
         self, api, auth_headers, stream_stub, scheduled, retrieve_spy
     ):
         lease = serve()
-        conversation = create_conversation(api, auth_headers)
+        # Explicit selection of the serving model: no routing narration, the
+        # frame sequence is status → deltas → [DONE] → done.
+        conversation = create_conversation(api, auth_headers, model_slug=CHAT_SLUG)
         resp = api.post(
             f"/api/chat/conversations/{conversation['id']}/messages",
             json={"content": "What is up?"},
@@ -279,7 +288,7 @@ class TestSendMessage:
         assert messages[1].token_estimate == memory.estimate_tokens(STREAM_TEXT)
         assert done["assistant_message_id"] == messages[1].id
 
-        # Conversation bookkeeping: adopted the serving slug, bumped updated_at.
+        # Conversation bookkeeping: keeps the explicit slug, bumped updated_at.
         after = api.get(
             f"/api/chat/conversations/{conversation['id']}", headers=auth_headers
         ).json()
@@ -296,6 +305,73 @@ class TestSendMessage:
         # Memory was consulted and post-exchange work was scheduled.
         assert retrieve_spy == [(user_id_of(api, auth_headers), "What is up?")]
         assert len(scheduled) == 1
+
+    def test_explicit_pick_loads_on_demand_and_bypasses_routing(
+        self, api, auth_headers, stream_stub, scheduled, monkeypatch
+    ):
+        # The headline of this wave: an explicitly-picked model that isn't
+        # serving loads on demand and answers — no auto-routing, honored exactly
+        # (allow_fallback False), even with a bigger model also downloaded.
+        small_id = add_model(display_name="Small Model", params_b=3.0)
+        add_model(display_name="Big Model", params_b=14.0)
+        loaded = Lease(
+            model_id=small_id,
+            model_name="Small Model",
+            model_slug="small-model",
+            engine=EngineKind.llamacpp,
+            gpu_ids=[0],
+            state="ready",
+            base_url="http://forge-engine-llamacpp-gpu0:8081/v1",
+        )
+
+        async def no_route(prompt):
+            raise AssertionError("an explicit pick must not auto-route")
+
+        async def fake_ensure(model, push_status, allow_fallback=True):
+            assert model.id == small_id  # the pinned model, not the big one
+            assert allow_fallback is False  # explicit pick is honored exactly
+            push_status(f"loading {model.display_name} onto the GPU")
+            return loaded
+
+        monkeypatch.setattr(model_router, "choose_model", no_route)
+        monkeypatch.setattr(model_router, "ensure_serving", fake_ensure)
+
+        conversation = create_conversation(
+            api, auth_headers, model_slug="small-model"
+        )
+        resp = api.post(
+            f"/api/chat/conversations/{conversation['id']}/messages",
+            json={"content": "explicit please"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        (call,) = stream_stub
+        assert call["model_slug"] == "small-model"
+        details = [
+            json.loads(p)["detail"]
+            for p in sse_payloads(resp.text)
+            if p != "[DONE]" and json.loads(p).get("forge") == "status"
+        ]
+        assert any("loading Small Model" in d for d in details)
+
+    def test_legacy_empty_slug_routes_as_auto_and_pins_auto(
+        self, api, auth_headers, stream_stub, scheduled, retrieve_spy
+    ):
+        # A pre-picker conversation with an empty model_slug is treated as Auto
+        # and pinned to "auto" so the picker and the next turn agree.
+        serve()
+        conversation = create_conversation(api, auth_headers)
+        assert conversation["model_slug"] == ""
+        resp = api.post(
+            f"/api/chat/conversations/{conversation['id']}/messages",
+            json={"content": "hi there"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        after = api.get(
+            f"/api/chat/conversations/{conversation['id']}", headers=auth_headers
+        ).json()
+        assert after["model_slug"] == "auto"
 
     def test_memory_disabled_conversation_skips_retrieval(
         self, api, auth_headers, stream_stub, scheduled, retrieve_spy
@@ -320,8 +396,8 @@ class TestSendMessage:
         )
         assert resp.status_code == 400
 
-    def test_409_when_no_lease_is_ready(self, api, auth_headers, stream_stub):
-        serve(state="starting")  # loading, not serving
+    def test_409_when_no_model_downloaded(self, api, auth_headers, stream_stub):
+        # Auto (the default) needs at least one downloaded model to route to.
         conversation = create_conversation(api, auth_headers)
         resp = api.post(
             f"/api/chat/conversations/{conversation['id']}/messages",
@@ -329,8 +405,34 @@ class TestSendMessage:
             headers=auth_headers,
         )
         assert resp.status_code == 409
-        assert resp.json()["detail"]["message"] == "no model is serving this chat"
+        assert resp.json()["detail"]["message"] == "no model is ready to route to"
         # Nothing was persisted for the failed send.
+        with db_module.read_session() as db:
+            assert (
+                db.exec(
+                    select(ChatMessage).where(
+                        ChatMessage.conversation_id == conversation["id"]
+                    )
+                ).all()
+                == []
+            )
+
+    def test_409_when_selected_model_not_downloaded(
+        self, api, auth_headers, stream_stub
+    ):
+        # A conversation pinned to a model that no longer exists (deleted after
+        # selection) refuses the send rather than silently routing elsewhere.
+        serve()  # a different model is downloaded, but not the pinned one
+        conversation = create_conversation(
+            api, auth_headers, model_slug="ghost-model"
+        )
+        resp = api.post(
+            f"/api/chat/conversations/{conversation['id']}/messages",
+            json={"content": "anyone home?"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["message"] == "that model isn't downloaded"
         with db_module.read_session() as db:
             assert (
                 db.exec(

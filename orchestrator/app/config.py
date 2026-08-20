@@ -65,9 +65,26 @@ class Settings(BaseSettings):
     engine_load_timeout_s: int = 900
     default_ctx: int = 16384
 
-    # GPUs: 0 = auto-detect via NVML at startup (falls back to 1).
-    # vram_budget_gb stays PER GPU.
+    # GPUs: 0 = auto-detect at startup (NVML for NVIDIA, sysfs for AMD; falls
+    # back to 1). vram_budget_gb stays PER GPU.
     gpu_count: int = 0
+
+    # GPU vendor: "auto" identifies NVIDIA vs AMD/ROCm from kernel devices;
+    # override with FORGE_GPU_VENDOR=nvidia|amd|cpu when auto-detect is
+    # ambiguous. Decides device wiring (NVIDIA device requests vs ROCm
+    # /dev/kfd + /dev/dri mounts) and which llama.cpp image the lane uses.
+    gpu_vendor: str = Field(
+        "auto", validation_alias=AliasChoices("FORGE_GPU_VENDOR", "GPU_VENDOR")
+    )
+    # ROCm llama.cpp server image for AMD boxes (built locally from
+    # engines/llamacpp-rocm — targets gfx900/gfx906/gfx908/gfx90a incl. the MI25).
+    llamacpp_rocm_image: str = "forge-llamacpp-rocm"
+    # HSA_OVERRIDE_GFX_VERSION for AMD cards the installed ROCm build doesn't
+    # list natively (e.g. "9.0.0" for a gfx900 MI25 on a ROCm without gfx900).
+    # Empty leaves it unset.
+    hsa_override_gfx_version: str = Field(
+        "", validation_alias=AliasChoices("HSA_OVERRIDE_GFX_VERSION")
+    )
 
     # Docker plumbing
     docker_network: str = "forge-internal"
