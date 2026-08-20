@@ -285,21 +285,34 @@ holds a GPU lease:
   cancels the job **on the server** (the partial reply is kept), so leaving
   and returning does not resurrect it.
 
-## Auto model routing
+## Model selection & auto routing
 
-Set a conversation's model to **Auto** and a tiny always-resident router
-model reads each prompt and picks the best downloaded model for it — small
-models for quick chat, the big ones for code and hard reasoning — then loads
-the pick onto a GPU if it isn't serving yet, narrating every stage in the
-chat ("choosing → routed to X → loading"). Choose the router model on the
+The chat's model menu is a searchable dropdown listing **every downloaded
+model** plus **Auto** — pick any one and Forge loads it onto a GPU on demand
+(narrating "loading …" in the chat) even if it wasn't already serving. The
+choice is by what you downloaded, never limited to what happens to be loaded.
+
+Set the model to **Auto** and a tiny always-resident router model *sizes each
+prompt* and routes it by capability:
+
+- **light** work — reading or summarizing text, browsing or looking things up,
+  reading the news, opening or reading files, translation, casual chat — goes
+  to the **smallest** downloaded model (fast).
+- **heavy** work — writing or debugging code, step-by-step reasoning, math,
+  planning or complex analysis — goes to the **largest** downloaded model.
+
+The pick is made across all downloaded models by parameter count, independent
+of what's currently loaded (a heavy task routes to the big cold model even
+while a small one is serving), then loaded on demand — every stage narrated in
+the chat ("choosing → routed to X → loading"). Choose the router model on the
 **Settings** page (TinyLlama / Qwen-0.6B class, any ready llama.cpp GGUF
 model). Placement follows the hardware: with several GPUs the router lives
-fully offloaded on the *smallest-VRAM* one; on a single-GPU box it runs on
-CPU beside the main lane so it never steals VRAM. Routing degrades softly —
-router unset, unhealthy, or answering nonsense falls back to a deterministic
-pick (whatever is already serving, else the largest ready model) with the
-reason shown in the chat. When every GPU is busy, Auto answers with the
-currently serving model instead of evicting someone's loaded engine.
+fully offloaded on the *smallest-VRAM* one; on a single-GPU box it runs on CPU
+beside the main lane so it never steals VRAM. Routing degrades softly — with
+the router unset, unhealthy, or answering unusably, a local keyword heuristic
+sizes the task the same way (light vs heavy), so context-aware routing still
+works with the router container down. When every GPU is busy, Auto answers
+with a currently serving model instead of evicting someone's loaded engine.
 
 ## Chat system prompt
 

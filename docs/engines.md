@@ -29,8 +29,9 @@ custom code) and routes it — see the README's Engine lanes section.
 
 One more container sits *beside* the lanes rather than in them: the **auto
 router** (`forge-engine-router`, label `forge.router`, port 8087) — a tiny
-llama.cpp instance serving the Settings-chosen router model that picks the
-answering model for "Auto" conversations (`app/services/model_router.py`).
+llama.cpp instance serving the Settings-chosen router model that sizes each
+"Auto" prompt (light vs heavy) so the orchestrator can pick the smallest or
+largest downloaded model to answer it (`app/services/model_router.py`).
 It never holds a GPU lease: multi-GPU boxes park it fully offloaded on the
 smallest-VRAM GPU, single-GPU boxes run it on CPU so the main lane keeps
 its VRAM.
