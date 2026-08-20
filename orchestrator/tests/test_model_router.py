@@ -139,6 +139,11 @@ class TestTaskSizing:
             "summarize this article for me",
             "translate hello into french",
             "how are you?",
+            # Bare nouns that used to over-match heavy: light factual lookups.
+            "what is the function of the pancreas",
+            "what class of drug is aspirin",
+            "what is the reason the sky is blue",
+            "what does this method do in the standard library",
         ):
             assert model_router._keyword_task_class(prompt) == "light"
 
@@ -149,6 +154,26 @@ class TestTaskSizing:
             candidates = [db.get(ModelEntry, small_id), db.get(ModelEntry, big_id)]
         assert model_router._pick_for_class(candidates, "light").id == small_id
         assert model_router._pick_for_class(candidates, "heavy").id == big_id
+
+    def test_unknown_size_never_masquerades_as_smallest(self, db_ready):
+        # A GGUF repo whose params couldn't be inferred (params_b == 0) must not
+        # hijack the "light" pick nor block the "heavy" one when sized models
+        # exist — it is only used when nothing has a known size.
+        mystery_id = add_model(display_name="Mystery Model", params_b=0.0)
+        small_id = add_model(display_name="Small Model", params_b=3.0)
+        big_id = add_model(display_name="Big Model", params_b=14.0)
+        with db_module.read_session() as db:
+            candidates = [
+                db.get(ModelEntry, mystery_id),
+                db.get(ModelEntry, small_id),
+                db.get(ModelEntry, big_id),
+            ]
+        assert model_router._pick_for_class(candidates, "light").id == small_id
+        assert model_router._pick_for_class(candidates, "heavy").id == big_id
+        # All-unknown: falls back to the unknown pool deterministically.
+        with db_module.read_session() as db:
+            only_unknown = [db.get(ModelEntry, mystery_id)]
+        assert model_router._pick_for_class(only_unknown, "light").id == mystery_id
 
 
 class TestChooseModel:
@@ -246,6 +271,43 @@ class TestChooseModel:
         model, reason = self.run(model_router.choose_model("do the thing"))
         assert model.id == small_id
         assert reason == "light task — routed by Tiny Router"
+
+    def test_excludes_router_model_from_answers(
+        self, db_ready, monkeypatch, httpx_mock
+    ):
+        # The configured tiny router model is a classifier, not an answer model:
+        # a "light" task must route to the smallest REAL chat model, not the
+        # even-smaller router itself.
+        add_model(display_name="Tiny Router", params_b=1.0)
+        set_setting("router_model_slug", "tiny-router")
+        small_id = add_model(display_name="Small Model", params_b=3.0)
+        add_model(display_name="Big Model", params_b=14.0)
+        self._with_router(monkeypatch)
+        httpx_mock.set_handler(router_reply("light"))
+        model, _ = self.run(model_router.choose_model("what's the news"))
+        assert model.id == small_id  # the 3B, not the 1B router
+
+    def test_router_only_downloaded_model_still_answers(
+        self, db_ready, monkeypatch
+    ):
+        # If the router model is the ONLY thing downloaded, it may answer.
+        only_id = add_model(display_name="Tiny Router", params_b=1.0)
+        set_setting("router_model_slug", "tiny-router")
+        model, reason = self.run(model_router.choose_model("hi"))
+        assert model.id == only_id
+        assert reason == "the only ready model"
+
+    def test_classify_heavy_wins_when_reply_has_both_words(
+        self, db_ready, monkeypatch, httpx_mock
+    ):
+        add_model(display_name="Small Model", params_b=3.0)
+        big_id = add_model(display_name="Big Model", params_b=14.0)
+        self._with_router(monkeypatch)
+        # A hedgy reply mentioning both must resolve to heavy (checked first).
+        httpx_mock.set_handler(router_reply("this isn't light, it's heavy"))
+        model, reason = self.run(model_router.choose_model("do the thing"))
+        assert model.id == big_id
+        assert reason == "heavy task — routed by Tiny Router"
 
     def test_router_unclear_reply_falls_back_to_keywords(
         self, db_ready, monkeypatch, httpx_mock
@@ -413,8 +475,27 @@ class TestEnsureServing:
             raise LeaseHeldError([{"model_name": "Other Model"}])
 
         monkeypatch.setattr(model_router.engine_manager, "load", held)
-        with pytest.raises(RuntimeError, match="no GPU is free"):
+        with pytest.raises(RuntimeError, match="every GPU is busy"):
             self.run(model_router.ensure_serving(model, lambda d: None))
+
+    def test_explicit_pick_no_fallback_raises_when_busy(self, db_ready, monkeypatch):
+        # allow_fallback=False (an explicit user pick) must NOT silently answer
+        # with a different serving model — it raises so the choice is honored.
+        serve("other-model", model_id=7)
+        model_id = add_model(display_name="Chat Model")
+        with db_module.read_session() as db:
+            model = db.get(ModelEntry, model_id)
+
+        async def held(entry):
+            raise LeaseHeldError([{"model_name": "Other Model"}])
+
+        monkeypatch.setattr(model_router.engine_manager, "load", held)
+        with pytest.raises(RuntimeError, match="every GPU is busy"):
+            self.run(
+                model_router.ensure_serving(
+                    model, lambda d: None, allow_fallback=False
+                )
+            )
 
 
 class TestSettingsKnob:
@@ -558,7 +639,7 @@ class TestAutoFlow:
                 model = db.get(ModelEntry, model_id)
             return model, "picked by Tiny Router"
 
-        async def fake_ensure(model, push_status):
+        async def fake_ensure(model, push_status, allow_fallback=True):
             push_status(f"loading {model.display_name} onto the GPU")
             return lease
 

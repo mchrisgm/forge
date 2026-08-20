@@ -51,8 +51,16 @@ export function ModelPicker({
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
   const listId = useId();
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  // Return focus to the trigger when closing via keyboard, so a keyboard-only
+  // user isn't stranded with focus on a detached menu element.
+  const closeToTrigger = () => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
 
   const isAuto = value === AUTO_SLUG || value === "";
 
@@ -118,14 +126,18 @@ export function ModelPicker({
     setHighlight((h) => Math.min(h, Math.max(0, rows.length - 1)));
   }, [rows.length]);
 
-  // Escape closes from anywhere while open.
+  // Escape closes from anywhere while open, returning focus to the trigger.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeToTrigger();
+      }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   // Scroll the highlighted row into view as it moves.
@@ -148,7 +160,10 @@ export function ModelPicker({
     } else if (e.key === "Enter") {
       e.preventDefault();
       const row = rows[highlight];
-      if (row) commit(rowSlug(row));
+      if (row) {
+        commit(rowSlug(row));
+        triggerRef.current?.focus(); // keyboard selection returns focus
+      }
     }
   };
 
@@ -157,6 +172,7 @@ export function ModelPicker({
   return (
     <div className="relative shrink-0">
       <button
+        ref={triggerRef}
         type="button"
         aria-haspopup="listbox"
         aria-expanded={open}

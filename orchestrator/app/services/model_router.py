@@ -263,16 +263,22 @@ TASK_LIGHT = "light"
 TASK_HEAVY = "heavy"
 
 # Local heuristic used whenever the tiny model can't be reached or answers
-# unusably: code fences or these signals => heavy, otherwise light.
+# unusably. It biases toward LIGHT and only fires heavy on strong, unambiguous
+# signals — bare nouns like "function"/"class"/"reason" are deliberately NOT
+# matched on their own, since "what is the function of the pancreas" is a light
+# factual lookup, not a coding task. Heavy needs a code fence, code syntax, a
+# work-verb paired with a code noun, or a clear math/logic cue.
 _HEAVY_SIGNALS = re.compile(
-    r"```|\b("
-    r"cod(e|ing)|debug|compile|refactor|function|method|class|"
-    r"algorithm|regex|stack ?trace|traceback|exception|"
-    r"python|javascript|typescript|rust|golang|java|c\+\+|sql|bash|"
-    r"prove|proof|derive|theorem|reason(ing)?|step[- ]by[- ]step|"
-    r"logic(al)?|calculat|equation|integral|optimi[sz]e|complexity|"
-    r"architect|design a|implement|analy[sz]e"
-    r")\b",
+    r"```"                                          # a fenced code block
+    r"|\bdef\s+\w+\s*\("                            # a python function def
+    r"|\bclass\s+\w+\s*[:(]"                        # a class definition
+    r"|\b(?:write|fix|debug|implement|refactor|optimi[sz]e|generate|build)\b"
+    r"[^?]{0,60}?\b(?:code|function|script|program|bug|method|api|endpoint"
+    r"|regex|query|algorithm|compiler?)\b"          # work-verb + code noun
+    r"|\b(?:debug|refactor|traceback|stack ?trace|recursion|"
+    r"typescript|javascript|golang|dockerfile|kubernetes)\b"
+    r"|\bstep[- ]by[- ]step\b"                      # explicit reasoning ask
+    r"|\b(?:prove|proof|theorem|integral|derivative|equation)\b",
     re.IGNORECASE,
 )
 
@@ -296,8 +302,15 @@ def _keyword_task_class(prompt: str) -> str:
 def _pick_for_class(candidates: list[ModelEntry], task_class: str) -> ModelEntry:
     """The model a task class maps to, chosen across ALL downloaded models by
     capability: light → smallest (fastest), heavy → largest (most capable).
-    Deterministic ties: params first, then id."""
-    ordered = sorted(candidates, key=lambda c: (c.params_b, c.id or 0))
+    Deterministic ties: params first, then id.
+
+    Models whose size is UNKNOWN (params_b <= 0 — a GGUF repo whose parameter
+    count couldn't be inferred) are set aside so they never masquerade as the
+    smallest (and hijack every light route) or block the largest pick. They are
+    used only when nothing has a known size."""
+    known = [c for c in candidates if (c.params_b or 0) > 0]
+    pool = known or candidates
+    ordered = sorted(pool, key=lambda c: (c.params_b, c.id or 0))
     return ordered[0] if task_class == TASK_LIGHT else ordered[-1]
 
 
@@ -340,29 +353,38 @@ async def choose_model(prompt: str) -> tuple[ModelEntry, str]:
         raise RuntimeError(
             "no downloaded model is ready — download one from the Models page"
         )
-    if len(candidates) == 1:
-        return candidates[0], "the only ready model"
+    # The configured router model is a CLASSIFIER, not an answer model — a
+    # 0.6-1B model shouldn't answer the user just because it's the smallest.
+    # Exclude it from the answer pool unless it's the only thing downloaded.
+    router = router_model_entry()
+    pool = [c for c in candidates if not (router and c.id == router.id)] or candidates
+    if len(pool) == 1:
+        return pool[0], "the only ready model"
 
     lease = await ensure_router()
     if lease is None:
         task_class = _keyword_task_class(prompt)
-        pick = _pick_for_class(candidates, task_class)
+        pick = _pick_for_class(pool, task_class)
         return pick, f"router model unavailable — {task_class} task by keywords"
 
     task_class = await _classify(prompt, lease)
     if task_class is None:
         task_class = _keyword_task_class(prompt)
-        pick = _pick_for_class(candidates, task_class)
+        pick = _pick_for_class(pool, task_class)
         return pick, f"router reply unclear — {task_class} task by keywords"
 
-    pick = _pick_for_class(candidates, task_class)
+    pick = _pick_for_class(pool, task_class)
     return pick, f"{task_class} task — routed by {lease.model_name}"
 
 
-async def ensure_serving(model: ModelEntry, push_status) -> Lease:
+async def ensure_serving(
+    model: ModelEntry, push_status, allow_fallback: bool = True
+) -> Lease:
     """A READY lease for `model`, loading it onto a GPU when necessary. When
-    every GPU is held by OTHER models, fall back to whatever is serving
-    rather than evicting someone's active model."""
+    every GPU is held by OTHER models, `allow_fallback` (Auto's flexible pick)
+    answers with whatever is already serving rather than evicting someone's
+    active model; an EXPLICIT pick passes ``allow_fallback=False`` so it raises
+    instead of silently answering with a different model than the user chose."""
     slug = opencode_model_id_for(model)
     for lease in engine_manager.ready_text_leases():
         if lease.model_slug == slug:
@@ -373,13 +395,14 @@ async def ensure_serving(model: ModelEntry, push_status) -> Lease:
         lease = await engine_manager.load(model)
     except LeaseHeldError:
         ready = engine_manager.ready_text_leases()
-        if ready:
+        if allow_fallback and ready:
             push_status(
                 f"every GPU is busy — answering with {ready[0].model_name} instead"
             )
             return ready[0]
         raise RuntimeError(
-            "no GPU is free and nothing is serving — unload an engine first"
+            f"{model.display_name} can't load — every GPU is busy. Try again "
+            "shortly, or pick a model that's already loaded."
         ) from None
 
     push_status(

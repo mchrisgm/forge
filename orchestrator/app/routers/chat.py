@@ -421,7 +421,12 @@ async def send_message(
             push_status(f"routed to {chosen.display_name} — {reason}")
         else:
             chosen = explicit_model
-        routed = await model_router.ensure_serving(chosen, push_status)
+        # Auto's pick is flexible (fall back to a serving model if every GPU is
+        # busy); an explicit pick is honored exactly (raise rather than answer
+        # with a different model than the user chose).
+        routed = await model_router.ensure_serving(
+            chosen, push_status, allow_fallback=is_auto
+        )
         answering = _model_for_lease(routed) or chosen
         return routed, routed.model_slug, _assemble(answering)
 
@@ -639,11 +644,29 @@ async def temporary_chat(body: TemporaryBody, user: User = Depends(current_user)
     """Incognito: streams a reply, stores nothing, reads no memory."""
     if not body.messages:
         raise HTTPException(400, "messages required")
-    # Temporary chats store nothing and shouldn't trigger model loads either:
-    # "auto" degrades to whatever is already serving (least-loaded lease).
+    # A specific downloaded model loads on demand (the picker offers every
+    # downloaded model, so a temporary chat must honor a non-serving pick too);
+    # "auto" degrades to whatever is already serving (least-loaded lease) rather
+    # than spinning the router up for a throwaway chat.
     slug = "" if body.model_slug == model_router.AUTO_SLUG else body.model_slug
-    lease = _select_lease(slug)
-    model = _model_for_lease(lease)
+    if slug:
+        chosen = model_router.model_for_slug(slug)
+        if chosen is None:
+            raise HTTPException(
+                409,
+                {
+                    "message": "that model isn't downloaded",
+                    "detail": f"{slug!r} is no longer available — pick another "
+                    "model, or download it from the Models page.",
+                },
+            )
+        lease = await model_router.ensure_serving(
+            chosen, lambda _detail: None, allow_fallback=False
+        )
+        model = _model_for_lease(lease) or chosen
+    else:
+        lease = _select_lease(slug)
+        model = _model_for_lease(lease)
     attachments = _own_uploads(body.attachment_ids, user)
 
     history = [
