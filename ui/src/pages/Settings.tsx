@@ -14,9 +14,11 @@ import {
 import { PageHeader } from "../components/layout";
 import {
   Button,
+  Chip,
   EmptyState,
   Field,
   SkeletonList,
+  TextArea,
   TextInput,
   Toggle,
 } from "../components/ui";
@@ -84,6 +86,101 @@ function HeadroomCard({ headroom }: { headroom: HeadroomStatus }) {
               : "Off"}
         </span>
       </p>
+    </section>
+  );
+}
+
+// ── Chat system prompt (admin) ──────────────────────────────────────────────
+// PATCH {chat_system_prompt} — "" (or the default verbatim) restores the
+// built-in default; the server reports the effective prompt + customized flag.
+
+function ChatSystemPromptCard({
+  prompt,
+  customized,
+  defaultPrompt,
+}: {
+  prompt: string;
+  customized: boolean;
+  defaultPrompt: string;
+}) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [draft, setDraft] = useState(prompt);
+
+  useEffect(() => setDraft(prompt), [prompt]);
+
+  const refresh = (data: Awaited<ReturnType<typeof api.patchSettings>>) => {
+    // PATCH returns the full payload with the re-resolved effective prompt —
+    // swap it in so the textarea and Customized chip update at once.
+    queryClient.setQueryData(["settings"], data);
+    void queryClient.invalidateQueries({ queryKey: ["settings"] });
+  };
+
+  const save = useMutation({
+    mutationFn: () => api.patchSettings({ chat_system_prompt: draft }),
+    onSuccess: (data) => {
+      refresh(data);
+      toast("success", "Chat system prompt saved");
+    },
+    onError: (err) => toast("error", errorMessage(err)),
+  });
+
+  const restore = useMutation({
+    mutationFn: () => api.patchSettings({ chat_system_prompt: "" }),
+    onSuccess: (data) => {
+      refresh(data);
+      toast("success", "Default chat system prompt restored");
+    },
+    onError: (err) => toast("error", errorMessage(err)),
+  });
+
+  const busy = save.isPending || restore.isPending;
+  const dirty = draft !== prompt;
+
+  return (
+    <section className="rounded-xl border border-border bg-surface p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-semibold text-text">Chat system prompt</h2>
+        {customized && <Chip color="text-info">Customized</Chip>}
+      </div>
+      <p className="mt-0.5 mb-3 text-sm text-muted">
+        Injected as the system prompt for every text model in chat — each
+        profile's personal instructions stack on top of it.
+      </p>
+      <TextArea
+        aria-label="Chat system prompt"
+        rows={12}
+        spellCheck={false}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder={defaultPrompt}
+        className="font-mono text-xs leading-relaxed"
+      />
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+        <span className="text-xs text-faint">
+          {draft.length.toLocaleString()} characters
+        </span>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={!customized || busy}
+            loading={restore.isPending}
+            onClick={() => restore.mutate()}
+          >
+            Restore default
+          </Button>
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={!dirty || busy}
+            loading={save.isPending}
+            onClick={() => save.mutate()}
+          >
+            Save
+          </Button>
+        </div>
+      </div>
     </section>
   );
 }
@@ -427,6 +524,14 @@ export default function Settings() {
           </form>
 
           <HeadroomCard headroom={settings.data.headroom} />
+
+          {user?.is_admin && (
+            <ChatSystemPromptCard
+              prompt={settings.data.chat_system_prompt}
+              customized={settings.data.chat_system_prompt_customized}
+              defaultPrompt={settings.data.chat_system_prompt_default}
+            />
+          )}
 
           {user?.is_admin && settings.data.oauth && (
             <OAuthAppsCard oauth={settings.data.oauth} />

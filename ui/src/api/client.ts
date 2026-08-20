@@ -414,6 +414,9 @@ export const api = {
     session_idle_min?: number;
     registry_cron?: string;
     headroom_enabled?: boolean;
+    /** Chat system prompt (admin) — "" (or the default verbatim) restores
+     *  the built-in default. */
+    chat_system_prompt?: string;
     /** OAuth app config (admin) — empty string clears a stored value. */
     github_oauth_client_id?: string;
     hf_oauth_client_id?: string;
@@ -657,24 +660,104 @@ export function temporaryChatStream(
   );
 }
 
+// ── <think> streaming splitter ──────────────────────────────────────────────
+
+const THINK_OPEN = "<think>";
+const THINK_CLOSE = "</think>";
+
+export interface ThinkSplitter {
+  /** Feed one content chunk; text routes to onText, think spans to onThinking. */
+  push(chunk: string): void;
+  /** End of stream — flush any held-back partial tag to the current side. */
+  flush(): void;
+}
+
+/**
+ * Stateful splitter for literal `<think>…</think>` spans inside a streamed
+ * content flow: text outside the tags goes to `onText`, text inside to
+ * `onThinking`. Chunk-boundary safe — a tag arriving split across chunks
+ * ("…<thi" + "nk>…") is held back (the longest chunk tail that is a prefix of
+ * the tag we're looking for) and flushed once disambiguated. Multiple think
+ * blocks are supported; a block left unclosed at stream end stays thinking.
+ */
+export function createThinkSplitter(handlers: {
+  onText: (fragment: string) => void;
+  onThinking: (fragment: string) => void;
+}): ThinkSplitter {
+  let inThink = false;
+  let pending = "";
+
+  const emit = (fragment: string) => {
+    if (!fragment) return;
+    if (inThink) handlers.onThinking(fragment);
+    else handlers.onText(fragment);
+  };
+
+  /** Longest tail of `buf` that is a strict prefix of `tag`, or "". */
+  const partialTail = (buf: string, tag: string): string => {
+    const max = Math.min(buf.length, tag.length - 1);
+    for (let len = max; len > 0; len--) {
+      const tail = buf.slice(buf.length - len);
+      if (tag.startsWith(tail)) return tail;
+    }
+    return "";
+  };
+
+  return {
+    push(chunk: string) {
+      let buf = pending + chunk;
+      pending = "";
+      for (;;) {
+        const tag = inThink ? THINK_CLOSE : THINK_OPEN;
+        const at = buf.indexOf(tag);
+        if (at !== -1) {
+          emit(buf.slice(0, at));
+          inThink = !inThink;
+          buf = buf.slice(at + tag.length);
+          continue;
+        }
+        // No full tag — emit everything except a possible split-tag tail,
+        // which waits for the next chunk (or flush) to disambiguate.
+        const tail = partialTail(buf, tag);
+        emit(tail ? buf.slice(0, buf.length - tail.length) : buf);
+        pending = tail;
+        return;
+      }
+    },
+    flush() {
+      emit(pending);
+      pending = "";
+    },
+  };
+}
+
 export interface ChatStreamHandlers {
-  /** A non-empty assistant content fragment arrived. */
+  /** A non-empty assistant ANSWER fragment arrived. When `onThinking` is
+   *  provided, `<think>…</think>` spans are split out of the content first;
+   *  without it, content passes through untouched (tags included). */
   onDelta: (fragment: string) => void;
+  /** Reasoning fragments: `delta.reasoning_content` strings plus the inside
+   *  of literal `<think>…</think>` spans found in `delta.content`. */
+  onThinking?: (delta: string) => void;
   /** An in-stream `data: {"error": "..."}` frame arrived. */
   onError?: (message: string) => void;
   /** The final `data: {"forge":"done", ...}` frame arrived. */
   onDone?: (frame: ChatDoneFrame) => void;
-  /** A `{"forge":"queued"|"running"|"idle"}` status frame arrived. "queued"
-   *  means the engine lane is busy (waiting for a free slot); "running" means
-   *  a slot opened; "idle" (reattach only) means nothing is generating. */
-  onStatus?: (state: "queued" | "running" | "idle") => void;
+  /** A `{"forge": …}` status frame arrived. "queued" means the engine lane is
+   *  busy (its `detail` names the busy lane); "running" means a slot opened;
+   *  "status" reports pre-token progress ("prompt sent to … — processing")
+   *  via `detail`; "idle" (reattach only) means nothing is generating. */
+  onStatus?: (
+    state: "queued" | "running" | "idle" | "status",
+    detail?: string,
+  ) => void;
 }
 
 /**
  * Consume a Forge chat SSE body: OpenAI chunk frames, possible in-stream
- * error frames, `{"forge":"queued"|"running"|"idle"}` status frames, all
- * terminated by a {"forge":"done"} frame ("[DONE]" markers from the upstream
- * engine are passed through and ignored here).
+ * error frames, `{"forge":"queued"|"running"|"status"|"idle"}` status frames,
+ * all terminated by a {"forge":"done"} frame ("[DONE]" markers from the
+ * upstream engine are passed through and ignored here).
  */
 export async function readChatStream(
   body: ReadableStream<Uint8Array>,
@@ -683,6 +766,14 @@ export async function readChatStream(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  // Splitting only engages when the caller can receive the think side —
+  // otherwise content passes through verbatim, exactly as before.
+  const splitter = handlers.onThinking
+    ? createThinkSplitter({
+        onText: handlers.onDelta,
+        onThinking: handlers.onThinking,
+      })
+    : null;
 
   const handleLine = (line: string): boolean => {
     const trimmed = line.trim();
@@ -702,21 +793,36 @@ export async function readChatStream(
       return false;
     }
     if (obj.forge === "done") {
+      splitter?.flush(); // an unclosed think block stays thinking
       handlers.onDone?.(obj as ChatDoneFrame);
       return true;
     }
     if (
       obj.forge === "queued" ||
       obj.forge === "running" ||
-      obj.forge === "idle"
+      obj.forge === "idle" ||
+      obj.forge === "status"
     ) {
-      handlers.onStatus?.(obj.forge);
+      handlers.onStatus?.(
+        obj.forge,
+        typeof obj.detail === "string" ? obj.detail : undefined,
+      );
       return false; // status frames are not terminal (the idle stream just ends)
     }
-    const fragment = (
-      obj as { choices?: { delta?: { content?: unknown } }[] }
-    ).choices?.[0]?.delta?.content;
-    if (typeof fragment === "string" && fragment) handlers.onDelta(fragment);
+    const delta = (
+      obj as {
+        choices?: { delta?: { content?: unknown; reasoning_content?: unknown } }[];
+      }
+    ).choices?.[0]?.delta;
+    const reasoning = delta?.reasoning_content;
+    if (typeof reasoning === "string" && reasoning) {
+      handlers.onThinking?.(reasoning);
+    }
+    const fragment = delta?.content;
+    if (typeof fragment === "string" && fragment) {
+      if (splitter) splitter.push(fragment);
+      else handlers.onDelta(fragment);
+    }
     return false;
   };
 
@@ -733,6 +839,7 @@ export async function readChatStream(
     }
     buffer += decoder.decode();
     if (buffer) handleLine(buffer);
+    splitter?.flush(); // stream ended without a done frame — drain the tail
   } finally {
     reader.releaseLock();
   }

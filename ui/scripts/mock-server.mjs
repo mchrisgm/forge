@@ -750,6 +750,32 @@ const settings = {
   },
 };
 
+// Chat system prompt (admin-editable) — mirrors chat_service.py's default.
+// The override lives in memory so save/restore round-trips in the mock.
+const DEFAULT_CHAT_SYSTEM_PROMPT = [
+  "You are Forge, an AI assistant running privately on your user's own hardware.",
+  "",
+  "Give direct answers. Lead with the answer itself, then add context only when",
+  "it genuinely helps. Skip preamble and never restate the question back. If",
+  "you don't know something, say so plainly instead of guessing.",
+  "",
+  "Match the format to the question: short questions get short answers in plain",
+  "prose. Use headings, lists, or tables only when structure makes the answer",
+  "clearer, and code blocks for code. Answer in the language the user writes in.",
+  "",
+  "You may be given extra context: the user's standing instructions, long-term",
+  "memories about them, attached files or images, and a summary of the earlier",
+  "conversation. Use it naturally — do not recite it back.",
+].join("\n");
+
+let chatSystemPromptOverride = ""; // "" = default in effect
+
+const chatSystemPromptView = () => ({
+  chat_system_prompt: chatSystemPromptOverride || DEFAULT_CHAT_SYSTEM_PROMPT,
+  chat_system_prompt_customized: Boolean(chatSystemPromptOverride),
+  chat_system_prompt_default: DEFAULT_CHAT_SYSTEM_PROMPT,
+});
+
 const connectors = JSON.parse(
   readFileSync(join(__dirname, "mock-connectors.json"), "utf8"),
 );
@@ -1018,7 +1044,13 @@ const gardenReply = [
   "```",
 ].join("\n");
 
+// Persisted reasoning: stored assistant turns can carry literal <think>
+// blocks — the UI extracts them into the collapsed "Thinking" expander and
+// keeps them out of the rendered answer.
 const gardenFollowUp = [
+  "<think>80 cm of head ≈ 0.08 bar (h·ρ·g ≈ 0.8 m × 1000 kg/m³ × 9.81 m/s² " +
+    "≈ 7.8 kPa). Regular pressure-compensating drippers need 1+ bar, so the " +
+    "advice must steer to gravity-rated emitters and short runs.</think>",
   "80 cm of head is only **0.08 bar**, so skip anything rated 1–4 bar:",
   "",
   "- Choose *gravity-rated* (unregulated) drippers — pressure-compensating ones barely open",
@@ -1349,41 +1381,72 @@ function sendSse(res, { events = [] } = {}) {
   });
 }
 
-/** Stream a Forge chat reply: OpenAI-style token deltas, then `[DONE]`, then
- *  the terminal `{"forge":"done"}` frame — the shape ChatView consumes for both
- *  a POST turn and a GET /stream reattach. Closes when finished. */
-function sendForgeStream(res, conversationId, text) {
+/** Stream a Forge chat reply the way the orchestrator does: the always-sent
+ *  `{"forge":"status"}` frame, a `<think>…</think>` span split across two
+ *  content chunks (the `</think>` tag straddles the chunk boundary, to
+ *  exercise the UI's boundary-safe think parser), OpenAI-style answer deltas,
+ *  then `[DONE]` and the terminal `{"forge":"done"}` frame — the shape
+ *  ChatView consumes for both a POST turn and a GET /stream reattach.
+ *  With `inflight: true` (reattach fixture) the frames generated "so far" —
+ *  status, the whole think span, half the answer — replay in one instant
+ *  burst, then the rest continues live. Closes when finished. */
+function sendForgeStream(res, conversationId, text, { inflight = false } = {}) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-store",
     Connection: "keep-alive",
   });
   res.write(": connected\n\n");
+
+  const frame = (payload) => `data: ${JSON.stringify(payload)}\n\n`;
+  const delta = (content) => frame({ choices: [{ delta: { content } }] });
+
+  const thinking =
+    "The user wants a quick, concrete answer. Sketch the steps, keep it " +
+    "short, and close with a check-in question.";
   const words = text.split(" ");
+  // Each entry: [sse payload, pause-before-writing ms].
+  const queue = [
+    [
+      frame({
+        forge: "status",
+        conversation_id: conversationId,
+        detail: "prompt sent to qwen3-coder-30b-a3b (llamacpp) — processing",
+      }),
+      60,
+    ],
+    // Think span in two chunks with the closing tag split mid-tag.
+    [delta(`<think>${thinking}</thi`), 900],
+    [delta("nk>"), 90],
+    ...words.map((w, i) => [delta((i === 0 ? "" : " ") + w), i === 0 ? 350 : 70]),
+  ];
+  // Reattach: everything up to mid-answer replays instantly (buffered frames),
+  // then a beat, then the remaining tokens stream live.
+  const replayCount = inflight ? 3 + Math.ceil(words.length / 2) : 0;
+
   const timers = [];
   let i = 0;
   const step = () => {
     if (res.writableEnded || res.destroyed) return;
-    if (i < words.length) {
-      const content = (i === 0 ? "" : " ") + words[i];
-      res.write(
-        `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`,
-      );
+    if (i < queue.length) {
+      res.write(queue[i][0]);
       i += 1;
-      timers.push(setTimeout(step, 70));
+      const next =
+        i < replayCount ? 0 : i === replayCount ? 400 : queue[i]?.[1] ?? 70;
+      timers.push(setTimeout(step, next));
       return;
     }
     res.write("data: [DONE]\n\n");
     res.write(
-      `data: ${JSON.stringify({
+      frame({
         forge: "done",
         conversation_id: conversationId,
         assistant_message_id: 999,
-      })}\n\n`,
+      }),
     );
     res.end();
   };
-  timers.push(setTimeout(step, 70));
+  timers.push(setTimeout(step, inflight ? 0 : queue[0][1]));
   res.on("close", () => {
     for (const t of timers) clearTimeout(t);
   });
@@ -1427,7 +1490,13 @@ function handleApi(req, res, url) {
   m = p.match(/^\/api\/chat\/conversations\/([^/]+)\/stream$/);
   if (m) {
     if (process.env.CHAT_INFLIGHT === "1") {
-      return sendForgeStream(res, m[1], "Here's a reply still being generated");
+      return sendForgeStream(
+        res,
+        m[1],
+        "Here's a reply that was already streaming before you reattached — " +
+          "the buffered half arrives instantly and the rest continues live.",
+        { inflight: true },
+      );
     }
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -1817,6 +1886,12 @@ function handleApi(req, res, url) {
             healthy: body.headroom_enabled ? true : null,
           };
         }
+        if (typeof body.chat_system_prompt === "string") {
+          // "" (or the default verbatim) restores the built-in default.
+          const value = body.chat_system_prompt.trim();
+          chatSystemPromptOverride =
+            value === DEFAULT_CHAT_SYSTEM_PROMPT.trim() ? "" : value;
+        }
         for (const key of [
           "github_oauth_client_id",
           "hf_oauth_client_id",
@@ -1824,10 +1899,18 @@ function handleApi(req, res, url) {
         ]) {
           if (typeof body[key] === "string") oauthSettings[key] = body[key];
         }
-        sendJson(res, { ...settings, oauth: settingsOauthView() });
+        sendJson(res, {
+          ...settings,
+          ...chatSystemPromptView(),
+          oauth: settingsOauthView(),
+        });
       });
     }
-    return sendJson(res, { ...settings, oauth: settingsOauthView() });
+    return sendJson(res, {
+      ...settings,
+      ...chatSystemPromptView(),
+      oauth: settingsOauthView(),
+    });
   }
   if (p === "/api/health") return sendJson(res, { ok: true });
 

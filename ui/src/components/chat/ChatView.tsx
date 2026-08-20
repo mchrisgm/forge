@@ -8,10 +8,14 @@
 // (closing the reader never stops the job), and returning RE-ATTACHES via GET
 // /conversations/{id}/stream — which replays the buffered tokens then streams
 // live to `forge:done`. On open we always reattach: an `idle` frame means
-// nothing is running (just show stored history), otherwise a live bubble picks
-// up the in-flight reply. `forge:queued`/`running` frames surface the
-// "waiting for a free slot" state. Because jobs are server-side, multiple
-// conversations generate at once; the composer lock is per open conversation.
+// nothing is running (just show stored history); otherwise the pending bubble
+// appears the moment the stream opens (eagerly when the history ends on a user
+// turn, else on the first frame) and replayed stage/thinking/answer frames
+// restore the live view. `forge:queued`/`status` frames drive the pre-token
+// stage line (busy lane, "prompt sent … — processing" + elapsed); reasoning
+// deltas and `<think>` spans stream into a collapsed Thinking expander.
+// Because jobs are server-side, multiple conversations generate at once; the
+// composer lock is per open conversation.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -40,7 +44,11 @@ import {
 } from "../ThinkingSelect";
 import { Button, EmptyState, LaneBadge, Spinner } from "../ui";
 import { Composer, type ImageProvider } from "./Composer";
-import { MessageBubble, type UiMessage } from "./messages";
+import {
+  MessageBubble,
+  splitStoredThinking,
+  type UiMessage,
+} from "./messages";
 import { SandboxContext, type SandboxRunner } from "./sandbox-context";
 
 const THINKING_STORAGE_KEY = "forge.thinking.chats";
@@ -67,6 +75,54 @@ function imageErrorMessage(err: unknown): string {
     }
   }
   return errorMessage(err);
+}
+
+/**
+ * Live stage line while a generation has produced no thinking/answer tokens
+ * yet. Queued shows the backend's detail verbatim (it names the busy lane);
+ * once processing starts, the status detail ("prompt sent to <model>
+ * (<engine>) — processing") gets a live elapsed-seconds ticker until the
+ * first token arrives.
+ */
+function PendingStageLine({
+  detail,
+  queued,
+}: {
+  detail?: string;
+  queued: boolean;
+}) {
+  const [elapsed, setElapsed] = useState(0);
+  const startedAtRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (queued) {
+      // Still waiting for a slot — the processing clock hasn't started.
+      startedAtRef.current = null;
+      setElapsed(0);
+      return;
+    }
+    startedAtRef.current ??= Date.now();
+    const timer = window.setInterval(() => {
+      const started = startedAtRef.current ?? Date.now();
+      setElapsed(Math.round((Date.now() - started) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [queued]);
+
+  return (
+    <div role="status" className="flex items-center gap-2 text-xs text-muted">
+      <Spinner size={14} />
+      <span className="min-w-0 break-words">
+        {detail ??
+          (queued
+            ? "Queued — waiting for a free slot…"
+            : "Contacting the model…")}
+      </span>
+      {!queued && elapsed > 0 && (
+        <span className="shrink-0 text-faint">· {elapsed}s</span>
+      )}
+    </div>
+  );
 }
 
 export function ChatView({
@@ -214,21 +270,33 @@ export function ChatView({
     setMessages(
       data.messages
         .filter((m) => m.role !== "system")
-        .map((m) => ({
-          key: `srv-${m.id}`,
-          role: m.role as "user" | "assistant",
-          content: m.content,
-          attachments: m.attachments,
-        })),
+        .map((m) => {
+          // Persisted assistant turns may carry literal <think> blocks —
+          // extract them into the expander; markdown only gets the answer.
+          const { thinking, answer } =
+            m.role === "assistant"
+              ? splitStoredThinking(m.content)
+              : { thinking: "", answer: m.content };
+          return {
+            key: `srv-${m.id}`,
+            role: m.role as "user" | "assistant",
+            content: answer,
+            thinking: thinking || undefined,
+            attachments: m.attachments,
+          };
+        }),
     );
   }, [conversation.data, streaming]);
 
   // Abort any in-flight generation when leaving the surface entirely.
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  // Auto-scroll as content grows.
+  // Auto-scroll as content (answer or thinking) grows.
   const fingerprint = messages
-    .map((m) => `${m.key}:${m.content.length}:${m.error ? 1 : 0}`)
+    .map(
+      (m) =>
+        `${m.key}:${m.content.length}:${m.thinking?.length ?? 0}:${m.error ? 1 : 0}`,
+    )
     .join("|");
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
@@ -273,10 +341,14 @@ export function ChatView({
   /** Re-attach to a possibly in-flight server-side generation for `id`.
    *  Replays buffered frames then streams live; a lone `idle` frame means
    *  nothing is running (the stored history already on screen is complete).
-   *  The live assistant bubble is created lazily so an idle stream leaves no
-   *  empty bubble behind. Detaching (abort on navigation/stop) never errors —
+   *  When the history ends on a user turn a generation is almost certainly in
+   *  flight, so the pending bubble (and the composer lock) appears the moment
+   *  the stream opens — `expectInFlight` — instead of waiting for the first
+   *  replayed frame; an idle frame tears it down again. Every other path
+   *  creates the bubble on the first frame of any kind (queued/status/
+   *  thinking/answer). Detaching (abort on navigation/stop) never errors —
    *  the job keeps running server-side. */
-  const reattach = async (id: string) => {
+  const reattach = async (id: string, expectInFlight: boolean) => {
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -287,13 +359,20 @@ export function ChatView({
       return; // couldn't probe — the stored history is already shown
     }
     if (!resp.body) return;
+    if (abortRef.current !== controller) {
+      // A send/switch superseded us while connecting — don't double-consume.
+      void resp.body.cancel().catch(() => undefined);
+      return;
+    }
 
     let assistantKey: string | null = null;
+    let sawIdle = false;
     const ensureBubble = (): string => {
       if (assistantKey) return assistantKey;
       const key = nextKey();
       assistantKey = key;
-      // Our live bubble beats server snapshots until the job persists.
+      // Our live bubble beats server snapshots until the job persists, and
+      // the composer lock engages so a second send stays blocked meanwhile.
       holdRef.current = id;
       setStreaming(true);
       setMessages((prev) => [
@@ -308,14 +387,42 @@ export function ChatView({
       ]);
       return key;
     };
+    const dropBubble = () => {
+      if (!assistantKey) return;
+      const key = assistantKey;
+      assistantKey = null;
+      setMessages((prev) => prev.filter((m) => m.key !== key));
+      setStreaming(false);
+      holdRef.current = null;
+    };
+
+    if (expectInFlight) ensureBubble();
 
     let streamError: string | null = null;
     try {
       await readChatStream(resp.body, {
-        onStatus: (state) => {
-          if (state === "idle") return; // nothing running — keep history
+        onStatus: (state, detail) => {
+          if (state === "idle") {
+            // Nothing running — the stored history is complete. Tear down the
+            // eagerly-created bubble, if any.
+            sawIdle = true;
+            dropBubble();
+            return;
+          }
           const key = ensureBubble();
-          patchAssistant(key, (m) => ({ ...m, queued: state === "queued" }));
+          patchAssistant(key, (m) => ({
+            ...m,
+            queued: state === "queued",
+            stageDetail: detail ?? m.stageDetail,
+          }));
+        },
+        onThinking: (delta) => {
+          const key = ensureBubble();
+          patchAssistant(key, (m) => ({
+            ...m,
+            thinking: (m.thinking ?? "") + delta,
+            queued: false,
+          }));
         },
         onDelta: (fragment) => {
           const key = ensureBubble();
@@ -346,7 +453,7 @@ export function ChatView({
     }
 
     if (abortRef.current !== controller) return; // superseded — leave it be
-    if (!assistantKey) return; // idle stream — stored history is complete
+    if (sawIdle || !assistantKey) return; // idle — stored history is complete
     finalizeAssistant(assistantKey, streamError, streamError == null);
     setStreaming(false);
     holdRef.current = null;
@@ -357,15 +464,22 @@ export function ChatView({
   };
 
   // On open (mount or switched-to), once history has loaded, probe the stream
-  // to reattach to any in-flight generation. Runs once per visit; skipped while
-  // we're already streaming our own send into this conversation.
+  // to reattach to any in-flight generation. Runs once per visit — switching
+  // away resets reattachedForRef, so returning (A→B→A, repeatedly) re-probes
+  // every time; skipped while we're already streaming our own send into this
+  // conversation.
   useEffect(() => {
     const id = conversationId;
     if (id == null || streaming) return;
     if (reattachedForRef.current === id) return;
-    if (!conversation.data || conversation.data.id !== id) return;
+    const data = conversation.data;
+    if (!data || data.id !== id) return;
     reattachedForRef.current = id;
-    void reattach(id);
+    // History ending on a user turn = a reply is (very likely) generating —
+    // show the pending state immediately rather than on the first frame.
+    const turns = data.messages.filter((m) => m.role !== "system");
+    const lastIsUser = turns[turns.length - 1]?.role === "user";
+    void reattach(id, lastIsUser);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId, streaming, conversation.data]);
 
@@ -442,11 +556,19 @@ export function ChatView({
       }
       let streamError: string | null = null;
       await readChatStream(resp.body, {
-        onStatus: (state) =>
-          // A busy lane queues the job first; clear it once a slot opens.
+        onStatus: (state, detail) =>
+          // A busy lane queues the job first (detail names the lane); the
+          // always-sent status frame then carries the "prompt sent …" line.
           patchAssistant(assistantKey, (m) => ({
             ...m,
             queued: state === "queued",
+            stageDetail: detail ?? m.stageDetail,
+          })),
+        onThinking: (delta) =>
+          patchAssistant(assistantKey, (m) => ({
+            ...m,
+            thinking: (m.thinking ?? "") + delta,
+            queued: false,
           })),
         onDelta: (fragment) =>
           patchAssistant(assistantKey, (m) => ({
@@ -648,9 +770,13 @@ export function ChatView({
   const canToggleTemp =
     conversationId == null && messages.length === 0 && !streaming;
   const lastMessage = messages[messages.length - 1];
+  // Pending stage line: only until the first thinking/answer token — the
+  // Thinking expander (then the streamed text) takes over from there.
   const waitingForFirstToken =
-    streaming && lastMessage?.role === "assistant" && !lastMessage.content;
-  const waitingIsQueued = waitingForFirstToken && lastMessage?.queued === true;
+    streaming &&
+    lastMessage?.role === "assistant" &&
+    !lastMessage.content &&
+    !lastMessage.thinking;
 
   return (
     <SandboxContext.Provider value={sandboxRunner}>
@@ -817,6 +943,7 @@ export function ChatView({
           if (
             m.role === "assistant" &&
             !m.content &&
+            !m.thinking &&
             !m.error &&
             !m.pendingImage &&
             m.attachments.length === 0
@@ -858,16 +985,12 @@ export function ChatView({
           </div>
         )}
 
-        {waitingForFirstToken && (
-          <div
-            role="status"
-            className="flex items-center gap-2 text-xs text-muted"
-          >
-            <Spinner size={14} />
-            {waitingIsQueued
-              ? "Queued — waiting for a free slot…"
-              : "Generating…"}
-          </div>
+        {waitingForFirstToken && lastMessage && (
+          <PendingStageLine
+            key={lastMessage.key}
+            detail={lastMessage.stageDetail}
+            queued={lastMessage.queued === true}
+          />
         )}
         <div ref={bottomRef} />
       </div>
