@@ -258,3 +258,72 @@ class TestSglangSelection:
         )
         assert r.status_code == 200, r.text
         assert r.json()["engine"] == "llamacpp"
+
+
+# ── TabbyAPI (ExLlamaV3) lane ───────────────────────────────────────────────
+
+
+class TestTabbyLane:
+    def test_exl3_checkpoint_routes_to_tabby(self):
+        lane, reason = detect_lane(
+            HubFacts(params_b=14.0, model_type="qwen2", quant_method="exl3")
+        )
+        assert lane == "tabby"
+        assert "ExLlamaV3" in reason
+
+    def test_exl2_checkpoint_routes_to_tabby(self):
+        lane, _ = detect_lane(
+            HubFacts(params_b=7.0, model_type="llama", quant_method="exl2")
+        )
+        assert lane == "tabby"
+
+    def test_oversized_exl3_is_refused_not_misrouted(self):
+        lane, reason = detect_lane(
+            HubFacts(params_b=70.0, model_type="llama", quant_method="exl3")
+        )
+        assert lane is None
+        assert "lower-bpw" in reason
+
+    def test_launch_command_shape(self):
+        settings = get_settings()
+        from app.services.engine_manager import build_tabby_command
+
+        model = SimpleNamespace(
+            hf_repo="turboderp/Qwen3-14B-exl3",
+            display_name="Qwen3 14B exl3",
+            file_path="hf/turboderp__Qwen3-14B-exl3",
+            engine=EngineKind.tabby,
+            quant=Quant.exl3,
+            ctx_max=16384,
+            params_b=14.0,
+            tool_call_format=ToolCallFormat.hermes,
+        )
+        cmd = build_tabby_command(model, settings)
+        joined = " ".join(cmd)
+        assert joined.startswith("main.py --host 0.0.0.0")  # entrypoint is python3
+        assert f"--port {settings.tabby_port}" in joined
+        assert "--disable-auth true" in joined
+        assert "--model-dir /data/models/hf" in joined
+        assert "--model-name turboderp__Qwen3-14B-exl3" in joined
+        assert "--max-seq-len 16384" in joined
+
+    def test_port_and_capacity(self):
+        settings = get_settings()
+        assert engine_port(EngineKind.tabby, settings) == settings.tabby_port
+        lease = SimpleNamespace(engine=EngineKind.tabby)
+        assert lease_capacity(lease) == settings.tabby_max_concurrency
+
+    def test_search_add_maps_the_tabby_lane(
+        self, api, auth_headers, resolved, download_spy
+    ):
+        resolved.update(lane="tabby", reason="exl3 fits", params_b=14.0)
+        r = api.post(
+            "/api/models/search/add",
+            json={"hf_repo": TEXT_REPO, "kind": "text"},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200, r.text
+        entry = entry_for(TEXT_REPO)
+        assert entry.engine == EngineKind.tabby
+        assert entry.quant == Quant.exl3
+        assert download_spy == [TEXT_REPO]

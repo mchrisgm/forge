@@ -113,6 +113,7 @@ def engine_port(engine: EngineKind, settings: Settings) -> int:
         EngineKind.llamacpp: settings.llamacpp_port,
         EngineKind.vllm: settings.vllm_port,
         EngineKind.sglang: settings.sglang_port,
+        EngineKind.tabby: settings.tabby_port,
         EngineKind.airllm: settings.airllm_port,
         EngineKind.imagegen: settings.imagegen_port,
     }[engine]
@@ -210,6 +211,27 @@ def build_sglang_command(
     if model.tool_call_format.value != "none":
         cmd += ["--tool-call-parser", _sglang_parser(model)]
     return cmd
+
+
+def build_tabby_command(model: ModelEntry, settings: Settings) -> list[str]:
+    """TabbyAPI (ExLlamaV3) launch args. The image's entrypoint is bare
+    `python3`, so the command starts at main.py; every config key is also a
+    CLI flag. Auth is disabled — the lane lives on forge-internal only, the
+    same trust posture as every other engine."""
+    ctx = min(model.ctx_max or 16384, 16384)
+    # model_dir + model_name: tabby loads <model_dir>/<model_name>. The
+    # snapshot lives at /data/models/<file_path>.
+    path = model.file_path or ""
+    parent, _, name = path.rpartition("/")
+    return [
+        "main.py",
+        "--host", "0.0.0.0",
+        "--port", str(settings.tabby_port),
+        "--disable-auth", "true",
+        "--model-dir", f"/data/models/{parent}" if parent else "/data/models",
+        "--model-name", name or path,
+        "--max-seq-len", str(ctx),
+    ]
 
 
 def build_imagegen_env(model: ModelEntry, settings: Settings) -> dict[str, str]:
@@ -574,6 +596,9 @@ class EngineManager:
         elif model.engine == EngineKind.sglang:
             image = settings.sglang_image
             command = build_sglang_command(model, settings, len(lease.gpu_ids))
+        elif model.engine == EngineKind.tabby:
+            image = settings.tabby_image
+            command = build_tabby_command(model, settings)
         elif model.engine == EngineKind.imagegen:
             image = settings.imagegen_image
             command = None

@@ -498,7 +498,7 @@ class TestStatusShape:
 
         settings = get_settings()
         engines = status["engines"]
-        assert set(engines) == {"llamacpp", "vllm", "sglang", "airllm", "imagegen"}
+        assert set(engines) == {"llamacpp", "vllm", "sglang", "tabby", "airllm", "imagegen"}
         assert engines["llamacpp"]["port"] == settings.llamacpp_port
         assert engines["llamacpp"]["active_on"] == [0]
         assert engines["vllm"]["active_on"] == []

@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     # more (vLLM batches internally; this just bounds how many jobs it fans in).
     vllm_max_concurrency: int = 8
     sglang_max_concurrency: int = 8  # same role as vllm's: bound the fan-in
+    tabby_max_concurrency: int = 4   # exllamav3 batches, but more modestly
     # Safety net for a wedged engine: if a background generation receives no new
     # output for this long, Forge aborts it so the job reaches a terminal state
     # and frees its lane instead of hanging every reader forever. Generous by
@@ -77,6 +78,9 @@ class Settings(BaseSettings):
     llamacpp_image: str = "ghcr.io/ggml-org/llama.cpp:server-cuda"
     vllm_image: str = "vllm/vllm-openai:v0.10.1"
     sglang_image: str = "lmsysorg/sglang:v0.5.17"
+    # TabbyAPI publishes rolling tags only (latest/cu13, no semver) — pin a
+    # digest via FORGE_TABBY_IMAGE in .env for reproducible boxes.
+    tabby_image: str = "ghcr.io/theroyallab/tabbyapi:latest"
     airllm_image: str = "forge-airllm"
     imagegen_image: str = "forge-imagegen"
 
@@ -84,6 +88,7 @@ class Settings(BaseSettings):
     llamacpp_port: int = 8081
     vllm_port: int = 8082
     sglang_port: int = 8085
+    tabby_port: int = 8086
     airllm_port: int = 8083
     imagegen_port: int = 8084
 

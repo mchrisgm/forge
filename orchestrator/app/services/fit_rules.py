@@ -172,8 +172,11 @@ _NATIVE_MODEL_TYPES = _SGLANG_PREFERRED_TYPES | {
 }
 
 # quantization_config quant_method values 4-bit-ish enough to use the AWQ
-# weight sizing; anything else quantized is sized like fp8 (~1.1 B/param).
-_Q4_METHODS = {"awq", "gptq", "compressed-tensors", "quark", "bitsandbytes"}
+# weight sizing (EXL3/EXL2 average ~4 bpw); anything else quantized is sized
+# like fp8 (~1.1 B/param).
+_Q4_METHODS = {
+    "awq", "gptq", "compressed-tensors", "quark", "bitsandbytes", "exl3", "exl2",
+}
 
 
 @dataclass(frozen=True)
@@ -237,6 +240,19 @@ def detect_lane(
 
     native = facts.model_type in _NATIVE_MODEL_TYPES
     servable_on_gpu = native or (not facts.custom_code and bool(facts.model_type))
+
+    # EXL3/EXL2 checkpoints belong to the TabbyAPI (ExLlamaV3) lane — the
+    # consumer-GPU specialist format; SGLang/vLLM cannot load them at all.
+    if facts.quant_method in ("exl3", "exl2"):
+        if _fits_gpu(facts, ctx, budgets):
+            return "tabby", (
+                f"{facts.quant_method} quantization fits in VRAM; served by "
+                "TabbyAPI (ExLlamaV3)"
+            )
+        return None, (
+            f"this {facts.quant_method} quantization is too large for the "
+            "VRAM budget — pick a lower-bpw build"
+        )
 
     # A checkpoint already quantized (or small enough in bf16) that fits VRAM
     # beats any conversion. SGLang is the default native server; vLLM keeps

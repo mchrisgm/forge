@@ -19,6 +19,7 @@ class EngineKind(str, Enum):
     llamacpp = "llamacpp"
     vllm = "vllm"
     sglang = "sglang"  # SGLang (RadixAttention) — native safetensors serving
+    tabby = "tabby"  # TabbyAPI serving ExLlamaV3 — EXL3/EXL2 quants
     airllm = "airllm"
     imagegen = "imagegen"  # diffusers-based text-to-image lane
 
@@ -29,6 +30,7 @@ class Quant(str, Enum):
     # SGLang serves the checkpoint as published (bf16/fp16 or its embedded
     # quantization_config — fp8/gptq/awq — auto-detected at load).
     safetensors = "safetensors"
+    exl3 = "exl3"  # ExLlamaV3 (or legacy EXL2) quantized checkpoint
     fp16_airllm = "fp16-airllm"
     fp16_diffusers = "fp16-diffusers"
 

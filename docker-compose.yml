@@ -171,6 +171,20 @@ services:
               count: 1
               capabilities: [gpu]
 
+  tabby:
+    profiles: ["engines"]
+    image: ${FORGE_TABBY_IMAGE:-ghcr.io/theroyallab/tabbyapi:latest}
+    volumes:
+      - models:/data/models
+    networks: [forge-internal]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   airllm:
     profiles: ["engines"]
     build: ./engines/airllm

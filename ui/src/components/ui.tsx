@@ -180,6 +180,7 @@ const LANE_STYLES: Record<string, string> = {
   llamacpp: "text-lane-llamacpp border-lane-llamacpp/35 bg-lane-llamacpp/10",
   vllm: "text-lane-vllm border-lane-vllm/35 bg-lane-vllm/10",
   sglang: "text-lane-sglang border-lane-sglang/35 bg-lane-sglang/10",
+  tabby: "text-lane-tabby border-lane-tabby/35 bg-lane-tabby/10",
   airllm: "text-lane-airllm border-lane-airllm/35 bg-lane-airllm/10",
   imagegen: "text-lane-imagegen border-lane-imagegen/35 bg-lane-imagegen/10",
 };

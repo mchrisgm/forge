@@ -62,6 +62,7 @@ DEFAULT_QUANT = {
     EngineKind.llamacpp: Quant.gguf_q4_k_m,
     EngineKind.vllm: Quant.awq,
     EngineKind.sglang: Quant.safetensors,
+    EngineKind.tabby: Quant.exl3,
     EngineKind.airllm: Quant.fp16_airllm,
 }
 
@@ -253,6 +254,9 @@ def _artifact_for_lane(lane: str, hf_repo: str, resolved: dict):
     llamacpp lane with no usable single-file GGUF."""
     if lane == "vllm":
         return EngineKind.vllm, Quant.awq, hf_repo, ""
+    if lane == "tabby":
+        # EXL3/EXL2 quantized checkpoint — full snapshot, no separate artifact.
+        return EngineKind.tabby, Quant.exl3, hf_repo, ""
     if lane == "sglang":
         # SGLang serves the checkpoint as published (bf16 or its embedded
         # quantization) — full snapshot, no separate artifact.
@@ -269,6 +273,7 @@ def _artifact_for_lane(lane: str, hf_repo: str, resolved: dict):
 LANE_NOTE = {
     "vllm": "Added from Hub search — AWQ build assigned to the vLLM fast lane.",
     "sglang": "Added from Hub search — served natively by SGLang.",
+    "tabby": "Added from Hub search — EXL quantization on the TabbyAPI lane.",
     "llamacpp-full-gpu": "Added from Hub search — GGUF fits fully in VRAM.",
     "llamacpp-offload": "Added from Hub search — GGUF runs with CPU offload.",
     "airllm": "Added from Hub search — AirLLM slow lane (chat-only).",

@@ -14,7 +14,7 @@ watches Hugging Face for new models that fit your hardware and files
 suggestions; nothing is downloaded without your approval.
 
 Under the hood, a FastAPI **orchestrator** is the brain: it manages per-GPU
-engine leases across four text-inference lanes (llama.cpp, vLLM, SGLang, AirLLM), spawns
+engine leases across five text-inference lanes (llama.cpp, vLLM, SGLang, TabbyAPI/ExLlamaV3, AirLLM), spawns
 one sandboxed [OpenCode](https://opencode.ai) container per coding session over
 the host Docker socket, streams everything to a custom React **PWA** you can
 install on your phone, and wires MCP connectors (GitHub, web fetch, SearXNG
@@ -40,9 +40,10 @@ every session.
    │ llama.cpp :8081  (GPU) │   │ session-<id>│  │ searxng       │
    │ vLLM      :8082  (GPU) │   │ OpenCode    │  │ mcp-playwright│
    │ SGLang    :8085  (GPU) │◄──┤ :4096       │  └───────────────┘
-   │ AirLLM    :8083  (GPU) │   │ /workspace  │
-   └────────────────────────┘   │ /skills:ro  │   × N parallel sessions
-     OpenAI-compatible /v1      └─────────────┘
+   │ TabbyAPI  :8086  (GPU) │   │ /workspace  │
+   │ AirLLM    :8083  (GPU) │   │ /skills:ro  │   × N parallel sessions
+   └────────────────────────┘   └─────────────┘
+     OpenAI-compatible /v1
 ```
 
 The PWA never talks to session containers directly — the orchestrator proxies
@@ -177,7 +178,7 @@ in the parallel-runs view.
 
 ## Engine lanes
 
-Five engine lanes sit behind the same OpenAI-compatible surface; the
+Six engine lanes sit behind the same OpenAI-compatible surface; the
 orchestrator enforces **one engine per GPU** (loading onto a busy GPU returns
 HTTP 409 with the lease holders). With one GPU that means one engine at a
 time; with several, each GPU serves its own model concurrently, and the
@@ -191,6 +192,7 @@ PLAN §9 (budgets are per GPU):
 |---|---|---|
 | SGLang (11 GB VRAM) | any native safetensors that fits: ≤ ~4B bf16, bigger with embedded awq/gptq/fp8 | Qwen3 4B bf16, 7B AWQ |
 | vLLM (11 GB VRAM) | ≤ 15B dense @ 4-bit AWQ variant builds, 16k ctx | Qwen coder 14B AWQ |
+| TabbyAPI / ExLlamaV3 (11 GB VRAM) | EXL3/EXL2 quants, 2–6 bpw — best quality-per-GB on consumer cards | 14B exl3 4bpw |
 | llama.cpp full-GPU | GGUF ≤ ~10 GB file | 14B Q4_K_M |
 | llama.cpp offload | GGUF ≤ ~40 GB file (VRAM + 32 GB RAM), MoE strongly preferred | 30B-A3B class Q4/Q5 |
 | AirLLM | ≤ 70B fp16-from-disk, **chat-only** | 70B instruct |
@@ -206,7 +208,10 @@ variant → vLLM; too big but standard → AirLLM. It also refuses honestly:
 a speculative-decoding **draft** model (e.g. `RadixArk/Kimi-K3-DSpark`, a
 SpecForge DSpark checkpoint that accelerates a target model inside SGLang)
 is named as such instead of being sent to a lane that can never chat with
-it, and a custom-code architecture with no GGUF conversion says so.
+it, and a custom-code architecture with no GGUF conversion says so. EXL3/EXL2
+checkpoints route to the TabbyAPI lane (nothing else can load them).
+The full engine survey — what was added, what was evaluated and skipped,
+and why — lives in [docs/engines.md](docs/engines.md).
 
 Notes:
 
