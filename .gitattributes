@@ -1,0 +1,6 @@
+# Windows PowerShell 5.1 fails to parse setup.ps1 with LF endings (the
+# #Requires/block-comment header and here-strings both break), so pin CRLF.
+*.ps1 text eol=crlf
+
+# These run inside Linux containers — CRLF would break the shebang.
+*.sh  text eol=lf
