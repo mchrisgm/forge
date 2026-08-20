@@ -5,6 +5,14 @@
 # torch>=2.4 requirement without a 2+ GB pip download of torch itself.
 FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
+# torch pulls in Triton, which JIT-compiles its CUDA driver shim (driver.c)
+# on first use and shells out to a C compiler. The -runtime base ships no
+# toolchain, so 4bit/bitsandbytes generation failed with "Failed to find C
+# compiler. Please specify via CC environment variable." gcc is the smallest
+# package that satisfies triton/runtime/build.py.
+RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
+ENV CC=gcc
+
 # airllm pulls in transformers/accelerate/safetensors/sentencepiece;
 # bitsandbytes is required for compression='4bit' (block-wise quantization).
 RUN pip install --no-cache-dir \
