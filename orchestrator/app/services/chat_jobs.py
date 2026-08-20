@@ -210,47 +210,59 @@ class ChatJobManager:
         messages: list[dict],
         post_exchange: Callable[[str], Awaitable[None]] | None,
     ) -> None:
-        sem = _slots_for(lease)
-        # Only announce queueing when a slot is genuinely unavailable — the
-        # common uncontended path streams tokens with no extra status frames.
-        was_queued = sem.locked()
-        if was_queued:
-            job.push(_frame({"forge": "queued", "conversation_id": job.conversation_id}))
-        await sem.acquire()
+        # Whatever happens below, the job MUST reach a terminal state and wake
+        # its subscribers — a stuck 'running' job would hang every reader on it.
         try:
-            job.state = "running"
+            sem = _slots_for(lease)
+            # Announce queueing only when a slot is genuinely unavailable — the
+            # common uncontended path streams tokens with no extra status frame.
+            was_queued = sem.locked()
             if was_queued:
                 job.push(
-                    _frame({"forge": "running", "conversation_id": job.conversation_id})
+                    _frame({"forge": "queued", "conversation_id": job.conversation_id})
                 )
+            await sem.acquire()
             try:
+                job.state = "running"
+                if was_queued:
+                    job.push(
+                        _frame(
+                            {"forge": "running", "conversation_id": job.conversation_id}
+                        )
+                    )
                 async for frame in chat_service.stream_completion(
                     lease.base_url, model_slug, messages, job.collected
                 ):
                     job.push(frame)
-            except Exception as exc:  # engine/network failure mid-stream
-                log.exception("chat generation failed")
-                job.error = str(exc)
-                job.push(_frame({"error": f"generation failed: {exc}"}))
+            finally:
+                sem.release()
+        except asyncio.CancelledError:
+            job.error = "cancelled"
+            raise
+        except Exception as exc:  # engine/network failure, or a bug below
+            log.exception("chat generation failed")
+            job.error = str(exc)
+            job.push(_frame({"error": f"generation failed: {exc}"}))
         finally:
-            sem.release()
-
-        assistant_id = self._persist(job)
-        job.assistant_message_id = assistant_id
-        job.state = "error" if job.error else "done"
-        job.push(
-            _frame(
-                {
-                    "forge": "done",
-                    "conversation_id": job.conversation_id,
-                    "assistant_message_id": assistant_id,
-                }
+            assistant_id = None
+            try:
+                assistant_id = self._persist(job)
+            except Exception:
+                log.exception("failed to persist chat generation")
+            job.assistant_message_id = assistant_id
+            job.state = "error" if job.error else "done"
+            job.push(
+                _frame(
+                    {
+                        "forge": "done",
+                        "conversation_id": job.conversation_id,
+                        "assistant_message_id": assistant_id,
+                    }
+                )
             )
-        )
-        job._finish()
-
-        if assistant_id and post_exchange is not None:
-            memory.schedule_background(post_exchange("".join(job.collected)))
+            job._finish()
+            if assistant_id and post_exchange is not None and not job.error:
+                memory.schedule_background(post_exchange("".join(job.collected)))
 
     def _persist(self, job: ChatJob) -> int | None:
         """Save whatever streamed — server-side, so a detached client's partial
