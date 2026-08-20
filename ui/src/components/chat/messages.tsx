@@ -17,6 +17,9 @@ export interface UiMessage {
   attachments: AttachmentMeta[];
   /** True while tokens are still streaming into this message. */
   streaming?: boolean;
+  /** The engine lane is busy — this turn is waiting for a free slot. Cleared
+   *  when generation starts (forge:running) or the first token arrives. */
+  queued?: boolean;
   /** An image generation is in flight — renders a placeholder bubble. */
   pendingImage?: { prompt: string };
   /** Temporary-mode generation: the image exists only in this tab (data

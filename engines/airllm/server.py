@@ -32,9 +32,11 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -50,12 +52,60 @@ MODEL_NAME = os.environ.get("AIRLLM_MODEL_NAME", "") or (
 )
 PORT = int(os.environ.get("AIRLLM_PORT", "8083"))
 MAX_TOKENS_CAP = int(os.environ.get("AIRLLM_MAX_TOKENS", "512"))
+# Must match the compression passed to AutoModel.from_pretrained below —
+# AirLLM names its split dir "splitted_model.<compression>".
+COMPRESSION = "4bit"
 # Prompt-side truncation guard: AirLLM throughput is seconds-per-token, so an
 # unbounded prompt would take hours before the first generated token.
 MAX_PROMPT_TOKENS = int(os.environ.get("AIRLLM_MAX_PROMPT_TOKENS", "4096"))
 STREAM_WORDS_PER_CHUNK = 4
 
 app = FastAPI(title="forge-airllm", version="1.0")
+
+def _repair_split_cache(shards_dir: str) -> None:
+    """Drop an inconsistent AirLLM layer-split cache so it rebuilds cleanly.
+
+    AirLLM splits the model into per-layer safetensors under
+    ``<shards_dir>/splitted_model.<compression>/`` and marks each finished
+    shard with a sibling ``<layer>.safetensors.done`` file. It decides the
+    split is complete from the presence of the file AND its marker. On the slow
+    lane a split is frequently interrupted (idle reap, OOM, unload) or a shard
+    goes missing while its marker survives — AirLLM then trusts the marker and
+    later dies at read time with 'No such file … model.embed_tokens.safetensors'.
+
+    We only touch a cache that is provably inconsistent, so a healthy cache is
+    preserved (re-splitting a 70B model costs hours). Inconsistent means any of:
+    a ``.done`` marker whose shard is missing or empty; a shard with no marker
+    (killed mid-write); or a non-empty dir with no markers at all.
+    """
+    split_dir = Path(shards_dir) / f"splitted_model.{COMPRESSION}"
+    if not split_dir.is_dir():
+        return
+    entries = list(split_dir.iterdir())
+    if not entries:
+        return
+    markers = [p for p in entries if p.name.endswith(".safetensors.done")]
+    shards = [p for p in entries if p.name.endswith(".safetensors")]
+
+    reason = ""
+    if not markers:
+        reason = "no completion markers (partial split)"
+    for marker in markers:
+        shard = marker.with_name(marker.name[: -len(".done")])
+        if not shard.exists() or shard.stat().st_size == 0:
+            reason = f"shard for {marker.name} is missing or empty"
+            break
+    if not reason:
+        for shard in shards:
+            if not shard.with_name(shard.name + ".done").exists():
+                reason = f"{shard.name} has no completion marker"
+                break
+    if reason:
+        log.warning(
+            "clearing inconsistent AirLLM split cache %s (%s)", split_dir, reason
+        )
+        shutil.rmtree(split_dir, ignore_errors=True)
+
 
 # ---------------------------------------------------------------------------
 # Model state — loaded lazily on the first completion request, never by the
@@ -82,13 +132,14 @@ class _ModelState:
             raise RuntimeError("AIRLLM_MODEL_PATH is not set")
         from airllm import AutoModel  # heavy import — deferred on purpose
 
-        kwargs: dict[str, Any] = {"compression": "4bit"}
+        kwargs: dict[str, Any] = {"compression": COMPRESSION}
         hf_token = os.environ.get("HF_TOKEN", "")
         if hf_token:
             kwargs["hf_token"] = hf_token
         shards_dir = os.environ.get("AIRLLM_SHARDS_DIR", "")
         if shards_dir:
             kwargs["layer_shards_saving_path"] = shards_dir
+            _repair_split_cache(shards_dir)
         log.info("loading AirLLM model %r (this can take a long time)", MODEL_PATH)
         t0 = time.monotonic()
         model = AutoModel.from_pretrained(MODEL_PATH, **kwargs)

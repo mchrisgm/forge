@@ -1,5 +1,6 @@
 import { announceUnauthorized, getToken } from "../lib/auth";
 import type {
+  ActiveGeneration,
   AuthResult,
   AuthStatus,
   CatalogSkill,
@@ -193,6 +194,10 @@ export const api = {
   deleteConversation: (id: string) =>
     del<{ ok: boolean }>(`/api/chat/conversations/${id}`),
   chatStatus: () => get<ChatStatus>("/api/chat/status"),
+  /** Which of the caller's conversations are generating right now — polled to
+   *  badge the conversation list. Generation is server-side, so this stays
+   *  accurate whether or not the chat is currently open. */
+  activeGenerations: () => get<ActiveGeneration[]>("/api/chat/active"),
   /** Generate an image in chat — can take minutes; resolves with the upload. */
   generateImage: (body: {
     prompt: string;
@@ -472,6 +477,48 @@ async function streamPost(
 }
 
 /**
+ * GET a streaming endpoint and return the raw Response so the caller can
+ * consume `response.body` incrementally. The GET twin of streamPost — used to
+ * RE-ATTACH to a server-side generation (no body to send).
+ * Throws ApiError on HTTP failure; AbortError is rethrown untouched.
+ */
+async function streamGet(path: string, signal?: AbortSignal): Promise<Response> {
+  const headers = new Headers();
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+
+  let resp: Response;
+  try {
+    resp = await fetch(path, { method: "GET", headers, signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new ApiError(0, "Network error — is the orchestrator reachable?");
+  }
+
+  if (resp.status === 401) {
+    announceUnauthorized();
+    throw new ApiError(401, "Not authenticated");
+  }
+  if (!resp.ok) {
+    let detail: unknown = null;
+    const text = await resp.text().catch(() => "");
+    if (text) {
+      try {
+        const parsed: unknown = JSON.parse(text);
+        detail =
+          parsed && typeof parsed === "object" && "detail" in (parsed as object)
+            ? (parsed as { detail: unknown }).detail
+            : parsed;
+      } catch {
+        detail = text;
+      }
+    }
+    throw new ApiError(resp.status, detail ?? `HTTP ${resp.status}`);
+  }
+  return resp;
+}
+
+/**
  * Start a streaming chat completion against a loaded engine.
  * Returns the raw Response (text/event-stream of OpenAI chunk frames ending
  * with `data: [DONE]`) so callers can consume `response.body` incrementally.
@@ -525,6 +572,22 @@ export function conversationMessageStream(
   );
 }
 
+/**
+ * GET /api/chat/conversations/{id}/stream — RE-ATTACH to an in-flight
+ * generation. Replays every frame produced so far then streams live to the
+ * `forge:done` frame; emits a single `{"forge":"idle"}` frame when nothing is
+ * running. Consume the returned body with readChatStream, same as a POST turn.
+ */
+export function conversationReattachStream(
+  conversationId: string,
+  signal?: AbortSignal,
+): Promise<Response> {
+  return streamGet(
+    `/api/chat/conversations/${conversationId}/stream`,
+    signal,
+  );
+}
+
 /** POST /api/chat/temporary — incognito turn; the client keeps the history. */
 export function temporaryChatStream(
   body: {
@@ -556,12 +619,17 @@ export interface ChatStreamHandlers {
   onError?: (message: string) => void;
   /** The final `data: {"forge":"done", ...}` frame arrived. */
   onDone?: (frame: ChatDoneFrame) => void;
+  /** A `{"forge":"queued"|"running"|"idle"}` status frame arrived. "queued"
+   *  means the engine lane is busy (waiting for a free slot); "running" means
+   *  a slot opened; "idle" (reattach only) means nothing is generating. */
+  onStatus?: (state: "queued" | "running" | "idle") => void;
 }
 
 /**
  * Consume a Forge chat SSE body: OpenAI chunk frames, possible in-stream
- * error frames, terminated by a {"forge":"done"} frame ("[DONE]" markers
- * from the upstream engine are passed through and ignored here).
+ * error frames, `{"forge":"queued"|"running"|"idle"}` status frames, all
+ * terminated by a {"forge":"done"} frame ("[DONE]" markers from the upstream
+ * engine are passed through and ignored here).
  */
 export async function readChatStream(
   body: ReadableStream<Uint8Array>,
@@ -591,6 +659,14 @@ export async function readChatStream(
     if (obj.forge === "done") {
       handlers.onDone?.(obj as ChatDoneFrame);
       return true;
+    }
+    if (
+      obj.forge === "queued" ||
+      obj.forge === "running" ||
+      obj.forge === "idle"
+    ) {
+      handlers.onStatus?.(obj.forge);
+      return false; // status frames are not terminal (the idle stream just ends)
     }
     const fragment = (
       obj as { choices?: { delta?: { content?: unknown } }[] }

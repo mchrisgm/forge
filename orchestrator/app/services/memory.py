@@ -193,7 +193,7 @@ async def _model_text(prompt: str, system: str, max_tokens: int = 350) -> str | 
     """One plain completion on the current lease, or None if unavailable."""
     import httpx
 
-    from . import routing
+    from . import chat_jobs, routing
     from .engine_manager import engine_manager
 
     ready = engine_manager.ready_text_leases()  # imagegen can't answer chat
@@ -211,10 +211,15 @@ async def _model_text(prompt: str, system: str, max_tokens: int = 350) -> str | 
         "temperature": 0.3,
     }
     try:
-        async with httpx.AsyncClient(timeout=_timeout()) as http:
-            resp = await http.post(f"{base_url}/chat/completions", json=body)
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
+        # Take the lane's slot so these background completions (auto-title,
+        # summary, memory extraction) don't oversubscribe a lane that is busy
+        # generating — chiefly the single-slot AirLLM lane. These run after an
+        # exchange has released its own slot, so there is no self-deadlock.
+        async with chat_jobs.chat_job_manager.slot_for(lease):
+            async with httpx.AsyncClient(timeout=_timeout()) as http:
+                resp = await http.post(f"{base_url}/chat/completions", json=body)
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as exc:
         log.debug("memory model call failed: %s", exc)
         return None
@@ -409,8 +414,15 @@ async def consolidate_all() -> dict:
     return result
 
 
+_background_tasks: set[asyncio.Task] = set()
+
+
 def schedule_background(coro) -> None:
-    """Fire-and-forget with logging — memory work must never break a chat."""
+    """Fire-and-forget with logging — memory work must never break a chat.
+
+    The task is retained until it finishes: the event loop keeps only a weak
+    reference, so without this an auto-title / compression / memory task can be
+    garbage-collected mid-flight and silently dropped."""
 
     async def runner():
         try:
@@ -418,4 +430,6 @@ def schedule_background(coro) -> None:
         except Exception:
             log.exception("background memory task failed")
 
-    asyncio.get_running_loop().create_task(runner())
+    task = asyncio.get_running_loop().create_task(runner())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)

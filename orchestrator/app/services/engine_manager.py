@@ -187,11 +187,19 @@ def build_imagegen_env(model: ModelEntry, settings: Settings) -> dict[str, str]:
 
 def build_airllm_env(model: ModelEntry, settings: Settings) -> dict[str, str]:
     path = f"/data/models/{model.file_path}" if model.file_path else model.hf_repo
+    slug = opencode_model_id_for(model)
     return {
         "AIRLLM_MODEL_PATH": path,
-        "AIRLLM_MODEL_NAME": opencode_model_id_for(model),
+        "AIRLLM_MODEL_NAME": slug,
         "AIRLLM_PORT": str(settings.airllm_port),
         "AIRLLM_MAX_TOKENS": "512",
+        # Per-model shard cache. AirLLM names its split dir a constant
+        # ("splitted_model.4bit") directly under the shards path with NO model
+        # namespacing, so a single shared path (the Dockerfile default) lets
+        # one model's layer shards satisfy another model's by-name completeness
+        # check — the second model then loads the wrong shards or fails at read
+        # time. Give every model its own subdirectory.
+        "AIRLLM_SHARDS_DIR": f"/data/models/airllm-shards/{slug}",
     }
 
 

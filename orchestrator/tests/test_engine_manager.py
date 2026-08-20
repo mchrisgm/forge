@@ -13,6 +13,7 @@ from app.models import EngineKind, ModelEntry, ToolCallFormat
 from app.services.engine_manager import (
     EngineManager,
     LeaseHeldError,
+    build_airllm_env,
     build_llamacpp_command,
     build_vllm_command,
     engine_base_url,
@@ -54,6 +55,34 @@ async def settle(manager: EngineManager, timeout: float = 10) -> None:
     tasks = list(manager._load_tasks.values())
     if tasks:
         await asyncio.wait_for(asyncio.gather(*tasks), timeout)
+
+
+# ── build_airllm_env (per-model shard cache) ────────────────────────────────
+
+
+class TestBuildAirllmEnv:
+    def test_shards_dir_is_namespaced_per_model(self):
+        # AirLLM's split dir name ("splitted_model.4bit") is a constant with no
+        # model namespacing, so two models MUST get different shard roots or one
+        # model's layer shards satisfy the other's by-name completeness check.
+        settings = Settings()
+        a = build_airllm_env(
+            make_model(display_name="Llama 3.3 70B", engine=EngineKind.airllm),
+            settings,
+        )
+        b = build_airllm_env(
+            make_model(display_name="Qwen 72B", engine=EngineKind.airllm),
+            settings,
+        )
+        assert a["AIRLLM_SHARDS_DIR"] == "/data/models/airllm-shards/llama-3-3-70b"
+        assert b["AIRLLM_SHARDS_DIR"] == "/data/models/airllm-shards/qwen-72b"
+        assert a["AIRLLM_SHARDS_DIR"] != b["AIRLLM_SHARDS_DIR"]
+
+    def test_shards_dir_matches_the_served_slug(self):
+        model = make_model(display_name="Llama 3.3 70B", engine=EngineKind.airllm)
+        env = build_airllm_env(model, Settings())
+        # The subdir is exactly the model slug the /v1 router serves.
+        assert env["AIRLLM_SHARDS_DIR"].endswith("/" + env["AIRLLM_MODEL_NAME"])
 
 
 # ── build_llamacpp_command ──────────────────────────────────────────────────
