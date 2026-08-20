@@ -52,6 +52,22 @@ def _frame(payload: dict) -> str:
     return "data: " + json.dumps(payload) + "\n\n"
 
 
+def _frame_error(frame: str) -> str | None:
+    """The engine reports connect/HTTP failures as a normal ``{"error": …}``
+    data frame rather than by raising, so a job that only saw such a frame must
+    still end in the 'error' state. Return the message when this frame is one."""
+    payload = frame.strip()
+    if payload.startswith("data:"):
+        payload = payload[len("data:") :].strip()
+    if not payload or payload == "[DONE]":
+        return None
+    try:
+        obj = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    return obj.get("error") if isinstance(obj, dict) else None
+
+
 class ChatJob:
     """One server-side generation for a conversation, with a replay buffer and
     fan-out to any number of live subscribers."""
@@ -61,6 +77,10 @@ class ChatJob:
         self.user_id = user_id
         self.model_slug = lease.model_slug
         self.lease_key = lease.base_url  # unique per (engine, gpu)
+        # Signature of the user turn this job is answering (content+attachments).
+        # A second POST re-attaches only when its turn matches; a genuinely
+        # different message must not be swallowed by the reattach shortcut.
+        self.turn_key = ""
         self.state = "queued"  # queued | running | done | error
         self.error = ""
         self.assistant_message_id: int | None = None
@@ -132,6 +152,38 @@ def _slots_for(lease: Lease) -> asyncio.Semaphore:
     return sem
 
 
+async def _pump_frames(
+    job: ChatJob,
+    base_url: str,
+    model_slug: str,
+    messages: list[dict],
+    idle_timeout_s: float,
+) -> str | None:
+    """Stream the engine's frames into `job`, aborting if the engine goes
+    silent for `idle_timeout_s` (a wedged engine must not hang the job, its
+    lease slot, and every subscriber forever). Returns the engine's error
+    message if it reported one as a data frame, else None."""
+    error_text: str | None = None
+    source = chat_service.stream_completion(base_url, model_slug, messages, job.collected)
+    ait = source.__aiter__()
+    try:
+        while True:
+            try:
+                async with asyncio.timeout(idle_timeout_s):
+                    frame = await ait.__anext__()
+            except StopAsyncIteration:
+                break
+            except TimeoutError:
+                raise TimeoutError(
+                    f"engine produced no output for {idle_timeout_s:.0f}s"
+                ) from None
+            job.push(frame)
+            error_text = _frame_error(frame) or error_text
+    finally:
+        await source.aclose()
+    return error_text
+
+
 class ChatJobManager:
     def __init__(self) -> None:
         self._jobs: dict[str, ChatJob] = {}  # keyed by conversation_id
@@ -143,13 +195,16 @@ class ChatJobManager:
             if job.finished_at is not None and now - job.finished_at > FINISHED_TTL_S:
                 del self._jobs[cid]
 
+    def slot_for(self, lease: Lease) -> asyncio.Semaphore:
+        """The per-lease concurrency slot, for engine consumers OUTSIDE the job
+        manager (temporary chats, the memory helper's short completions) so they
+        honor the same per-lane budget and never oversubscribe a lane — above
+        all the single-slot AirLLM lane. Use as ``async with mgr.slot_for(le):``."""
+        return _slots_for(lease)
+
     def get(self, conversation_id: str) -> ChatJob | None:
         self._evict_stale()
         return self._jobs.get(conversation_id)
-
-    def is_running(self, conversation_id: str) -> bool:
-        job = self.get(conversation_id)
-        return job is not None and job.state in ("queued", "running")
 
     def active_for(self, conversation_ids: set[str]) -> list[dict]:
         """Status of in-flight jobs whose conversation is in `conversation_ids`."""
@@ -190,12 +245,14 @@ class ChatJobManager:
         lease: Lease,
         model_slug: str,
         messages: list[dict],
+        turn_key: str = "",
         post_exchange: Callable[[str], Awaitable[None]] | None = None,
     ) -> ChatJob:
         """Create and launch a background generation for this conversation,
         replacing any finished job still parked under the same id."""
         self._evict_stale()
         job = ChatJob(conversation_id, user_id, lease)
+        job.turn_key = turn_key
         self._jobs[conversation_id] = job
         job.task = asyncio.create_task(
             self._run(job, lease, model_slug, messages, post_exchange)
@@ -230,10 +287,18 @@ class ChatJobManager:
                             {"forge": "running", "conversation_id": job.conversation_id}
                         )
                     )
-                async for frame in chat_service.stream_completion(
-                    lease.base_url, model_slug, messages, job.collected
-                ):
-                    job.push(frame)
+                error_text = await _pump_frames(
+                    job,
+                    lease.base_url,
+                    model_slug,
+                    messages,
+                    get_settings().chat_stream_idle_timeout_s,
+                )
+                # A connect/HTTP failure arrives as a data frame (already
+                # forwarded to subscribers), not an exception — record it so the
+                # job's terminal state is 'error', not a false 'done'.
+                if error_text:
+                    job.error = error_text
             finally:
                 sem.release()
         except asyncio.CancelledError:

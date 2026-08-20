@@ -282,16 +282,27 @@ async def send_message(
         raise HTTPException(400, "message content required")
     conversation = _own_conversation(conversation_id, user)
 
+    attachments = _own_uploads(body.attachment_ids, user)
+    new_attachments_json = json.dumps([a.id for a in attachments])
+    turn_key = new_attachments_json + "\n" + body.content
+
     # Re-attach, don't restart: if a generation is already running for this
-    # conversation (e.g. the user navigated away and came back, or a duplicate
-    # submit), stream the existing job rather than launching a second one.
+    # conversation, stream the existing job rather than launching a second one.
+    # Only the SAME still-unanswered turn re-attaches (the user navigated away
+    # and came back, or a duplicate/retried submit); a genuinely different
+    # message can't run until this reply finishes — it needs that reply in the
+    # history — so reject it instead of silently dropping it.
     running = chat_job_manager.get(conversation_id)
     if running is not None and running.state in ("queued", "running"):
-        return StreamingResponse(
-            running.subscribe(), media_type="text/event-stream"
+        if running.turn_key == turn_key:
+            return StreamingResponse(
+                running.subscribe(), media_type="text/event-stream"
+            )
+        raise HTTPException(
+            409, "a reply is still being generated for this chat — wait for it "
+            "to finish before sending another message"
         )
 
-    attachments = _own_uploads(body.attachment_ids, user)
     lease = _select_lease(conversation.model_slug)
     model = _model_for_lease(lease)
     thinking = body.thinking or conversation.thinking
@@ -305,7 +316,6 @@ async def send_message(
     # is still the (unanswered) last message reuses that turn instead of
     # duplicating it. Attachments must match — an attachment-only follow-up
     # with different files is a new turn, not a retry.
-    new_attachments_json = json.dumps([a.id for a in attachments])
     with read_session() as db:
         last = db.exec(
             select(ChatMessage)
@@ -364,6 +374,7 @@ async def send_message(
         lease=lease,
         model_slug=lease.model_slug,
         messages=messages,
+        turn_key=turn_key,
         post_exchange=post_exchange,
     )
     return StreamingResponse(job.subscribe(), media_type="text/event-stream")
@@ -577,10 +588,14 @@ async def temporary_chat(body: TemporaryBody, user: User = Depends(current_user)
     collected: list[str] = []
 
     async def generate():
-        async for frame in chat_service.stream_completion(
-            lease.base_url, lease.model_slug, messages, collected
-        ):
-            yield frame
+        # Honor the same per-lane slot budget as background jobs so a temporary
+        # chat never oversubscribes a lane (above all single-slot AirLLM) that
+        # is already busy generating.
+        async with chat_job_manager.slot_for(lease):
+            async for frame in chat_service.stream_completion(
+                lease.base_url, lease.model_slug, messages, collected
+            ):
+                yield frame
         yield 'data: {"forge": "done", "temporary": true}\n\n'
 
     return StreamingResponse(generate(), media_type="text/event-stream")

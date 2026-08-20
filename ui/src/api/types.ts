@@ -485,6 +485,47 @@ export interface ChatDoneFrame {
   temporary?: boolean;
 }
 
+/** The engine lane was busy — this generation is waiting for a free slot. */
+export interface ChatQueuedFrame {
+  forge: "queued";
+  conversation_id: string;
+}
+
+/** A slot opened up (or the first token arrived) — tokens now stream. */
+export interface ChatRunningFrame {
+  forge: "running";
+  conversation_id: string;
+}
+
+/** The terminal frame, tagged for the discriminated union. */
+export interface ChatDoneFrameTagged extends ChatDoneFrame {
+  forge: "done";
+}
+
+/** GET /conversations/{id}/stream first frame when nothing is generating. */
+export interface ChatIdleFrame {
+  forge: "idle";
+  conversation_id: string;
+}
+
+/** Every `{"forge": …}` status frame a chat SSE stream can carry. Token
+ *  deltas (OpenAI `{choices:[{delta:{content}}]}`) and `{"error": …}` frames
+ *  are separate — see readChatStream's handlers. */
+export type ChatStreamFrame =
+  | ChatQueuedFrame
+  | ChatRunningFrame
+  | ChatDoneFrameTagged
+  | ChatIdleFrame;
+
+/** One entry of GET /api/chat/active — a caller's conversation generating now,
+ *  used to badge the conversation list live. */
+export interface ActiveGeneration {
+  conversation_id: string;
+  state: "queued" | "running";
+  assistant_message_id: number | null;
+  chars: number;
+}
+
 // ── Files (orchestrator/app/routers/files_api.py) ───────────────────────────
 
 /** POST /api/files response. */

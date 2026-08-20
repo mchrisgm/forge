@@ -143,9 +143,12 @@ function RowMenu({
 function ConversationRow({
   conversation,
   active,
+  generating = false,
 }: {
   conversation: Conversation;
   active: boolean;
+  /** A server-side generation is in flight for this conversation right now. */
+  generating?: boolean;
 }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -203,11 +206,19 @@ function ConversationRow({
         >
           <span
             className={cx(
-              "block truncate text-sm font-medium",
+              "flex items-center gap-1.5 text-sm font-medium",
               active ? "text-accent" : "text-text",
             )}
           >
-            {conversation.title}
+            {generating && (
+              <span
+                aria-hidden
+                title="Generating…"
+                className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent animate-pulse-dot"
+              />
+            )}
+            <span className="truncate">{conversation.title}</span>
+            {generating && <span className="sr-only">(generating)</span>}
           </span>
           <span className="mt-0.5 flex items-center gap-2 text-[11px] text-faint">
             {relativeTime(conversation.updated_at)}
@@ -241,6 +252,14 @@ export function ConversationList({ activeId }: { activeId: string | null }) {
     queryKey: ["conversations", true],
     queryFn: () => api.listConversations(true),
   });
+  // Poll which conversations are generating right now — server-side jobs stay
+  // visible whether or not the chat is open, so this badges the list live.
+  const active = useQuery({
+    queryKey: ["chat-active"],
+    queryFn: api.activeGenerations,
+    refetchInterval: 3000,
+  });
+  const activeIds = new Set((active.data ?? []).map((a) => a.conversation_id));
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -289,7 +308,12 @@ export function ConversationList({ activeId }: { activeId: string | null }) {
         )}
 
         {conversations.data?.map((c) => (
-          <ConversationRow key={c.id} conversation={c} active={c.id === activeId} />
+          <ConversationRow
+            key={c.id}
+            conversation={c}
+            active={c.id === activeId}
+            generating={activeIds.has(c.id)}
+          />
         ))}
 
         {archived.data && archived.data.length > 0 && (
@@ -307,6 +331,7 @@ export function ConversationList({ activeId }: { activeId: string | null }) {
                     key={c.id}
                     conversation={c}
                     active={c.id === activeId}
+                    generating={activeIds.has(c.id)}
                   />
                 ))}
               </div>

@@ -1189,6 +1189,46 @@ function sendSse(res, { events = [] } = {}) {
   });
 }
 
+/** Stream a Forge chat reply: OpenAI-style token deltas, then `[DONE]`, then
+ *  the terminal `{"forge":"done"}` frame — the shape ChatView consumes for both
+ *  a POST turn and a GET /stream reattach. Closes when finished. */
+function sendForgeStream(res, conversationId, text) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-store",
+    Connection: "keep-alive",
+  });
+  res.write(": connected\n\n");
+  const words = text.split(" ");
+  const timers = [];
+  let i = 0;
+  const step = () => {
+    if (res.writableEnded || res.destroyed) return;
+    if (i < words.length) {
+      const content = (i === 0 ? "" : " ") + words[i];
+      res.write(
+        `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`,
+      );
+      i += 1;
+      timers.push(setTimeout(step, 70));
+      return;
+    }
+    res.write("data: [DONE]\n\n");
+    res.write(
+      `data: ${JSON.stringify({
+        forge: "done",
+        conversation_id: conversationId,
+        assistant_message_id: 999,
+      })}\n\n`,
+    );
+    res.end();
+  };
+  timers.push(setTimeout(step, 70));
+  res.on("close", () => {
+    for (const t of timers) clearTimeout(t);
+  });
+}
+
 function handleApi(req, res, url) {
   const p = url.pathname.replace(/\/+$/, "") || "/";
   const q = url.searchParams;
@@ -1218,6 +1258,33 @@ function handleApi(req, res, url) {
 
   // chat
   if (p === "/api/chat/status") return sendJson(res, chatStatus);
+  // Which of the caller's conversations are generating right now (badges the
+  // list). Empty by default so screenshots show a calm list.
+  if (p === "/api/chat/active") return sendJson(res, []);
+  // Re-attach to an in-flight generation. Idle by default (nothing running),
+  // so opening a chat just shows its stored history. Flip CHAT_INFLIGHT=1 to
+  // replay a short canned generation for the /stream + reattach path.
+  m = p.match(/^\/api\/chat\/conversations\/([^/]+)\/stream$/);
+  if (m) {
+    if (process.env.CHAT_INFLIGHT === "1") {
+      return sendForgeStream(res, m[1], "Here's a reply still being generated");
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-store",
+      Connection: "keep-alive",
+    });
+    res.write(
+      `data: ${JSON.stringify({ forge: "idle", conversation_id: m[1] })}\n\n`,
+    );
+    return res.end();
+  }
+  // A saved chat turn — streams a short canned reply then the forge:done frame,
+  // mirroring the real server-side job (temporary chat is handled elsewhere).
+  m = p.match(/^\/api\/chat\/conversations\/([^/]+)\/messages$/);
+  if (m && req.method === "POST") {
+    return sendForgeStream(res, m[1], "Sure — here's a quick answer for you");
+  }
   if (p === "/api/chat/read_page" && req.method === "POST") {
     // Stealth fetches take 5-30s live; a short pause shows the pending chip.
     return readBody(req, (body) => {

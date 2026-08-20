@@ -78,6 +78,10 @@ async def wait_done(job, timeout: float = 3.0):
     await asyncio.wait_for(job._done.wait(), timeout)
 
 
+async def _collect(aiter) -> list[str]:
+    return [f async for f in aiter]
+
+
 # ── detach survival ─────────────────────────────────────────────────────────
 
 
@@ -259,6 +263,135 @@ class TestQueueing:
         await wait_done(job_a)
         await wait_done(job_b)
         assert job_b.state == "done"
+
+
+# ── wedged engine (safety net) ──────────────────────────────────────────────
+
+
+class TestWedgedEngine:
+    async def test_silent_engine_is_aborted_frees_slot_and_persists_partial(
+        self, api, monkeypatch
+    ):
+        # An engine that emits a token then goes silent forever must not hang
+        # the job, its lease slot, or its subscribers: the idle timeout aborts
+        # it, the partial reply is persisted, and the lane is freed.
+        from app.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "chat_stream_idle_timeout_s", 0.15)
+        stall = asyncio.Event()  # never set — the engine wedges
+
+        async def wedged(base_url, model_slug, messages, collected):
+            collected.append("partial ")
+            yield frame("partial ")
+            await stall.wait()
+            yield "data: [DONE]\n\n"  # never reached
+
+        monkeypatch.setattr(chat_service, "stream_completion", wedged)
+        lease = make_lease("m", "http://engine:1")
+        use_leases(monkeypatch, [lease])
+        conv_id = make_conversation()
+
+        job = chat_job_manager.start(
+            conversation_id=conv_id, user_id=1, lease=lease, model_slug="m", messages=[]
+        )
+        # A subscriber attaches and must terminate (not hang) when aborted.
+        frames = await asyncio.wait_for(_collect(job.subscribe()), 3.0)
+
+        assert job.state == "error"
+        assert "no output" in job.error
+        assert frame("partial ") in frames
+        assert any('"forge": "done"' in f for f in frames)
+        with db_module.read_session() as db:
+            rows = db.exec(
+                select(ChatMessage).where(ChatMessage.conversation_id == conv_id)
+            ).all()
+        assert [r.content for r in rows] == ["partial "]  # server-side, not lost
+
+        # The slot was released: a fresh job on the same lease runs to completion.
+        install_stream(monkeypatch, ["ok"])
+        conv2 = make_conversation()
+        job2 = chat_job_manager.start(
+            conversation_id=conv2, user_id=1, lease=lease, model_slug="m", messages=[]
+        )
+        await wait_done(job2)
+        assert job2.state == "done"
+
+
+class TestEngineErrorState:
+    async def test_engine_error_frame_ends_job_in_error_state(self, api, monkeypatch):
+        # stream_completion reports a connect/HTTP failure as a data frame and
+        # returns normally; the job must still end 'error', not a false 'done'.
+        async def erroring(base_url, model_slug, messages, collected):
+            yield 'data: {"error": "engine error 500: boom"}\n\n'
+
+        monkeypatch.setattr(chat_service, "stream_completion", erroring)
+        lease = make_lease("m", "http://engine:1")
+        use_leases(monkeypatch, [lease])
+        conv_id = make_conversation()
+        job = chat_job_manager.start(
+            conversation_id=conv_id, user_id=1, lease=lease, model_slug="m", messages=[]
+        )
+        await wait_done(job)
+        assert job.state == "error"
+        assert "boom" in job.error
+
+
+# ── reattach guard (no silent message loss) ─────────────────────────────────
+
+
+class TestReattachGuard:
+    def test_matching_turn_reattaches_to_the_running_job(
+        self, api, auth_headers, monkeypatch
+    ):
+        lease = make_lease("m", "http://engine:1")
+        use_leases(monkeypatch, [lease])
+        conv = api.post("/api/chat/conversations", json={}, headers=auth_headers).json()
+        me = api.get("/api/users/me", headers=auth_headers).json()["id"]
+
+        # A job answering the turn "first", already finished so subscribe() ends.
+        job = chat_jobs.ChatJob(conv["id"], me, lease)
+        job.state = "running"
+        job.turn_key = "[]\nfirst"
+        job.frames = [frame("hi"), 'data: {"forge": "done"}\n\n']
+        job._done.set()
+        chat_job_manager._jobs[conv["id"]] = job
+
+        r = api.post(
+            f"/api/chat/conversations/{conv['id']}/messages",
+            json={"content": "first"},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+        assert "hi" in r.text  # replayed the in-flight stream, no second job
+
+    def test_different_message_while_running_is_rejected_not_dropped(
+        self, api, auth_headers, monkeypatch
+    ):
+        lease = make_lease("m", "http://engine:1")
+        use_leases(monkeypatch, [lease])
+        conv = api.post("/api/chat/conversations", json={}, headers=auth_headers).json()
+        me = api.get("/api/users/me", headers=auth_headers).json()["id"]
+
+        job = chat_jobs.ChatJob(conv["id"], me, lease)
+        job.state = "running"
+        job.turn_key = "[]\nfirst"
+        chat_job_manager._jobs[conv["id"]] = job
+
+        # A genuinely different message can't run until the reply lands — it must
+        # 409, not be swallowed by the reattach shortcut.
+        r = api.post(
+            f"/api/chat/conversations/{conv['id']}/messages",
+            json={"content": "a totally different question"},
+            headers=auth_headers,
+        )
+        assert r.status_code == 409
+        with db_module.read_session() as db:
+            rows = db.exec(
+                select(ChatMessage).where(
+                    ChatMessage.conversation_id == conv["id"]
+                )
+            ).all()
+        assert rows == []  # nothing persisted for the rejected turn
 
 
 # ── active endpoint ─────────────────────────────────────────────────────────

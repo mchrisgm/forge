@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     # Concurrent chat generations a vLLM lease accepts before Forge queues
     # more (vLLM batches internally; this just bounds how many jobs it fans in).
     vllm_max_concurrency: int = 8
+    # Safety net for a wedged engine: if a background generation receives no new
+    # output for this long, Forge aborts it so the job reaches a terminal state
+    # and frees its lane instead of hanging every reader forever. Generous by
+    # default because AirLLM streams layers from disk and can be very slow;
+    # raise it if huge cold models legitimately pause longer than this between
+    # tokens.
+    chat_stream_idle_timeout_s: float = 600.0
     engine_load_timeout_s: int = 900
     default_ctx: int = 16384
 

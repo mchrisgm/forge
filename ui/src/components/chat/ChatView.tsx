@@ -1,7 +1,17 @@
 // The conversation surface: history, token-by-token streaming over SSE
-// (fetch + ReadableStream — EventSource cannot POST), abort keeping partial
-// text, inline error frames with retry, and a temporary (incognito) mode
-// that keeps everything in component state and stores nothing.
+// (fetch + ReadableStream — EventSource cannot POST), inline error frames with
+// retry, and a temporary (incognito) mode that keeps everything in component
+// state and stores nothing.
+//
+// Generation runs as a SERVER-SIDE background job, so the SSE reader's lifetime
+// is decoupled from the component: leaving a chat only DETACHES the viewer
+// (closing the reader never stops the job), and returning RE-ATTACHES via GET
+// /conversations/{id}/stream — which replays the buffered tokens then streams
+// live to `forge:done`. On open we always reattach: an `idle` frame means
+// nothing is running (just show stored history), otherwise a live bubble picks
+// up the in-flight reply. `forge:queued`/`running` frames surface the
+// "waiting for a free slot" state. Because jobs are server-side, multiple
+// conversations generate at once; the composer lock is per open conversation.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -10,6 +20,7 @@ import {
   api,
   ApiError,
   conversationMessageStream,
+  conversationReattachStream,
   errorMessage,
   readChatStream,
   temporaryChatStream,
@@ -87,6 +98,9 @@ export function ChatView({
   const holdRef = useRef<string | null>(null);
   /** Last server snapshot applied, to avoid redundant reloads. */
   const lastLoadedDataRef = useRef<ConversationDetail | null>(null);
+  /** Conversation we've already attempted a reattach for this visit — so the
+   *  GET /stream probe fires once per open, not on every history refetch. */
+  const reattachedForRef = useRef<string | null>(null);
   const lastSendRef = useRef<LastSend | null>(null);
   const keyRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -171,16 +185,20 @@ export function ChatView({
 
   // Reset state when the surface switches conversations (but not right after
   // this surface created the conversation itself — loadedForRef already
-  // points at it then, and the stream must keep running).
+  // points at it then, and the stream must keep running). Aborting here only
+  // DETACHES the viewer from a server-side job; the generation keeps running
+  // and is picked back up by the reattach path on return.
   useEffect(() => {
     if (conversationId === loadedForRef.current) return;
     abortRef.current?.abort();
     setSendError(null);
     setMessages([]);
+    setStreaming(false);
     lastSendRef.current = null;
     holdRef.current = null;
     lastLoadedDataRef.current = null;
     loadedForRef.current = null;
+    reattachedForRef.current = null;
     if (conversationId != null) setTempMode(false);
   }, [conversationId]);
 
@@ -252,6 +270,105 @@ export function ChatView({
     });
   };
 
+  /** Re-attach to a possibly in-flight server-side generation for `id`.
+   *  Replays buffered frames then streams live; a lone `idle` frame means
+   *  nothing is running (the stored history already on screen is complete).
+   *  The live assistant bubble is created lazily so an idle stream leaves no
+   *  empty bubble behind. Detaching (abort on navigation/stop) never errors —
+   *  the job keeps running server-side. */
+  const reattach = async (id: string) => {
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    let resp: Response;
+    try {
+      resp = await conversationReattachStream(id, controller.signal);
+    } catch {
+      return; // couldn't probe — the stored history is already shown
+    }
+    if (!resp.body) return;
+
+    let assistantKey: string | null = null;
+    const ensureBubble = (): string => {
+      if (assistantKey) return assistantKey;
+      const key = nextKey();
+      assistantKey = key;
+      // Our live bubble beats server snapshots until the job persists.
+      holdRef.current = id;
+      setStreaming(true);
+      setMessages((prev) => [
+        ...prev,
+        {
+          key,
+          role: "assistant",
+          content: "",
+          attachments: [],
+          streaming: true,
+        },
+      ]);
+      return key;
+    };
+
+    let streamError: string | null = null;
+    try {
+      await readChatStream(resp.body, {
+        onStatus: (state) => {
+          if (state === "idle") return; // nothing running — keep history
+          const key = ensureBubble();
+          patchAssistant(key, (m) => ({ ...m, queued: state === "queued" }));
+        },
+        onDelta: (fragment) => {
+          const key = ensureBubble();
+          patchAssistant(key, (m) => ({
+            ...m,
+            content: m.content + fragment,
+            queued: false,
+          }));
+        },
+        onError: (message) => {
+          streamError = message;
+        },
+      });
+    } catch (err) {
+      // AbortError = the viewer detached (navigation or stop); the server job
+      // is untouched. Keep whatever streamed; do NOT surface an error. Only
+      // touch shared state if a newer send/reattach hasn't superseded us.
+      if (abortRef.current === controller) {
+        if (assistantKey) finalizeAssistant(assistantKey, null, true);
+        setStreaming(false);
+        holdRef.current = null;
+        if (!(err instanceof DOMException && err.name === "AbortError")) {
+          // A genuine mid-reattach network glitch — the history is still valid.
+          void queryClient.invalidateQueries({ queryKey: ["conversation", id] });
+        }
+      }
+      return;
+    }
+
+    if (abortRef.current !== controller) return; // superseded — leave it be
+    if (!assistantKey) return; // idle stream — stored history is complete
+    finalizeAssistant(assistantKey, streamError, streamError == null);
+    setStreaming(false);
+    holdRef.current = null;
+    // The job persisted its reply — refetch so the stored message replaces the
+    // live bubble and the auto-title/updated_at land.
+    void queryClient.invalidateQueries({ queryKey: ["conversation", id] });
+    void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+  };
+
+  // On open (mount or switched-to), once history has loaded, probe the stream
+  // to reattach to any in-flight generation. Runs once per visit; skipped while
+  // we're already streaming our own send into this conversation.
+  useEffect(() => {
+    const id = conversationId;
+    if (id == null || streaming) return;
+    if (reattachedForRef.current === id) return;
+    if (!conversation.data || conversation.data.id !== id) return;
+    reattachedForRef.current = id;
+    void reattach(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId, streaming, conversation.data]);
+
   const run = async (
     content: string,
     metas: AttachmentMeta[],
@@ -310,6 +427,9 @@ export function ChatView({
           void queryClient.invalidateQueries({ queryKey: ["conversations"] });
         }
         holdRef.current = id;
+        // We own this conversation's stream now — don't let the reattach
+        // effect fire a redundant probe when this send finishes or is stopped.
+        reattachedForRef.current = id;
         resp = await conversationMessageStream(
           id,
           { content, attachment_ids: metas.map((m) => m.id), thinking },
@@ -322,10 +442,17 @@ export function ChatView({
       }
       let streamError: string | null = null;
       await readChatStream(resp.body, {
+        onStatus: (state) =>
+          // A busy lane queues the job first; clear it once a slot opens.
+          patchAssistant(assistantKey, (m) => ({
+            ...m,
+            queued: state === "queued",
+          })),
         onDelta: (fragment) =>
           patchAssistant(assistantKey, (m) => ({
             ...m,
             content: m.content + fragment,
+            queued: false,
           })),
         onError: (message) => {
           streamError = message;
@@ -351,8 +478,13 @@ export function ChatView({
         setSendError({ kind: "other", message: errorMessage(err) });
       }
     } finally {
-      abortRef.current = null;
-      setStreaming(false);
+      // Only clear shared state if a newer send/reattach hasn't taken over
+      // (switching to an already-cached conversation can start one before this
+      // aborted turn's cleanup runs).
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setStreaming(false);
+      }
     }
   };
 
@@ -518,6 +650,7 @@ export function ChatView({
   const lastMessage = messages[messages.length - 1];
   const waitingForFirstToken =
     streaming && lastMessage?.role === "assistant" && !lastMessage.content;
+  const waitingIsQueued = waitingForFirstToken && lastMessage?.queued === true;
 
   return (
     <SandboxContext.Provider value={sandboxRunner}>
@@ -726,9 +859,14 @@ export function ChatView({
         )}
 
         {waitingForFirstToken && (
-          <div className="flex items-center gap-2 text-xs text-muted">
+          <div
+            role="status"
+            className="flex items-center gap-2 text-xs text-muted"
+          >
             <Spinner size={14} />
-            Generating…
+            {waitingIsQueued
+              ? "Queued — waiting for a free slot…"
+              : "Generating…"}
           </div>
         )}
         <div ref={bottomRef} />
