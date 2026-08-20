@@ -36,7 +36,7 @@ import type {
   UploadMeta,
 } from "../../api/types";
 import { useToast } from "../../hooks/toast";
-import { cx } from "../../lib/utils";
+import { cx, opencodeModelId } from "../../lib/utils";
 import { IconChevronLeft, IconCube, IconGhost, IconImage } from "../icons";
 import {
   loadStoredThinking,
@@ -48,6 +48,7 @@ import {
   type ComposerHandle,
   type ImageProvider,
 } from "./Composer";
+import { ModelPicker, type ModelOption } from "./ModelPicker";
 import {
   MessageBubble,
   splitStoredThinking,
@@ -186,11 +187,36 @@ export function ChatView({
     refetchInterval: 15_000,
   });
   const serving = status.data?.serving ?? [];
-  const nothingServing = status.data != null && serving.length === 0;
   const imageLease = status.data?.image ?? null;
+
+  // ── downloaded models ──────────────────────────────────────────────────────
+  // The backend loads the chosen model on demand, so EVERY downloaded text
+  // model is selectable — not just the ones currently serving. `serving` only
+  // marks which are already loaded (the "loaded" dot) plus the image lane.
+  const models = useQuery({ queryKey: ["models"], queryFn: api.listModels });
+  const downloadedModels = useMemo<ModelOption[]>(
+    () =>
+      (models.data ?? [])
+        .filter((m) => m.status === "ready" && m.engine !== "imagegen")
+        .map((m) => {
+          const slug = opencodeModelId(m.display_name, m.id);
+          return {
+            slug,
+            name: m.display_name,
+            paramsB: m.params_b,
+            engine: m.engine,
+            loaded: serving.some((l) => l.model_slug === slug),
+          };
+        }),
+    [models.data, serving],
+  );
+  const noModels = models.data != null && downloadedModels.length === 0;
   // "Auto": the tiny router model picks the answering model per prompt (the
-  // stream narrates the routing via forge:"status" frames).
-  const autoAvailable = status.data?.auto?.available === true;
+  // stream narrates the routing via forge:"status" frames). Available whenever
+  // ≥1 text model is downloaded — prefer the backend's signal, falling back to
+  // the derived list on older backends that omit the `auto` block.
+  const autoAvailable =
+    status.data?.auto?.available ?? downloadedModels.length > 0;
 
   // ── sandbox lane: fetched once, cached; drives the code-block Run button ──
   const sandbox = useQuery({
@@ -230,22 +256,25 @@ export function ChatView({
     return providers;
   }, [imageLease, connectors.data]);
 
-  // A slug-less request only resolves when exactly one model serves, so with
-  // several serving a fresh chat needs an explicit pick — default to the
-  // first, and drop a pick whose lease has gone away. "auto" is a virtual
-  // slug (no lease) that stays valid while the router option is available.
+  // Default a fresh chat to "Auto" once models load (or "" when Auto is
+  // unavailable), and drop a pick that names a model no longer downloaded.
+  // "auto" is a virtual slug (no model row) that stays valid while the router
+  // option is available.
   useEffect(() => {
-    if (serving.length > 1 && !newChatSlug) {
-      setNewChatSlug(serving[0].model_slug);
-    } else if (
-      newChatSlug &&
-      status.data != null &&
-      !(newChatSlug === AUTO_SLUG && autoAvailable) &&
-      !serving.some((l) => l.model_slug === newChatSlug)
-    ) {
-      setNewChatSlug(serving.length > 1 ? serving[0].model_slug : "");
+    if (models.data == null) return;
+    if (!newChatSlug) {
+      if (autoAvailable) setNewChatSlug(AUTO_SLUG);
+      return;
     }
-  }, [serving, newChatSlug, status.data, autoAvailable]);
+    if (newChatSlug === AUTO_SLUG) {
+      // A stale Auto pick (all models removed) falls back to no selection.
+      if (!autoAvailable) setNewChatSlug("");
+      return;
+    }
+    if (!downloadedModels.some((m) => m.slug === newChatSlug)) {
+      setNewChatSlug(autoAvailable ? AUTO_SLUG : "");
+    }
+  }, [models.data, downloadedModels, newChatSlug, autoAvailable]);
 
   // ── conversation history ──────────────────────────────────────────────────
   const conversation = useQuery({
@@ -767,29 +796,13 @@ export function ChatView({
   };
 
   // ── model picking ─────────────────────────────────────────────────────────
+  // Empty slug means Auto everywhere (a saved chat may store "" or "auto").
   const conversationSlug = conversation.data?.model_slug ?? "";
   const activeSlug = conversationId ? conversationSlug : newChatSlug;
-  const isAuto = activeSlug === AUTO_SLUG;
-  const singleLease = serving.length === 1 ? serving[0] : null;
-  const activeLease = isAuto
+  const isAuto = activeSlug === AUTO_SLUG || activeSlug === "";
+  const activeModel = isAuto
     ? null
-    : serving.find((l) => l.model_slug === activeSlug) ?? singleLease;
-
-  // Picker entries: the virtual "auto" option first (when usable), then one
-  // per serving lease. Rendered only when there's an actual choice.
-  const pickerOptions = useMemo(
-    () => [
-      ...(autoAvailable
-        ? [{ slug: AUTO_SLUG, label: AUTO_LABEL, mono: false }]
-        : []),
-      ...serving.map((l) => ({
-        slug: l.model_slug,
-        label: l.model_slug,
-        mono: true,
-      })),
-    ],
-    [autoAvailable, serving],
-  );
+    : downloadedModels.find((m) => m.slug === activeSlug) ?? null;
 
   const pickModel = useMutation({
     mutationFn: (slug: string) =>
@@ -830,7 +843,7 @@ export function ChatView({
     <div className="flex min-h-dvh flex-col px-4 md:px-6">
       {/* Header */}
       <header className="sticky top-0 z-10 -mx-4 border-b border-border bg-bg/95 px-4 pt-safe backdrop-blur md:-mx-6 md:px-6">
-        <div className="flex items-center gap-2 py-3">
+        <div className="flex flex-wrap items-center gap-2 py-3">
           <Link
             to="/chats"
             aria-label="Back to chats"
@@ -843,15 +856,20 @@ export function ChatView({
             <div className="flex items-center gap-2 text-xs text-muted">
               {isAuto ? (
                 <span className="truncate">{AUTO_LABEL}</span>
-              ) : activeLease ? (
+              ) : activeModel ? (
                 <>
-                  <span className="truncate">{activeLease.model_name}</span>
-                  <LaneBadge engine={activeLease.engine} />
+                  <span className="truncate">{activeModel.name}</span>
+                  <LaneBadge engine={activeModel.engine} />
+                  {!activeModel.loaded && (
+                    <span className="hidden shrink-0 text-faint sm:inline">
+                      loads on demand
+                    </span>
+                  )}
                 </>
-              ) : nothingServing ? (
-                <span>No model loaded</span>
+              ) : noModels ? (
+                <span>No models yet</span>
               ) : (
-                <span>{conversationId ? "Saved chat" : "Pick a model below"}</span>
+                <span>{conversationId ? "Saved chat" : "Pick a model"}</span>
               )}
               {imageLease && (
                 <span
@@ -864,6 +882,15 @@ export function ChatView({
               )}
             </div>
           </div>
+          {downloadedModels.length > 0 && (
+            <ModelPicker
+              value={activeSlug}
+              options={downloadedModels}
+              autoAvailable={autoAvailable}
+              disabled={streaming || generatingImage || pickModel.isPending}
+              onChange={onPickModel}
+            />
+          )}
           {conversationId == null && (
             <button
               type="button"
@@ -901,46 +928,6 @@ export function ChatView({
         </p>
       )}
 
-      {/* Model picker — several models serving, or "Auto" plus at least one */}
-      {pickerOptions.length > 1 && (
-        <div
-          role="radiogroup"
-          aria-label="Model for this chat"
-          className="mt-3 flex flex-wrap items-center gap-1.5"
-        >
-          <span className="mr-1 text-xs font-medium text-faint">Model</span>
-          {pickerOptions.map((opt) => {
-            const active = activeSlug === opt.slug;
-            return (
-              <button
-                key={opt.slug}
-                type="button"
-                role="radio"
-                aria-checked={active}
-                disabled={streaming || pickModel.isPending}
-                onClick={() => onPickModel(opt.slug)}
-                className={cx(
-                  "inline-flex min-h-9 cursor-pointer items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-60",
-                  opt.mono && "font-mono",
-                  active
-                    ? "border-accent/50 bg-accent/15 text-accent"
-                    : "border-border bg-raised text-muted hover:text-text",
-                )}
-              >
-                <span
-                  aria-hidden
-                  className={cx(
-                    "h-1.5 w-1.5 rounded-full",
-                    active ? "bg-accent" : "bg-ok",
-                  )}
-                />
-                {opt.label}
-              </button>
-            );
-          })}
-        </div>
-      )}
-
       {/* Message list */}
       <div className="flex-1 space-y-4 pt-4 pb-4">
         {conversationId != null && conversation.isLoading && (
@@ -967,11 +954,11 @@ export function ChatView({
           !streaming &&
           !conversation.isLoading &&
           !conversation.isError &&
-          (nothingServing ? (
+          (noModels ? (
             <EmptyState
               icon="box"
-              title="No model loaded"
-              hint="A model has to be serving before anyone can chat."
+              title="No models yet"
+              hint="Download a model to start chatting."
               action={
                 <Link
                   to="/models"
@@ -1053,15 +1040,15 @@ export function ChatView({
 
       {/* Composer */}
       <div className="sticky bottom-0 -mx-4 bg-bg px-4 md:-mx-6 md:px-6">
-        {nothingServing && (
+        {noModels && (
           <p
             role="status"
             className="mb-0 flex items-center justify-center gap-2 rounded-t-md border border-b-0 border-border bg-raised/60 px-3 py-2 text-center text-xs text-muted"
           >
             <IconCube size={14} className="shrink-0" />
-            No model loaded —{" "}
+            No models yet —{" "}
             <Link to="/models" className="text-info underline underline-offset-2">
-              load one on Models
+              download one on Models
             </Link>
           </p>
         )}
@@ -1074,7 +1061,7 @@ export function ChatView({
             imageProviders={imageProviders}
             streaming={streaming}
             generatingImage={generatingImage}
-            disabled={nothingServing}
+            disabled={noModels}
             thinking={thinking}
             onThinking={setThinking}
             placeholder={
@@ -1082,8 +1069,8 @@ export function ChatView({
                 ? "Message (temporary — not saved)…"
                 : isAuto
                   ? "Message — Auto picks the model…"
-                  : activeLease
-                    ? `Message ${activeLease.model_name}…`
+                  : activeModel
+                    ? `Message ${activeModel.name}…`
                     : "Message…"
             }
           />
