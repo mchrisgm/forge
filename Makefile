@@ -1,8 +1,10 @@
 .PHONY: up down logs build test smoke lint dev seed ui-build clean help env preflight sandbox verify
 
-# GPU boxes automatically get the NVML overlay (orchestrator GPU stats/leases);
-# CPU-only boxes fall back to plain docker-compose.yml and come up cleanly.
-GPU_COMPOSE := $(shell command -v nvidia-smi >/dev/null 2>&1 && echo "-f docker-compose.gpu.yml")
+# GPU boxes automatically get the right overlay — docker-compose.gpu.yml for
+# NVIDIA, docker-compose.rocm.yml for AMD/ROCm — via the shared vendor-aware
+# detector; CPU-only boxes fall back to plain docker-compose.yml and come up
+# cleanly. FORGE_NO_GPU=1 forces CPU-only.
+GPU_COMPOSE := $(shell sh scripts/gpu-detect.sh compose-args 2>/dev/null)
 COMPOSE      = docker compose -f docker-compose.yml $(GPU_COMPOSE)
 COMPOSE_DEV  = $(COMPOSE) -f docker-compose.dev.yml
 

@@ -38,6 +38,7 @@ from .engine_manager import (
     Lease,
     LeaseHeldError,
     engine_manager,
+    gpu_run_kwargs,
     opencode_model_id_for,
 )
 
@@ -139,24 +140,29 @@ def _spawn_router_blocking(model: ModelEntry) -> Any:
     except docker.errors.NotFound:
         pass
 
+    vendor = engine_manager.gpu_vendor
+    image = settings.llamacpp_rocm_image if vendor == "amd" else settings.llamacpp_image
     gpu_count = engine_manager.gpu_count
-    device_requests = None
+    gpu_kwargs: dict[str, Any] = {}
+    extra_env: dict[str, str] = {}
     if gpu_count > 1:
         stats = _gpu_stats()
         gpu = worst_gpu(stats) if stats else gpu_count - 1
         gpu_layers = 999  # tiny model — fully offload onto the worst GPU
-        device_requests = [
-            docker.types.DeviceRequest(device_ids=[str(gpu)], capabilities=[["gpu"]])
-        ]
+        gpu_kwargs, extra_env = gpu_run_kwargs(vendor, [gpu])
         placement = f"gpu {gpu} (smallest VRAM)"
     else:
         # Single GPU: run beside the big model WITHOUT touching its VRAM.
         gpu_layers = 0
         placement = "cpu (sharing the box with the main lane)"
+        if vendor == "amd":
+            # The ROCm binary probes /dev/kfd on startup, so give it the devices
+            # even though --n-gpu-layers 0 keeps the model off the GPU's VRAM.
+            gpu_kwargs, extra_env = gpu_run_kwargs(vendor, [0])
     log.info("starting router model %s on %s", model.display_name, placement)
 
     return client.containers.run(
-        settings.llamacpp_image,
+        image,
         command=_router_command(model, settings, gpu_layers),
         name=ROUTER_CONTAINER,
         labels={ROUTER_LABEL: "1", "forge.model_id": str(model.id or 0)},
@@ -166,9 +172,10 @@ def _spawn_router_blocking(model: ModelEntry) -> Any:
                 target="/data/models", source=settings.models_volume, type="volume"
             )
         ],
+        environment=extra_env or None,
         detach=True,
-        device_requests=device_requests,
         restart_policy={"Name": "no"},
+        **gpu_kwargs,
     )
 
 

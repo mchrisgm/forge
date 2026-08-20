@@ -215,6 +215,22 @@ services:
               count: 1
               capabilities: [gpu]
 
+  # AMD/ROCm llama.cpp lane — built (not started) here so `docker compose
+  # --profile rocm build llamacpp-rocm` produces the image the orchestrator
+  # spawns on AMD boxes. Own profile so NVIDIA/CPU hosts never build the large
+  # ROCm image; the orchestrator mounts /dev/kfd + /dev/dri at spawn time.
+  llamacpp-rocm:
+    profiles: ["rocm"]
+    build:
+      context: ./engines/llamacpp-rocm
+      args:
+        ROCM_TAG: ${FORGE_ROCM_TAG:-5.7.1-complete}
+        GPU_TARGETS: ${FORGE_ROCM_GPU_TARGETS:-gfx900;gfx906;gfx908;gfx90a;gfx1030}
+    image: ${FORGE_LLAMACPP_ROCM_IMAGE:-forge-llamacpp-rocm}
+    volumes:
+      - models:/data/models
+    networks: [forge-internal]
+
   # Built here so `make up` produces the image the orchestrator spawns
   # sessions from; never started by compose itself.
   session-runner:

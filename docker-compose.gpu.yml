@@ -11,6 +11,7 @@
 services:
   orchestrator:
     environment:
+      FORGE_GPU_VENDOR: nvidia
       NVIDIA_DRIVER_CAPABILITIES: utility
     deploy:
       resources:

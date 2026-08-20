@@ -104,12 +104,14 @@ ensure_secret FORGE_SECRET_KEY
 bold "[3/6] Selecting compose files"
 COMPOSE=(docker compose -f docker-compose.yml)
 export FORGE_NO_GPU="$FORCE_NO_GPU"  # keep verify.sh's compose selection in step
-if [ "$FORCE_NO_GPU" = 0 ] && command -v nvidia-smi >/dev/null 2>&1; then
-  COMPOSE+=(-f docker-compose.gpu.yml)
-  info "NVIDIA GPU detected — including docker-compose.gpu.yml (GPU stats + leases)"
-else
-  info "CPU-only bring-up (no GPU overlay) — the stack runs, engine loads need a GPU"
+# Vendor-aware detection (NVIDIA overlay, AMD/ROCm overlay, or CPU-only) lives
+# in one place so setup.sh, verify.sh, the Makefile and preflight all agree.
+GPU_ARGS=$(sh scripts/gpu-detect.sh compose-args 2>/dev/null || true)
+if [ -n "$GPU_ARGS" ]; then
+  # shellcheck disable=SC2206
+  COMPOSE+=($GPU_ARGS)
 fi
+info "$(sh scripts/gpu-detect.sh explain 2>/dev/null | cut -f2-)"
 
 # ── 4. build + start ────────────────────────────────────────────────────────
 bold "[4/6] Building and starting the stack"
@@ -118,6 +120,14 @@ bold "[4/6] Building and starting the stack"
 # orchestrator can spawn sessions and the local engine lanes.
 "${COMPOSE[@]}" --profile build-only build session-runner
 "${COMPOSE[@]}" --profile engines build airllm imagegen
+# On AMD/ROCm the llama.cpp lane runs a locally-built image (upstream ships CUDA
+# only). Build it now so the orchestrator can spawn it — it's large, so only on
+# AMD boxes (the rocm overlay is present exactly then).
+if printf '%s\n' "${COMPOSE[@]}" | grep -q 'docker-compose.rocm.yml'; then
+  info "AMD/ROCm detected — building the ROCm llama.cpp image (forge-llamacpp-rocm; this is large and slow)..."
+  "${COMPOSE[@]}" --profile rocm build llamacpp-rocm || \
+    info "ROCm llama.cpp build failed — see engines/llamacpp-rocm/Dockerfile (adjust ROCM_TAG/GPU_TARGETS for your card)"
+fi
 if [ "$SKIP_PULL" = 0 ]; then
   info "prefetching the llama.cpp/vLLM engine images (skip next time with --skip-pull)..."
   "${COMPOSE[@]}" --profile engines pull llamacpp vllm sglang tabby || \
