@@ -22,6 +22,7 @@ from ..models import (
     User,
 )
 from ..services import chat_service, image_service, memory, uploads, web_reader
+from ..services.chat_jobs import chat_job_manager
 from ..services.engine_manager import engine_manager
 
 log = logging.getLogger(__name__)
@@ -75,16 +76,26 @@ def _own_uploads(ids: list[str], user: User) -> list[Upload]:
     return result
 
 
-def _resolve_lease(model_slug: str):
-    from .openai_router import resolve_lease
-
-    try:
-        return resolve_lease(model_slug or None)
-    except HTTPException as exc:
+def _select_lease(model_slug: str):
+    """Pick the least-loaded ready TEXT lease serving this chat's model,
+    spreading concurrent generations across GPUs/slots. 409 with a helpful
+    message when nothing serves it."""
+    lease = chat_job_manager.select_lease(model_slug or "")
+    if lease is None:
+        served = (
+            ", ".join(le.model_slug for le in engine_manager.ready_text_leases())
+            or "(none)"
+        )
+        detail = (
+            f"model {model_slug!r} is not being served. Currently serving: "
+            f"{served}. Load it from the Models page first."
+            if model_slug
+            else "No model is loaded. Load one from the Models page first."
+        )
         raise HTTPException(
-            409,
-            {"message": "no model is serving this chat", "detail": exc.detail},
-        ) from exc
+            409, {"message": "no model is serving this chat", "detail": detail}
+        )
+    return lease
 
 
 def _model_for_lease(lease) -> ModelEntry | None:
@@ -270,8 +281,18 @@ async def send_message(
     if not body.content.strip() and not body.attachment_ids:
         raise HTTPException(400, "message content required")
     conversation = _own_conversation(conversation_id, user)
+
+    # Re-attach, don't restart: if a generation is already running for this
+    # conversation (e.g. the user navigated away and came back, or a duplicate
+    # submit), stream the existing job rather than launching a second one.
+    running = chat_job_manager.get(conversation_id)
+    if running is not None and running.state in ("queued", "running"):
+        return StreamingResponse(
+            running.subscribe(), media_type="text/event-stream"
+        )
+
     attachments = _own_uploads(body.attachment_ids, user)
-    lease = _resolve_lease(conversation.model_slug)
+    lease = _select_lease(conversation.model_slug)
     model = _model_for_lease(lease)
     thinking = body.thinking or conversation.thinking
 
@@ -312,8 +333,8 @@ async def send_message(
         conversation.summary,
     )
 
-    # Persist the user turn before streaming so a dropped connection still
-    # leaves a consistent history (skipped when reusing a retried turn).
+    # Persist the user turn before generating so the history stays consistent
+    # even if the client is long gone (skipped when reusing a retried turn).
     with write_session() as db:
         if not reused_last:
             db.add(
@@ -332,54 +353,55 @@ async def send_message(
                 row.model_slug = lease.model_slug
             db.add(row)
 
-    collected: list[str] = []
-    persisted: dict[str, int | None] = {}
+    async def post_exchange(assistant_text: str) -> None:
+        await _post_exchange(user, conversation, body.content, assistant_text)
 
-    def persist_assistant() -> int | None:
-        """Idempotent save of whatever streamed — runs on normal completion
-        AND on client disconnect, so an aborted reply keeps its partial text."""
-        if "id" in persisted:
-            return persisted["id"]
-        assistant_text = "".join(collected)
-        if not assistant_text:
-            persisted["id"] = None
-            return None
-        with write_session() as db:
-            assistant_message = ChatMessage(
-                conversation_id=conversation_id,
-                role="assistant",
-                content=assistant_text,
-                token_estimate=memory.estimate_tokens(assistant_text),
-            )
-            db.add(assistant_message)
-            db.flush()
-            persisted["id"] = assistant_message.id
-        memory.schedule_background(
-            _post_exchange(user, conversation, body.content, assistant_text)
-        )
-        return persisted["id"]
+    # The job runs in the orchestrator's event loop, independent of this
+    # request — closing the SSE below never stops it.
+    job = chat_job_manager.start(
+        conversation_id=conversation_id,
+        user_id=user.id,
+        lease=lease,
+        model_slug=lease.model_slug,
+        messages=messages,
+        post_exchange=post_exchange,
+    )
+    return StreamingResponse(job.subscribe(), media_type="text/event-stream")
 
-    async def generate():
-        try:
-            async for frame in chat_service.stream_completion(
-                lease.base_url, lease.model_slug, messages, collected
-            ):
-                yield frame
-        finally:
-            assistant_id = persist_assistant()
-        yield (
-            "data: "
-            + json.dumps(
-                {
-                    "forge": "done",
-                    "conversation_id": conversation_id,
-                    "assistant_message_id": assistant_id,
-                }
-            )
-            + "\n\n"
-        )
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+@router.get("/conversations/{conversation_id}/stream")
+async def stream_conversation(
+    conversation_id: str, user: User = Depends(current_user)
+):
+    """Re-attach to an in-flight generation: replays everything produced so far
+    then streams live tokens. Used when returning to a chat whose reply is
+    still being generated. Emits a single 'idle' frame when nothing is running
+    (the client then just renders the stored history)."""
+    _own_conversation(conversation_id, user)
+    job = chat_job_manager.get(conversation_id)
+    if job is not None:
+        return StreamingResponse(job.subscribe(), media_type="text/event-stream")
+
+    async def idle():
+        yield "data: " + json.dumps(
+            {"forge": "idle", "conversation_id": conversation_id}
+        ) + "\n\n"
+
+    return StreamingResponse(idle(), media_type="text/event-stream")
+
+
+@router.get("/active")
+def active_generations(user: User = Depends(current_user)) -> list[dict]:
+    """Which of the caller's conversations are generating right now, so the
+    conversation list can badge them live."""
+    with read_session() as db:
+        owned = {
+            c.id
+            for c in db.exec(
+                select(Conversation).where(Conversation.user_id == user.id)
+            ).all()
+        }
+    return chat_job_manager.active_for(owned)
 
 
 class ImageBody(BaseModel):
@@ -532,7 +554,7 @@ async def temporary_chat(body: TemporaryBody, user: User = Depends(current_user)
     """Incognito: streams a reply, stores nothing, reads no memory."""
     if not body.messages:
         raise HTTPException(400, "messages required")
-    lease = _resolve_lease(body.model_slug)
+    lease = _select_lease(body.model_slug)
     model = _model_for_lease(lease)
     attachments = _own_uploads(body.attachment_ids, user)
 

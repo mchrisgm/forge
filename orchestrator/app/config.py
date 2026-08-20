@@ -50,6 +50,9 @@ class Settings(BaseSettings):
 
     # Engines
     llamacpp_slots: int = 2
+    # Concurrent chat generations a vLLM lease accepts before Forge queues
+    # more (vLLM batches internally; this just bounds how many jobs it fans in).
+    vllm_max_concurrency: int = 8
     engine_load_timeout_s: int = 900
     default_ctx: int = 16384
 
