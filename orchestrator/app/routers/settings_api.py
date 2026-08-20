@@ -10,7 +10,7 @@ from ..auth import require_admin
 from ..config import get_settings
 from ..db import get_setting, set_setting
 from ..models import User
-from ..services import routing
+from ..services import chat_service, routing
 
 router = APIRouter(prefix="/settings")
 
@@ -30,6 +30,9 @@ class PatchBody(BaseModel):
     session_idle_min: int | None = None
     registry_cron: str | None = None
     headroom_enabled: bool | None = None
+    # Chat system prompt override for every text model. Empty string restores
+    # the built-in default; None leaves it unchanged.
+    chat_system_prompt: str | None = None
     # OAuth app credentials for per-user connector sign-in. Empty string
     # clears the Setting-table override (env default applies again).
     github_oauth_client_id: str | None = None
@@ -72,6 +75,13 @@ async def get_all() -> dict:
         "llamacpp_slots": settings.llamacpp_slots,
         "headroom": await routing.status(),
         "oauth": _oauth_view(),
+        # The chat system prompt: effective value, whether it's customized,
+        # and the built-in default (so the UI can offer restore + diff).
+        "chat_system_prompt": chat_service.current_system_prompt(),
+        "chat_system_prompt_customized": bool(
+            (get_setting("chat_system_prompt") or "").strip()
+        ),
+        "chat_system_prompt_default": chat_service.DEFAULT_SYSTEM_PROMPT,
     }
 
 
@@ -98,6 +108,12 @@ async def patch(
     if body.headroom_enabled is not None:
         set_setting("headroom_enabled", "true" if body.headroom_enabled else "false")
         routing.reset_probe()  # re-probe immediately on next call
+    if body.chat_system_prompt is not None:
+        # Storing the default verbatim counts as "restore to default" too.
+        value = body.chat_system_prompt.strip()
+        if value == chat_service.DEFAULT_SYSTEM_PROMPT.strip():
+            value = ""
+        set_setting("chat_system_prompt", value)
     for key in (
         "github_oauth_client_id",
         "hf_oauth_client_id",

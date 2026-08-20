@@ -278,6 +278,15 @@ holds a GPU lease:
   wipe everything on the Memory page; see [docs/memory.md](docs/memory.md)
   for the full design.
 
+## Chat system prompt
+
+Every text model in chat runs under one system prompt: a built-in default
+written in the style of frontier assistants — lead with the answer, no
+sycophancy, format discipline, honest about limits — with each profile's
+personal instructions and memories stacked on top. Admins can rewrite it on
+the **Settings** page (it applies to every profile and model immediately) and
+restore the default with one click.
+
 ## Thinking levels
 
 Every prompt — session chat, fire-and-forget tasks, and the model chat page —

@@ -278,7 +278,16 @@ class ChatJobManager:
             was_queued = sem.locked()
             if was_queued:
                 job.push(
-                    _frame({"forge": "queued", "conversation_id": job.conversation_id})
+                    _frame(
+                        {
+                            "forge": "queued",
+                            "conversation_id": job.conversation_id,
+                            "detail": (
+                                f"queued — the {lease.engine.value} lane is busy "
+                                "with another generation"
+                            ),
+                        }
+                    )
                 )
             await sem.acquire()
             try:
@@ -289,6 +298,21 @@ class ChatJobManager:
                             {"forge": "running", "conversation_id": job.conversation_id}
                         )
                     )
+                # Always tell the client what is actually happening before the
+                # first token — prompt processing on a big model can take a
+                # while and a silent wait reads as "stuck".
+                job.push(
+                    _frame(
+                        {
+                            "forge": "status",
+                            "conversation_id": job.conversation_id,
+                            "detail": (
+                                f"prompt sent to {model_slug} "
+                                f"({lease.engine.value}) — processing"
+                            ),
+                        }
+                    )
+                )
                 error_text = await _pump_frames(
                     job,
                     lease.base_url,
