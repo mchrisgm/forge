@@ -1,15 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import { api, errorMessage } from "../api/client";
-import type { ModelEntry, Session } from "../api/types";
+import { api, ApiError, errorMessage } from "../api/client";
+import type { GitHubRepo, ModelEntry, Session } from "../api/types";
 import {
   IconBranch,
   IconCube,
+  IconLock,
   IconPlay,
   IconPlus,
+  IconSearch,
   IconStop,
   IconTrash,
+  IconX,
 } from "../components/icons";
 import { PageHeader } from "../components/layout";
 import {
@@ -23,10 +26,125 @@ import {
   SessionStateChip,
   Sheet,
   SkeletonList,
+  Spinner,
   TextInput,
 } from "../components/ui";
 import { useToast } from "../hooks/toast";
-import { relativeTime } from "../lib/utils";
+import { cx, relativeTime } from "../lib/utils";
+
+function PrivateBadge() {
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1 rounded border border-warn/35 bg-warn/10 px-1.5 py-0.5 text-[11px] font-medium text-warn">
+      <IconLock size={10} />
+      Private
+    </span>
+  );
+}
+
+/** Searchable list of the caller's GitHub repos (client-side filtering). */
+function RepoPicker({
+  repos,
+  selected,
+  onSelect,
+}: {
+  repos: GitHubRepo[];
+  selected: GitHubRepo | null;
+  onSelect: (repo: GitHubRepo | null) => void;
+}) {
+  const [query, setQuery] = useState("");
+
+  if (selected) {
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-accent/50 bg-raised px-3 py-2.5">
+        <IconBranch size={15} className="shrink-0 text-accent" />
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-2">
+            <span className="truncate text-sm font-medium text-text">
+              {selected.full_name}
+            </span>
+            {selected.private && <PrivateBadge />}
+          </span>
+          {selected.description && (
+            <span className="block truncate text-xs text-muted">
+              {selected.description}
+            </span>
+          )}
+        </span>
+        <button
+          type="button"
+          aria-label="Clear selected repository"
+          onClick={() => onSelect(null)}
+          className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted hover:bg-overlay hover:text-text"
+        >
+          <IconX size={15} />
+        </button>
+      </div>
+    );
+  }
+
+  const needle = query.trim().toLowerCase();
+  const filtered = needle
+    ? repos.filter(
+        (r) =>
+          r.full_name.toLowerCase().includes(needle) ||
+          r.description.toLowerCase().includes(needle),
+      )
+    : repos;
+
+  return (
+    <div className="space-y-2">
+      <div className="relative">
+        <IconSearch
+          size={15}
+          className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-faint"
+        />
+        <TextInput
+          aria-label="Filter repositories"
+          value={query}
+          autoComplete="off"
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Filter your repositories…"
+          className="pl-9"
+        />
+      </div>
+      <ul className="max-h-48 space-y-1 overflow-y-auto rounded-md border border-edge bg-raised p-1">
+        {filtered.map((repo) => (
+          <li key={repo.full_name}>
+            <button
+              type="button"
+              onClick={() => onSelect(repo)}
+              className="flex min-h-11 w-full cursor-pointer items-center gap-2 rounded px-2.5 py-1.5 text-left hover:bg-overlay"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2">
+                  <span className="truncate text-sm font-medium text-text">
+                    {repo.full_name}
+                  </span>
+                  {repo.private && <PrivateBadge />}
+                </span>
+                {repo.description && (
+                  <span className="block truncate text-xs text-muted">
+                    {repo.description}
+                  </span>
+                )}
+              </span>
+              <span className="shrink-0 text-[11px] text-faint">
+                {relativeTime(repo.pushed_at)}
+              </span>
+            </button>
+          </li>
+        ))}
+        {filtered.length === 0 && (
+          <li className="px-2.5 py-3 text-center text-xs text-faint">
+            {needle
+              ? `No repositories match “${query.trim()}”`
+              : "No repositories found on your account"}
+          </li>
+        )}
+      </ul>
+    </div>
+  );
+}
 
 function NewSessionSheet({
   open,
@@ -42,6 +160,21 @@ function NewSessionSheet({
   const [name, setName] = useState("");
   const [modelId, setModelId] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
+  const [pasteUrl, setPasteUrl] = useState(false);
+  const [selectedRepo, setSelectedRepo] = useState<GitHubRepo | null>(null);
+
+  // The caller's GitHub repos for the picker — 409 means GitHub isn't
+  // connected, which just falls back to the manual URL field.
+  const repos = useQuery({
+    queryKey: ["github-repos"],
+    queryFn: () => api.githubRepos(),
+    enabled: open,
+    staleTime: 60_000,
+  });
+  const githubNotConnected =
+    repos.error instanceof ApiError && repos.error.status === 409;
+  const pickerAvailable = !githubNotConnected && !repos.isError;
+  const usePicker = pickerAvailable && !pasteUrl;
 
   // PLAN §2: AirLLM is chat-only and imagegen is not a language model —
   // neither can power a session (the backend rejects them too).
@@ -60,18 +193,24 @@ function NewSessionSheet({
     [models],
   );
 
+  const effectiveRepoUrl = usePicker
+    ? (selectedRepo?.clone_url ?? "")
+    : repoUrl.trim();
+
   const create = useMutation({
     mutationFn: () =>
       api.createSession({
         name: name.trim(),
         model_id: Number(modelId),
-        repo_url: repoUrl.trim() || undefined,
+        repo_url: effectiveRepoUrl || undefined,
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
       toast("success", "Session is being created");
       setName("");
       setRepoUrl("");
+      setSelectedRepo(null);
+      setPasteUrl(false);
       onClose();
     },
     onError: (err) => toast("error", errorMessage(err)),
@@ -123,17 +262,66 @@ function NewSessionSheet({
             </Select>
           )}
         </Field>
-        <Field label="Repository URL (optional)" helper="Cloned into the workspace on first boot.">
-          {(id) => (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm font-medium text-muted">
+              Repository (optional)
+            </span>
+            {pickerAvailable && (
+              <button
+                type="button"
+                onClick={() => setPasteUrl((p) => !p)}
+                className="cursor-pointer text-xs text-info underline underline-offset-2"
+              >
+                {usePicker ? "Paste a URL instead" : "Pick from your repos"}
+              </button>
+            )}
+          </div>
+
+          {usePicker ? (
+            repos.isLoading ? (
+              <div
+                className={cx(
+                  "flex min-h-11 items-center gap-2 rounded-md border border-edge",
+                  "bg-raised px-3 text-sm text-muted",
+                )}
+              >
+                <Spinner size={14} />
+                Loading your repositories…
+              </div>
+            ) : (
+              <RepoPicker
+                repos={repos.data ?? []}
+                selected={selectedRepo}
+                onSelect={setSelectedRepo}
+              />
+            )
+          ) : (
             <TextInput
-              id={id}
+              aria-label="Repository URL"
               type="url"
               value={repoUrl}
               onChange={(e) => setRepoUrl(e.target.value)}
               placeholder="https://github.com/you/project.git"
             />
           )}
-        </Field>
+
+          <p className="text-xs text-faint">
+            {githubNotConnected ? (
+              <>
+                <Link
+                  to="/connectors"
+                  className="text-info underline underline-offset-2"
+                >
+                  Connect GitHub
+                </Link>{" "}
+                to pick from your repos — or paste any clone URL.
+              </>
+            ) : (
+              "Cloned into the workspace on first boot."
+            )}
+          </p>
+        </div>
         <Button
           type="submit"
           variant="primary"

@@ -4,19 +4,23 @@
 // form driven by auth_fields, and (for custom rows) delete.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState, type ComponentType } from "react";
+import { useEffect, useMemo, useState, type ComponentType } from "react";
+import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import type {
   Connector,
   ConnectorAuthField,
   ConnectorCategory,
   McpType,
+  OAuthDeviceStart,
 } from "../api/types";
 import {
   IconActivity,
   IconBrowser,
+  IconCheck,
   IconChevronDown,
   IconChevronRight,
+  IconCopy,
   IconEdit,
   IconExternal,
   IconGitHub,
@@ -32,16 +36,19 @@ import {
 import { PageHeader } from "../components/layout";
 import {
   Button,
+  Chip,
   ConfirmDialog,
   EmptyState,
   Field,
   SegmentedTabs,
   Sheet,
   SkeletonList,
+  Spinner,
   TextInput,
   Toggle,
 } from "../components/ui";
 import { useToast } from "../hooks/toast";
+import { rememberPendingOAuth } from "../lib/oauth";
 import { cx } from "../lib/utils";
 
 const MASK = "••••••";
@@ -186,6 +193,12 @@ function ConfigForm({ connector }: { connector: Connector }) {
 
   return (
     <div className="space-y-4 pt-3">
+      {connector.oauth.connected && (
+        <p className="text-xs text-faint">
+          Signed in as {connector.oauth.account || "an OAuth account"} — pasting
+          a token here replaces that sign-in.
+        </p>
+      )}
       {connector.auth_fields.map(fieldRow)}
       {connector.auth_note && (
         <p className="text-xs text-faint">{connector.auth_note}</p>
@@ -217,6 +230,300 @@ function ConfigForm({ connector }: { connector: Connector }) {
         )}
       </div>
     </div>
+  );
+}
+
+// ── OAuth sign-in (per-user; device flow modal + code flow redirect) ────────
+
+type DevicePhase =
+  | { phase: "starting" }
+  | { phase: "waiting"; start: OAuthDeviceStart }
+  | { phase: "connected"; account: string }
+  | { phase: "error"; message: string };
+
+/** GitHub device flow: show the one-time code, poll until approved. */
+function DeviceFlowSheet({
+  connector,
+  open,
+  onClose,
+}: {
+  connector: Connector;
+  open: boolean;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [state, setState] = useState<DevicePhase>({ phase: "starting" });
+  const [attempt, setAttempt] = useState(0);
+  const [copied, setCopied] = useState(false);
+
+  // Kick off (or retry) the flow whenever the sheet opens.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setState({ phase: "starting" });
+    setCopied(false);
+    api.oauthStart(connector.kind).then(
+      (start) => {
+        if (cancelled) return;
+        if (start.flow === "device") setState({ phase: "waiting", start });
+        else setState({ phase: "error", message: "Unexpected flow type" });
+      },
+      (err: unknown) => {
+        if (!cancelled) setState({ phase: "error", message: errorMessage(err) });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [open, attempt, connector.kind]);
+
+  // Poll every `interval` seconds while waiting (respecting slow_down bumps).
+  useEffect(() => {
+    if (!open || state.phase !== "waiting") return;
+    let cancelled = false;
+    let interval = Math.max(1, state.start.interval || 5);
+    let timer: number;
+    const tick = () => {
+      api.oauthPoll(connector.kind, state.start.flow_id).then(
+        (res) => {
+          if (cancelled) return;
+          if (res.status === "connected") {
+            setState({ phase: "connected", account: res.account ?? "" });
+            void queryClient.invalidateQueries({ queryKey: ["connectors"] });
+            void queryClient.invalidateQueries({ queryKey: ["github-repos"] });
+            return;
+          }
+          if (res.interval) interval = Math.max(1, res.interval);
+          timer = window.setTimeout(tick, interval * 1000);
+        },
+        (err: unknown) => {
+          // 410 (expired) and 403 (declined) arrive with readable details.
+          if (!cancelled) {
+            setState({ phase: "error", message: errorMessage(err) });
+          }
+        },
+      );
+    };
+    timer = window.setTimeout(tick, interval * 1000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [open, state, connector.kind, queryClient]);
+
+  const copyCode = (code: string) => {
+    void navigator.clipboard
+      ?.writeText(code)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => {
+        /* clipboard unavailable */
+      });
+  };
+
+  return (
+    <Sheet
+      open={open}
+      onClose={onClose}
+      title={`Sign in with ${connector.name}`}
+    >
+      {state.phase === "starting" && (
+        <div className="flex items-center gap-3 py-6 text-sm text-muted">
+          <Spinner size={18} />
+          Contacting {connector.name}…
+        </div>
+      )}
+
+      {state.phase === "waiting" && (
+        <div className="space-y-4">
+          <p className="text-sm text-muted">
+            Enter this one-time code on the {connector.name} device page to
+            connect your account:
+          </p>
+          <div className="flex items-center justify-center gap-2 rounded-xl border border-border bg-raised px-4 py-5">
+            <span className="font-mono text-2xl font-bold tracking-[0.2em] text-text select-all">
+              {state.start.user_code}
+            </span>
+            <button
+              type="button"
+              aria-label="Copy code"
+              onClick={() => copyCode(state.start.user_code)}
+              className="ml-1 flex h-9 w-9 cursor-pointer items-center justify-center rounded-md text-muted hover:bg-overlay hover:text-text"
+            >
+              {copied ? (
+                <IconCheck size={16} className="text-ok" />
+              ) : (
+                <IconCopy size={16} />
+              )}
+            </button>
+          </div>
+          <a
+            href={state.start.verification_uri}
+            target="_blank"
+            rel="noreferrer"
+            className="flex min-h-11 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md bg-accent px-4 text-sm font-semibold text-on-accent transition-colors duration-150 hover:bg-accent-hi"
+          >
+            Open {state.start.verification_uri.replace(/^https?:\/\//, "")}
+            <IconExternal size={14} />
+          </a>
+          <p className="flex items-center justify-center gap-2 text-sm text-muted">
+            <Spinner size={14} />
+            Waiting for approval…
+          </p>
+        </div>
+      )}
+
+      {state.phase === "connected" && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-3 rounded-xl border border-ok/30 bg-ok/10 px-4 py-3">
+            <IconCheck size={18} className="shrink-0 text-ok" />
+            <p className="text-sm text-text">
+              Connected{state.account ? ` as ${state.account}` : ""} — sessions
+              can now use your {connector.name} account.
+            </p>
+          </div>
+          <Button variant="primary" className="w-full" onClick={onClose}>
+            Done
+          </Button>
+        </div>
+      )}
+
+      {state.phase === "error" && (
+        <div className="space-y-4">
+          <p className="rounded-md bg-danger/10 px-3 py-2 text-sm break-words text-danger">
+            {state.message}
+          </p>
+          <div className="flex gap-3">
+            <Button className="flex-1" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button
+              className="flex-1"
+              variant="primary"
+              onClick={() => setAttempt((a) => a + 1)}
+            >
+              Try again
+            </Button>
+          </div>
+        </div>
+      )}
+    </Sheet>
+  );
+}
+
+/** Sign-in / connected-account block on cards whose kind supports OAuth. */
+function OAuthBlock({ connector }: { connector: Connector }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const oauth = connector.oauth;
+  const [deviceOpen, setDeviceOpen] = useState(false);
+
+  const disconnect = useMutation({
+    mutationFn: () => api.oauthDisconnect(connector.kind),
+    onSuccess: () => {
+      toast("success", `${connector.name} account disconnected`);
+      void queryClient.invalidateQueries({ queryKey: ["connectors"] });
+      void queryClient.invalidateQueries({ queryKey: ["github-repos"] });
+    },
+    onError: (err) => toast("error", errorMessage(err)),
+  });
+
+  // Code flow (Hugging Face): stash the pending kind + state, then leave the
+  // SPA for the provider's consent page. /oauth/callback finishes the job.
+  const startCode = useMutation({
+    mutationFn: async () => {
+      const res = await api.oauthStart(
+        connector.kind,
+        `${window.location.origin}/oauth/callback`,
+      );
+      if (res.flow !== "code") throw new Error("Unexpected flow type");
+      rememberPendingOAuth(connector.kind, res.flow_id);
+      window.location.assign(res.authorize_url);
+    },
+    onError: (err) => toast("error", errorMessage(err)),
+  });
+
+  let content;
+  if (oauth.connected) {
+    content = (
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-ok/25 bg-ok/5 px-3 py-2">
+        <Chip color="text-ok">
+          Connected as {oauth.account || "your account"}
+        </Chip>
+        <Button
+          size="sm"
+          variant="ghost"
+          loading={disconnect.isPending}
+          onClick={() => disconnect.mutate()}
+        >
+          Disconnect
+        </Button>
+      </div>
+    );
+  } else if (!oauth.ready) {
+    content = (
+      <div className="mt-3 rounded-lg border border-border bg-raised/50 px-3 py-2.5">
+        <p className="text-xs text-faint">
+          {oauth.setup_note ||
+            `Sign-in isn't configured yet — an admin needs to add a ${connector.name} OAuth app.`}
+        </p>
+        <p className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1">
+          <Link
+            to="/settings"
+            className="inline-flex min-h-6 items-center text-xs text-info underline underline-offset-2"
+          >
+            Open Settings
+          </Link>
+          {oauth.setup_url && (
+            <a
+              href={oauth.setup_url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex min-h-6 items-center gap-1 text-xs text-info underline underline-offset-2"
+            >
+              {connector.name} developer settings
+              <IconExternal size={11} />
+            </a>
+          )}
+        </p>
+      </div>
+    );
+  } else {
+    content = (
+      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        <Button
+          size="sm"
+          variant="primary"
+          loading={startCode.isPending}
+          onClick={() =>
+            oauth.method === "device" ? setDeviceOpen(true) : startCode.mutate()
+          }
+        >
+          {connector.kind === "github" && <IconGitHub size={15} />}
+          Sign in with {connector.name}
+        </Button>
+        <span className="text-xs text-faint">
+          or paste a token under Configure
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {content}
+      {/* Mounted outside the branches so the success state stays visible
+          while the connectors refetch flips the card to "connected". */}
+      {oauth.method === "device" && (
+        <DeviceFlowSheet
+          connector={connector}
+          open={deviceOpen}
+          onClose={() => setDeviceOpen(false)}
+        />
+      )}
+    </>
   );
 }
 
@@ -304,6 +611,8 @@ function ConnectorCard({ connector }: { connector: Connector }) {
           />
         </div>
       </div>
+
+      {connector.oauth.supported && <OAuthBlock connector={connector} />}
 
       {hasConfigArea && (
         <div className="mt-3 border-t border-border">

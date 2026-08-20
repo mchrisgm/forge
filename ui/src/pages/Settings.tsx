@@ -5,8 +5,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
-import type { HeadroomStatus } from "../api/types";
-import { IconChevronRight, IconUser } from "../components/icons";
+import type { HeadroomStatus, OAuthAppSettings } from "../api/types";
+import {
+  IconChevronRight,
+  IconExternal,
+  IconUser,
+} from "../components/icons";
 import { PageHeader } from "../components/layout";
 import {
   Button,
@@ -19,6 +23,8 @@ import {
 import { useToast } from "../hooks/toast";
 import { useCurrentUser } from "../lib/auth";
 import { cx } from "../lib/utils";
+
+const MASK = "••••••";
 
 function HeadroomCard({ headroom }: { headroom: HeadroomStatus }) {
   const { toast } = useToast();
@@ -78,6 +84,179 @@ function HeadroomCard({ headroom }: { headroom: HeadroomStatus }) {
               : "Off"}
         </span>
       </p>
+    </section>
+  );
+}
+
+// ── OAuth sign-in apps (admin) ──────────────────────────────────────────────
+// PATCH /api/settings takes flat keys per provider; this maps connector kind
+// → those keys. Providers the UI doesn't know are skipped (env-only).
+
+const OAUTH_SETTING_KEYS: Record<
+  string,
+  {
+    clientId: "github_oauth_client_id" | "hf_oauth_client_id";
+    secret?: "hf_oauth_client_secret";
+  }
+> = {
+  github: { clientId: "github_oauth_client_id" },
+  "hugging-face": { clientId: "hf_oauth_client_id", secret: "hf_oauth_client_secret" },
+};
+
+function OAuthProviderForm({
+  kind,
+  app,
+}: {
+  kind: string;
+  app: OAuthAppSettings;
+}) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const keys = OAUTH_SETTING_KEYS[kind];
+  const [clientId, setClientId] = useState(app.client_id);
+  // "" = unchanged; the stored secret is never echoed back by the server.
+  const [secret, setSecret] = useState("");
+
+  useEffect(() => setClientId(app.client_id), [app.client_id]);
+
+  const refresh = (data: Awaited<ReturnType<typeof api.patchSettings>>) => {
+    queryClient.setQueryData(["settings"], data);
+    void queryClient.invalidateQueries({ queryKey: ["settings"] });
+    // Client-ID changes flip the connectors' oauth.ready flag.
+    void queryClient.invalidateQueries({ queryKey: ["connectors"] });
+  };
+
+  const save = useMutation({
+    mutationFn: () => {
+      const body: Parameters<typeof api.patchSettings>[0] = {};
+      body[keys.clientId] = clientId.trim();
+      if (keys.secret && secret) body[keys.secret] = secret;
+      return api.patchSettings(body);
+    },
+    onSuccess: (data) => {
+      refresh(data);
+      setSecret("");
+      toast("success", `${app.label} sign-in app saved`);
+    },
+    onError: (err) => toast("error", errorMessage(err)),
+  });
+
+  const clearSecret = useMutation({
+    mutationFn: () => api.patchSettings({ hf_oauth_client_secret: "" }),
+    onSuccess: (data) => {
+      refresh(data);
+      setSecret("");
+      toast("success", "Client secret cleared");
+    },
+    onError: (err) => toast("error", errorMessage(err)),
+  });
+
+  const dirty = clientId.trim() !== app.client_id || secret !== "";
+
+  return (
+    <div className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="text-sm font-medium text-text">{app.label}</h3>
+        <span
+          className={cx(
+            "text-xs",
+            app.client_id ? "text-ok" : "text-faint",
+          )}
+        >
+          {app.client_id ? "configured" : "not configured"}
+        </span>
+      </div>
+      <Field label="Client ID" helper={app.setup_note}>
+        {(id) => (
+          <TextInput
+            id={id}
+            autoComplete="off"
+            value={clientId}
+            onChange={(e) => setClientId(e.target.value)}
+            placeholder={kind === "github" ? "Iv1.…" : "client id"}
+            className="font-mono"
+          />
+        )}
+      </Field>
+      {keys.secret && app.needs_secret && (
+        <Field
+          label="Client secret"
+          helper={
+            app.has_secret
+              ? "Configured — leave blank to keep it."
+              : "Optional — only if the provider issued one for your app."
+          }
+        >
+          {(id) => (
+            <div className="flex gap-2">
+              <TextInput
+                id={id}
+                type="password"
+                autoComplete="off"
+                value={secret}
+                onChange={(e) => setSecret(e.target.value)}
+                placeholder={app.has_secret ? MASK : ""}
+              />
+              {app.has_secret && (
+                <Button
+                  className="shrink-0"
+                  variant="ghost"
+                  aria-label={`Clear ${app.label} client secret`}
+                  loading={clearSecret.isPending}
+                  onClick={() => clearSecret.mutate()}
+                >
+                  Clear
+                </Button>
+              )}
+            </div>
+          )}
+        </Field>
+      )}
+      <div className="flex items-center justify-between gap-3">
+        {app.setup_url ? (
+          <a
+            href={app.setup_url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex min-h-9 items-center gap-1 text-xs text-info underline underline-offset-2"
+          >
+            {app.label} developer settings
+            <IconExternal size={12} />
+          </a>
+        ) : (
+          <span />
+        )}
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={!dirty}
+          loading={save.isPending}
+          onClick={() => save.mutate()}
+        >
+          Save
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function OAuthAppsCard({ oauth }: { oauth: Record<string, OAuthAppSettings> }) {
+  const providers = Object.entries(oauth).filter(
+    ([kind]) => OAUTH_SETTING_KEYS[kind] !== undefined,
+  );
+  if (providers.length === 0) return null;
+  return (
+    <section className="rounded-xl border border-border bg-surface p-4">
+      <h2 className="text-sm font-semibold text-text">OAuth sign-in apps</h2>
+      <p className="mt-0.5 mb-4 text-sm text-muted">
+        Lets each profile connect their own account on the Connectors page
+        instead of pasting tokens.
+      </p>
+      <div className="space-y-4">
+        {providers.map(([kind, app]) => (
+          <OAuthProviderForm key={kind} kind={kind} app={app} />
+        ))}
+      </div>
     </section>
   );
 }
@@ -248,6 +427,10 @@ export default function Settings() {
           </form>
 
           <HeadroomCard headroom={settings.data.headroom} />
+
+          {user?.is_admin && settings.data.oauth && (
+            <OAuthAppsCard oauth={settings.data.oauth} />
+          )}
 
           {user?.is_admin && <RegistrationCard />}
 

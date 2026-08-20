@@ -20,6 +20,7 @@ import Memory from "./pages/Memory";
 import ModelChat from "./pages/ModelChat";
 import Models from "./pages/Models";
 import More from "./pages/More";
+import OAuthCallback from "./pages/OAuthCallback";
 import Profile from "./pages/Profile";
 import Register from "./pages/Register";
 import SessionDetail from "./pages/SessionDetail";
@@ -122,6 +123,8 @@ const router = createBrowserRouter([
       { path: "chat", element: <ModelChat /> },
       { path: "skills", element: <Skills /> },
       { path: "connectors", element: <Connectors /> },
+      // OAuth code-flow redirect target — must survive a full page load.
+      { path: "oauth/callback", element: <OAuthCallback /> },
       { path: "system", element: <System /> },
       { path: "settings", element: <Settings /> },
       { path: "profile", element: <Profile /> },
