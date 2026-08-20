@@ -1,4 +1,4 @@
-.PHONY: up down logs build test smoke lint dev seed ui-build clean help env preflight sandbox
+.PHONY: up down logs build test smoke lint dev seed ui-build clean help env preflight sandbox verify
 
 # GPU boxes automatically get the NVML overlay (orchestrator GPU stats/leases);
 # CPU-only boxes fall back to plain docker-compose.yml and come up cleanly.
@@ -9,12 +9,17 @@ COMPOSE_DEV  = $(COMPOSE) -f docker-compose.dev.yml
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-env: ## Create .env from .env.example and generate SEARXNG_SECRET (idempotent)
+env: ## Create .env from .env.example and generate its secrets (idempotent)
 	@test -f .env || { cp .env.example .env && echo "created .env from .env.example"; }
 	@grep -qE '^SEARXNG_SECRET=[^[:space:]#]' .env || { \
 		sed -i '/^SEARXNG_SECRET=/d' .env; \
 		echo "SEARXNG_SECRET=$$(openssl rand -hex 32)" >> .env; \
 		echo "generated SEARXNG_SECRET into .env"; \
+	}
+	@grep -qE '^FORGE_SECRET_KEY=[^[:space:]#]' .env || { \
+		sed -i '/^FORGE_SECRET_KEY=/d' .env; \
+		echo "FORGE_SECRET_KEY=$$(openssl rand -hex 32)" >> .env; \
+		echo "generated FORGE_SECRET_KEY into .env"; \
 	}
 
 preflight: ## Check host prerequisites (docker, compose v2, GPU runtime, disk, KVM)
@@ -32,6 +37,12 @@ up: env preflight ## Preflight, then build and start the full stack (gateway on 
 		echo "prefetching engine images (FORGE_SKIP_PULL=1 to skip)..."; \
 		$(COMPOSE) --profile engines pull llamacpp vllm || true; \
 	fi
+	# Sweep lane containers left on pre-rebuild images, then prove the stack
+	# is actually up: services running, orchestrator healthy, images built.
+	./scripts/verify.sh
+
+verify: ## Sweep stale lane containers + verify services/health/images
+	./scripts/verify.sh
 
 down: ## Stop the stack (volumes are kept)
 	$(COMPOSE) down --remove-orphans

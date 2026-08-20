@@ -113,7 +113,10 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 ```
 
 Both scripts run the same steps as `make up` (preflight → `.env` + secrets →
-GPU-overlay detection → build/start → engine prefetch) and are re-runnable.
+GPU-overlay detection → build/start → engine prefetch → sweep stale lane
+containers → **verify**: every always-on service running, orchestrator
+healthy, gateway answering, all local images built) and are re-runnable.
+Re-check a running stack any time with `make verify` / `scripts/verify.sh`.
 
 That's the whole setup — no manual `.env` step. `make up` (and the setup
 scripts):
@@ -428,6 +431,13 @@ service needs to change.
   imagegen`. The System page (and `GET /api/system/stats` →
   `missing_images`) shows which are absent; the first llama.cpp/vLLM load
   pulls its image automatically if the prefetch was skipped.
+- **Not sure everything is up?** — `make verify` (or `scripts/verify.sh`)
+  sweeps lane containers stranded on pre-rebuild images and then checks the
+  whole stack: always-on services running, the orchestrator healthcheck,
+  the gateway answering on :8080, and the locally-built images. It exits
+  non-zero naming exactly what's wrong. The System tab shows the same
+  live view (Services card + missing-image banner, which clears itself
+  once you build).
 - **Engine fails to load / VRAM OOM** — the healthwait treats an engine
   container exit as a failed load: the lease auto-releases and the engine's
   log tail surfaces in the UI (Models/System) and in `GET /api/engines` under
