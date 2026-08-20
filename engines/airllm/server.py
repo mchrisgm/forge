@@ -107,6 +107,123 @@ def _repair_split_cache(shards_dir: str) -> None:
         shutil.rmtree(split_dir, ignore_errors=True)
 
 
+def _checkpoint_tensor_names(model_path: str) -> list[str] | None:
+    """Tensor names in a LOCAL checkpoint (from the safetensors/bin index, or
+    a single-file header). None when unknowable (HF repo id, missing files) —
+    callers must then rely on the post-load verification instead."""
+    path = Path(model_path)
+    if not path.is_dir():
+        return None
+    for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        index_file = path / index_name
+        if index_file.exists():
+            try:
+                weight_map = json.loads(index_file.read_text())["weight_map"]
+                return list(weight_map.keys())
+            except Exception as exc:
+                log.warning("unreadable checkpoint index %s: %s", index_file, exc)
+                return None
+    single = path / "model.safetensors"
+    if single.exists():
+        try:
+            from safetensors import safe_open
+
+            with safe_open(str(single), framework="pt") as handle:
+                return list(handle.keys())
+        except Exception as exc:
+            log.warning("unreadable single-file checkpoint %s: %s", single, exc)
+    return None
+
+
+def _resolve_streaming_names(model_path: str, hf_token: str) -> tuple[str, dict] | None:
+    """(class name, layer_names_dict) AirLLM will stream with — resolved the
+    same way its AutoModel picks a class, WITHOUT instantiating the (huge)
+    model: set_layer_names_dict on every AirLLM class only assigns a dict."""
+    try:
+        import importlib
+
+        from airllm.auto_model import AutoModel as AirAutoModel
+
+        kwargs = {"hf_token": hf_token} if hf_token else {}
+        module_name, cls_name = AirAutoModel.get_module_class(model_path, **kwargs)
+        cls = getattr(importlib.import_module(module_name), cls_name)
+        probe = cls.__new__(cls)  # bypass __init__ — name resolution only
+        probe.set_layer_names_dict()
+        return cls_name, dict(probe.layer_names_dict)
+    except Exception as exc:
+        log.warning("could not resolve AirLLM layer names up front: %s", exc)
+        return None
+
+
+def _streamability_error(
+    tensor_names: list[str], cls_name: str, layer_names: dict
+) -> str | None:
+    """Why this checkpoint can NOT be streamed by the selected AirLLM class,
+    or None when it looks streamable.
+
+    AirLLM filters the layers it splits down to names that actually occur in
+    the checkpoint; when the class's expected names (llama-style
+    ``model.embed_tokens`` for the generic fallback) match NOTHING — an
+    unrecognized architecture with a different tensor layout — that filter
+    leaves an EMPTY list, ``all()`` over it is vacuously true, and the "split"
+    completes having written no shards at all. Generation then dies with the
+    cryptic 'No such file … .safetensors'. Catch it up front instead."""
+    embed_prefix = str(layer_names.get("embed", "")) + "."
+    layer_prefix = str(layer_names.get("layer_prefix", "")) + "."
+    missing = [
+        prefix
+        for prefix in (embed_prefix, layer_prefix)
+        if not any(name.startswith(prefix) for name in tensor_names)
+    ]
+    if not missing:
+        return None
+    example = tensor_names[0] if tensor_names else "<none>"
+    return (
+        f"this model's checkpoint layout is not streamable by AirLLM: it "
+        f"selected {cls_name} (expecting tensors under "
+        f"{' and '.join(repr(p) for p in missing)}) but the checkpoint has no "
+        f"such tensors (first tensor: {example!r}). AirLLM would silently "
+        "produce an empty layer split and every generation would fail with a "
+        "missing-shard error. This model cannot run on the AirLLM lane — "
+        "remove it or serve it through a different engine."
+    )
+
+
+def _verify_split_complete(model: Any) -> None:
+    """Hard gate after from_pretrained: every shard the model will stream must
+    exist in the split dir. AirLLM's own completeness check is vacuous when
+    its expected-layer list filtered down to nothing (see _streamability_error)
+    and trusts a cache that a crash left partial in ways the pairwise repair
+    can't see — so verify against the ACTUAL layer list the model resolved.
+
+    lm_head is exempt: tied-embedding checkpoints legitimately have no
+    lm_head shard (AirLLM re-ties it to the resident embedding at setup)."""
+    split_dir = Path(str(getattr(model, "checkpoint_path", "") or ""))
+    layer_names = list(getattr(model, "layer_names", []) or [])
+    if not layer_names:
+        raise RuntimeError(
+            "AirLLM resolved no streamable layers for this model — its "
+            "architecture is not supported by the AirLLM lane."
+        )
+    lm_head = (getattr(model, "layer_names_dict", None) or {}).get("lm_head", "")
+    required = [name for name in layer_names if name != lm_head]
+    missing = [
+        name
+        for name in required
+        if not (split_dir / f"{name}.safetensors").exists()
+        or (split_dir / f"{name}.safetensors").stat().st_size == 0
+    ]
+    if missing:
+        preview = ", ".join(missing[:3])
+        raise RuntimeError(
+            f"AirLLM layer split at {split_dir} is incomplete: "
+            f"{len(missing)}/{len(required)} shards missing or empty "
+            f"(e.g. {preview}). The split was interrupted or the model layout "
+            "is unsupported — unload and reload the model to rebuild the "
+            "split; if this repeats, the model cannot run on the AirLLM lane."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Model state — loaded lazily on the first completion request, never by the
 # readiness probe. threading.Lock (not asyncio) because loading happens inside
@@ -140,9 +257,25 @@ class _ModelState:
         if shards_dir:
             kwargs["layer_shards_saving_path"] = shards_dir
             _repair_split_cache(shards_dir)
+
+        # Fail fast on a checkpoint AirLLM cannot stream, BEFORE the (possibly
+        # hours-long) split even starts. Only possible for local checkpoints;
+        # the post-load verification below covers everything else.
+        tensor_names = _checkpoint_tensor_names(MODEL_PATH)
+        resolved = _resolve_streaming_names(MODEL_PATH, hf_token)
+        if tensor_names and resolved:
+            cls_name, layer_names = resolved
+            log.info("AirLLM class for this model: %s", cls_name)
+            error = _streamability_error(tensor_names, cls_name, layer_names)
+            if error:
+                raise RuntimeError(error)
+
         log.info("loading AirLLM model %r (this can take a long time)", MODEL_PATH)
         t0 = time.monotonic()
         model = AutoModel.from_pretrained(MODEL_PATH, **kwargs)
+        # Never trust the split blindly: a vacuously-passed or interrupted
+        # split dies later, mid-generation, with a cryptic missing-file error.
+        _verify_split_complete(model)
         log.info("model loaded in %.1fs", time.monotonic() - t0)
         return model
 
@@ -345,6 +478,18 @@ async def chat_completions(request: ChatCompletionRequest):
         )
     except HTTPException:
         raise
+    except FileNotFoundError as exc:
+        # Should be unreachable now (_verify_split_complete gates the load),
+        # but a shard removed while the model is resident still lands here.
+        log.exception("generation failed: layer shard missing")
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"AirLLM generation failed: {exc}. The layer split lost a "
+                "shard while the model was loaded — unload and reload the "
+                "model to rebuild it."
+            ),
+        ) from exc
     except Exception as exc:
         log.exception("generation failed")
         raise HTTPException(
