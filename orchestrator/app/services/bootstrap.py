@@ -9,6 +9,7 @@ LAN can register their own profile.
 """
 
 import logging
+import time
 
 from sqlmodel import select
 
@@ -17,10 +18,16 @@ from ..db import read_session
 
 log = logging.getLogger(__name__)
 
-# Locally-built images the orchestrator spawns containers from that were
-# missing at boot — populated by check_required_images() and exposed through
+# Locally-built images the orchestrator spawns containers from that are
+# currently missing — populated by check_required_images() and exposed through
 # GET /api/system/stats as `missing_images` so the UI can show a setup warning.
+# Kept LIVE (re-probed with a small TTL by current_missing_images), not a boot
+# snapshot: running `make up` in another terminal must clear the warning
+# without an orchestrator restart.
 missing_images: list[str] = []
+
+_IMAGE_CHECK_TTL_S = 20.0
+_last_image_check = 0.0
 
 
 def seed_model_catalog_if_empty() -> int:
@@ -53,8 +60,10 @@ def seed_model_catalog_if_empty() -> int:
 def check_required_images() -> list[str]:
     """Check that the images the orchestrator spawns containers from exist
     (session-runner + the locally-built engine lanes). Purely advisory: a
-    missing image logs ONE prominent warning naming the exact build commands
-    and is surfaced via /api/system/stats — the stack still boots."""
+    NEWLY missing image logs one prominent warning naming the exact build
+    commands and is surfaced via /api/system/stats — the stack still boots.
+    Re-runnable: transitions (image built / image gone) are logged once each,
+    and the module-level `missing_images` always reflects the latest probe."""
     import docker
 
     from ..config import get_settings
@@ -75,8 +84,12 @@ def check_required_images() -> list[str]:
         missing_images[:] = []
         return []
 
+    newly_missing = [m for m in missing if m not in missing_images]
+    now_built = [m for m in missing_images if m not in missing]
     missing_images[:] = missing
-    if missing:
+    if now_built:
+        log.info("previously missing images are now built: %s", ", ".join(now_built))
+    if newly_missing:
         log.warning(
             "════════════════════════════════════════════════════════════\n"
             "  Missing local images: %s\n"
@@ -88,6 +101,18 @@ def check_required_images() -> list[str]:
             ", ".join(missing),
         )
     return missing
+
+
+def current_missing_images() -> list[str]:
+    """Live view for /api/system/stats: re-probe docker (TTL-bounded — the
+    System tab polls every 5s) so building the images clears the warning
+    within seconds instead of sticking until the next orchestrator restart."""
+    global _last_image_check
+    now = time.monotonic()
+    if now - _last_image_check >= _IMAGE_CHECK_TTL_S:
+        _last_image_check = now
+        check_required_images()
+    return list(missing_images)
 
 
 def first_run_banner() -> None:
