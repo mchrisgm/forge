@@ -44,6 +44,8 @@ def lease_capacity(lease: Lease) -> int:
     return {
         EngineKind.llamacpp: max(1, settings.llamacpp_slots),
         EngineKind.vllm: max(1, settings.vllm_max_concurrency),
+        EngineKind.sglang: max(1, settings.sglang_max_concurrency),
+        EngineKind.tabby: max(1, settings.tabby_max_concurrency),
         EngineKind.airllm: 1,  # streams layers from disk — strictly one at a time
     }.get(lease.engine, 1)
 

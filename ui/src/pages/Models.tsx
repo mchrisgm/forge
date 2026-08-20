@@ -692,6 +692,21 @@ function ModelCard({
     },
   });
 
+  // Escape hatch for a lane that cannot serve the model (an AirLLM-lane
+  // checkpoint AirLLM cannot stream): re-resolve for llama.cpp/vLLM. The
+  // backend answers 409 with an honest reason when nothing else fits.
+  const refit = useMutation({
+    mutationFn: () => api.refitModel(model.id),
+    onSuccess: (updated) => {
+      toast(
+        "success",
+        `${model.display_name} refitted to the ${updated.engine} lane — downloading`,
+      );
+      invalidate();
+    },
+    onError: (err) => toast("error", errorMessage(err)),
+  });
+
   const unload = useMutation({
     mutationFn: () =>
       api.unloadEngine(
@@ -809,6 +824,19 @@ function ModelCard({
             {gpuCount > 1 && holder ? `Unload GPU ${holder.gpu_index}` : "Unload"}
           </Button>
         )}
+        {model.engine === "airllm" &&
+          !isHolder &&
+          model.status !== "downloading" && (
+            <Button
+              size="sm"
+              variant="ghost"
+              loading={refit.isPending}
+              title="Re-resolve this model for the llama.cpp/vLLM lanes (finds a GGUF/AWQ build that fits)"
+              onClick={() => refit.mutate()}
+            >
+              Try another lane
+            </Button>
+          )}
         <Button
           size="sm"
           variant="ghost"

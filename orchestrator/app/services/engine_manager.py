@@ -112,6 +112,8 @@ def engine_port(engine: EngineKind, settings: Settings) -> int:
     return {
         EngineKind.llamacpp: settings.llamacpp_port,
         EngineKind.vllm: settings.vllm_port,
+        EngineKind.sglang: settings.sglang_port,
+        EngineKind.tabby: settings.tabby_port,
         EngineKind.airllm: settings.airllm_port,
         EngineKind.imagegen: settings.imagegen_port,
     }[engine]
@@ -174,6 +176,62 @@ def build_vllm_command(
     if model.tool_call_format.value != "none":
         cmd += ["--enable-auto-tool-choice", "--tool-call-parser", _vllm_parser(model)]
     return cmd
+
+
+def _sglang_parser(model: ModelEntry) -> str:
+    # SGLang's tool-call parser names differ from vLLM's; hermes-style
+    # templates are what qwen25 parses.
+    return {
+        "hermes": "qwen25",
+        "qwen": "qwen25",
+        "llama3": "llama3",
+    }.get(model.tool_call_format.value, "qwen25")
+
+
+def build_sglang_command(
+    model: ModelEntry, settings: Settings, tensor_parallel: int = 1
+) -> list[str]:
+    """SGLang serves the checkpoint as published: bf16/fp16 or an embedded
+    quantization_config (fp8/awq/gptq), auto-detected at load. The image's
+    entrypoint is a shell, so the full launch command is ours."""
+    model_path = f"/data/models/{model.file_path}" if model.file_path else model.hf_repo
+    ctx = min(model.ctx_max or 16384, 16384)
+    cmd = [
+        "python3", "-m", "sglang.launch_server",
+        "--model-path", model_path,
+        "--served-model-name", opencode_model_id_for(model),
+        "--host", "0.0.0.0",
+        "--port", str(settings.sglang_port),
+        "--context-length", str(ctx),
+        # Leave headroom for CUDA graphs on an 11-12GB card (default 0.9 OOMs).
+        "--mem-fraction-static", "0.85",
+    ]
+    if tensor_parallel > 1:
+        cmd += ["--tp-size", str(tensor_parallel)]
+    if model.tool_call_format.value != "none":
+        cmd += ["--tool-call-parser", _sglang_parser(model)]
+    return cmd
+
+
+def build_tabby_command(model: ModelEntry, settings: Settings) -> list[str]:
+    """TabbyAPI (ExLlamaV3) launch args. The image's entrypoint is bare
+    `python3`, so the command starts at main.py; every config key is also a
+    CLI flag. Auth is disabled — the lane lives on forge-internal only, the
+    same trust posture as every other engine."""
+    ctx = min(model.ctx_max or 16384, 16384)
+    # model_dir + model_name: tabby loads <model_dir>/<model_name>. The
+    # snapshot lives at /data/models/<file_path>.
+    path = model.file_path or ""
+    parent, _, name = path.rpartition("/")
+    return [
+        "main.py",
+        "--host", "0.0.0.0",
+        "--port", str(settings.tabby_port),
+        "--disable-auth", "true",
+        "--model-dir", f"/data/models/{parent}" if parent else "/data/models",
+        "--model-name", name or path,
+        "--max-seq-len", str(ctx),
+    ]
 
 
 def build_imagegen_env(model: ModelEntry, settings: Settings) -> dict[str, str]:
@@ -365,8 +423,10 @@ class EngineManager:
     ) -> Lease:
         if gpu_count < 1:
             gpu_count = 1
-        if gpu_count > 1 and model.engine != EngineKind.vllm:
-            raise ValueError("only the vLLM lane supports tensor-parallel multi-GPU loads")
+        if gpu_count > 1 and model.engine not in (EngineKind.vllm, EngineKind.sglang):
+            raise ValueError(
+                "only the vLLM and SGLang lanes support tensor-parallel multi-GPU loads"
+            )
         async with self._lock:
             # Drop failed leases; they hold nothing.
             self._leases = {
@@ -533,6 +593,12 @@ class EngineManager:
             image = settings.vllm_image
             command = build_vllm_command(model, settings, len(lease.gpu_ids))
             env["VLLM_NO_USAGE_STATS"] = "1"
+        elif model.engine == EngineKind.sglang:
+            image = settings.sglang_image
+            command = build_sglang_command(model, settings, len(lease.gpu_ids))
+        elif model.engine == EngineKind.tabby:
+            image = settings.tabby_image
+            command = build_tabby_command(model, settings)
         elif model.engine == EngineKind.imagegen:
             image = settings.imagegen_image
             command = None

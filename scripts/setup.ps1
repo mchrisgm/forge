@@ -163,7 +163,7 @@ Invoke-Checked docker compose @composeFiles --profile build-only build session-r
 Invoke-Checked docker compose @composeFiles --profile engines build airllm imagegen
 if (-not $SkipPull) {
   Write-Info 'prefetching the llama.cpp/vLLM engine images (skip next time with -SkipPull)...'
-  docker compose @composeFiles --profile engines pull llamacpp vllm
+  docker compose @composeFiles --profile engines pull llamacpp vllm sglang tabby
   if ($LASTEXITCODE -ne 0) {
     Write-Info "engine image prefetch skipped/failed — they'll pull on first model load"
   }
@@ -197,7 +197,7 @@ foreach ($label in 'forge.engine', 'forge.session') {
 # duplicate the orchestrator's lanes and pin a GPU it wants to lease. compose
 # ps only matches compose-created containers (runtime labels), never the
 # orchestrator's forge-engine-* ones, so this cannot touch a healthy lane.
-foreach ($id in @(Invoke-Capture docker compose @composeFiles --profile engines ps -q llamacpp vllm airllm imagegen)) {
+foreach ($id in @(Invoke-Capture docker compose @composeFiles --profile engines ps -q llamacpp vllm sglang tabby airllm imagegen)) {
   if (-not $id) { continue }
   $name = (Invoke-Capture docker inspect -f '{{.Name}}' $id) -replace '^/', ''
   $null = Invoke-Quiet docker rm -f $id

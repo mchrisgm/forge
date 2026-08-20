@@ -45,7 +45,9 @@ def _hf_token(user: User) -> str | None:
 class ManualAddBody(BaseModel):
     hf_repo: str
     display_name: str = ""
-    engine: EngineKind = EngineKind.llamacpp
+    # None = detect automatically from the repo's config.json + artifacts
+    # (the same detection every other add path uses).
+    engine: EngineKind | None = None
     quant: Quant | None = None
     gguf_filename: str = ""  # required for llamacpp
     params_b: float = 0.0
@@ -59,6 +61,8 @@ class ManualAddBody(BaseModel):
 DEFAULT_QUANT = {
     EngineKind.llamacpp: Quant.gguf_q4_k_m,
     EngineKind.vllm: Quant.awq,
+    EngineKind.sglang: Quant.safetensors,
+    EngineKind.tabby: Quant.exl3,
     EngineKind.airllm: Quant.fp16_airllm,
 }
 
@@ -75,15 +79,44 @@ def list_models() -> list[dict]:
 async def add_model(
     body: ManualAddBody, user: User = Depends(current_user)
 ) -> dict:
-    if body.engine == EngineKind.llamacpp and not body.gguf_filename.endswith(".gguf"):
+    engine = body.engine
+    quant = body.quant
+    file_path = body.gguf_filename
+    params_b = body.params_b
+    note = ""
+    if engine is None:
+        # Automatic: read the repo's real config.json + artifacts and let the
+        # detector pick the lane — the engine field is now optional everywhere.
+        try:
+            resolved = await asyncio.to_thread(
+                resolve_text_candidate, body.hf_repo, _hf_token(user)
+            )
+        except Exception as exc:
+            raise HTTPException(
+                502, f"could not resolve {body.hf_repo}: {exc}"
+            ) from exc
+        if resolved["lane"] is None:
+            raise HTTPException(
+                409,
+                f"{body.hf_repo} cannot run on this box: "
+                + (resolved.get("reason") or "no usable artifact fits the budgets"),
+            )
+        engine, quant, repo, file_path = _artifact_for_lane(
+            resolved["lane"], body.hf_repo, resolved
+        )
+        body.hf_repo = repo
+        params_b = params_b or float(resolved["params_b"] or 0)
+        note = f"Engine detected automatically: {resolved.get('reason', '')}".strip()
+    if engine == EngineKind.llamacpp and not file_path.endswith(".gguf"):
         raise HTTPException(400, "llamacpp models need gguf_filename (*.gguf)")
     entry = ModelEntry(
         hf_repo=body.hf_repo,
         display_name=body.display_name or body.hf_repo.split("/")[-1],
-        engine=body.engine,
-        quant=body.quant or DEFAULT_QUANT[body.engine],
-        file_path=body.gguf_filename if body.engine == EngineKind.llamacpp else "",
-        params_b=body.params_b,
+        engine=engine,
+        quant=quant or DEFAULT_QUANT[engine],
+        file_path=file_path if engine == EngineKind.llamacpp else "",
+        note=note,
+        params_b=params_b,
         ctx_max=body.ctx_max,
         n_layers=body.n_layers,
         is_moe=body.is_moe,
@@ -216,8 +249,31 @@ class SearchAddBody(BaseModel):
     auto_download: bool = True
 
 
+def _artifact_for_lane(lane: str, hf_repo: str, resolved: dict):
+    """(engine, quant, repo, file_path) for a detected lane. Raises 409 for a
+    llamacpp lane with no usable single-file GGUF."""
+    if lane == "vllm":
+        return EngineKind.vllm, Quant.awq, hf_repo, ""
+    if lane == "tabby":
+        # EXL3/EXL2 quantized checkpoint — full snapshot, no separate artifact.
+        return EngineKind.tabby, Quant.exl3, hf_repo, ""
+    if lane == "sglang":
+        # SGLang serves the checkpoint as published (bf16 or its embedded
+        # quantization) — full snapshot, no separate artifact.
+        return EngineKind.sglang, Quant.safetensors, hf_repo, ""
+    if lane == "airllm":
+        return EngineKind.airllm, Quant.fp16_airllm, hf_repo, ""
+    repo = resolved["gguf_repo"] or hf_repo
+    file_path = resolved["gguf_file"] or ""
+    if not file_path:
+        raise HTTPException(409, f"no single-file GGUF found for {hf_repo}")
+    return EngineKind.llamacpp, Quant.gguf_q4_k_m, repo, file_path
+
+
 LANE_NOTE = {
     "vllm": "Added from Hub search — AWQ build assigned to the vLLM fast lane.",
+    "sglang": "Added from Hub search — served natively by SGLang.",
+    "tabby": "Added from Hub search — EXL quantization on the TabbyAPI lane.",
     "llamacpp-full-gpu": "Added from Hub search — GGUF fits fully in VRAM.",
     "llamacpp-offload": "Added from Hub search — GGUF runs with CPU offload.",
     "airllm": "Added from Hub search — AirLLM slow lane (chat-only).",
@@ -274,21 +330,10 @@ async def add_from_search(
         if lane is None:
             raise HTTPException(
                 409,
-                f"{hf_repo} does not fit this hardware in any lane (no usable "
-                "GGUF/AWQ artifact within the VRAM+RAM budgets)",
+                f"{hf_repo} cannot run on this box: "
+                + (resolved.get("reason") or "no usable artifact fits the budgets"),
             )
-        if lane == "vllm":
-            engine, quant = EngineKind.vllm, Quant.awq
-            repo, file_path = hf_repo, ""
-        elif lane == "airllm":
-            engine, quant = EngineKind.airllm, Quant.fp16_airllm
-            repo, file_path = hf_repo, ""
-        else:
-            engine, quant = EngineKind.llamacpp, Quant.gguf_q4_k_m
-            repo = resolved["gguf_repo"] or hf_repo
-            file_path = resolved["gguf_file"] or ""
-            if not file_path:
-                raise HTTPException(409, f"no single-file GGUF found for {hf_repo}")
+        engine, quant, repo, file_path = _artifact_for_lane(lane, hf_repo, resolved)
         # The llamacpp lane stores the RESOLVED quantizer repo in hf_repo, so
         # the searched-repo dedupe above misses re-adds — check the resolved
         # artifact too (file_path basenames survive the downloader's
@@ -383,6 +428,97 @@ async def download_model(
         raise HTTPException(409, "already downloading")
     await downloader.start_download(entry, _hf_token(user))
     return {"ok": True}
+
+
+@router.post("/{model_id}/refit")
+async def refit_model(model_id: int, user: User = Depends(current_user)) -> dict:
+    """Move a model to a DIFFERENT engine lane by re-running artifact
+    resolution (the same GGUF/AWQ hunt used when adding from search).
+
+    Escape hatch for a model its assigned lane cannot actually serve — above
+    all an AirLLM-lane model whose checkpoint layout AirLLM cannot stream:
+    when a quantized build exists that fits this hardware, the entry is
+    rewritten in place (llama.cpp GGUF or vLLM AWQ) and the download starts;
+    when nothing else fits, this says so honestly instead of guessing."""
+    with read_session() as db:
+        entry = db.get(ModelEntry, model_id)
+    if entry is None:
+        raise HTTPException(404, "model not found")
+    if entry.engine == EngineKind.imagegen:
+        raise HTTPException(400, "image models have a single lane — nothing to refit")
+    if downloader.is_downloading(model_id):
+        raise HTTPException(409, "download in progress — wait for it to finish")
+    if any(lease.model_id == model_id for lease in engine_manager.active_leases()):
+        raise HTTPException(409, "model is loaded — unload the engine first")
+
+    try:
+        resolved = await asyncio.to_thread(
+            resolve_text_candidate, entry.hf_repo, _hf_token(user)
+        )
+    except Exception as exc:
+        raise HTTPException(502, f"could not re-resolve {entry.hf_repo}: {exc}") from exc
+
+    lane = resolved["lane"]
+    if lane is None:
+        raise HTTPException(
+            409,
+            f"{entry.hf_repo} cannot run on this box: "
+            + (resolved.get("reason") or "no usable artifact fits the budgets"),
+        )
+    engine, quant, repo, file_path = _artifact_for_lane(lane, entry.hf_repo, resolved)
+    if engine == entry.engine:
+        if engine == EngineKind.airllm:
+            raise HTTPException(
+                409,
+                f"the only lane that can hold {entry.hf_repo} on this hardware "
+                "is AirLLM — no GGUF/AWQ build small enough exists. If AirLLM "
+                "cannot serve it, this model cannot run on this box.",
+            )
+        raise HTTPException(
+            409,
+            f"re-resolution keeps the {engine.value} lane — no alternative "
+            "artifact exists for this hardware",
+        )
+    # The target artifact may already be in the catalog as its own entry.
+    with read_session() as db:
+        rows = db.exec(select(ModelEntry).where(ModelEntry.hf_repo == repo)).all()
+    for row in rows:
+        if row.id != model_id and row.engine == engine and (
+            engine != EngineKind.llamacpp
+            or Path(row.file_path).name == Path(file_path).name
+        ):
+            raise HTTPException(
+                409,
+                f"{repo} {Path(file_path).name}".strip()
+                + f" is already in the catalog as {row.display_name!r} — load "
+                "that model instead (and delete this one if it is unusable)",
+            )
+
+    old_lane = entry.engine.value
+    with write_session() as db:
+        row = db.get(ModelEntry, model_id)
+        row.engine = engine
+        row.quant = quant
+        row.hf_repo = repo
+        row.file_path = file_path
+        row.params_b = float(resolved["params_b"] or row.params_b)
+        row.is_moe = bool(resolved["is_moe"])
+        row.n_layers = 0  # re-estimated at load for the new artifact
+        row.size_gb = float(resolved["gguf_size_gb"] or 0)
+        row.status = ModelStatus.approved
+        row.note = (
+            f"Refitted from the {old_lane} lane: now "
+            f"{engine.value} ({quant.value}) from {repo}."
+        )
+        db.add(row)
+    with read_session() as db:
+        entry = db.get(ModelEntry, model_id)
+    await downloader.start_download(entry, _hf_token(user))
+    bus.publish(
+        "model.refitted",
+        {"model_id": model_id, "from": old_lane, "to": engine.value, "hf_repo": repo},
+    )
+    return entry.model_dump(mode="json")
 
 
 @router.delete("/{model_id}")

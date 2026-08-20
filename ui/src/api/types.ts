@@ -1,7 +1,19 @@
 // Mirrors orchestrator/app/models.py + router response shapes exactly.
 
-export type EngineKind = "llamacpp" | "vllm" | "airllm" | "imagegen";
-export type Quant = "gguf-q4_k_m" | "awq" | "fp16-airllm" | "fp16-diffusers";
+export type EngineKind =
+  | "llamacpp"
+  | "vllm"
+  | "sglang"
+  | "tabby"
+  | "airllm"
+  | "imagegen";
+export type Quant =
+  | "gguf-q4_k_m"
+  | "awq"
+  | "safetensors"
+  | "exl3"
+  | "fp16-airllm"
+  | "fp16-diffusers";
 export type ToolCallFormat = "hermes" | "qwen" | "llama3" | "none";
 export type ModelStatus =
   | "suggested"

@@ -51,7 +51,7 @@ for label in forge.engine forge.session; do
 done
 # compose ps only matches compose-created containers (runtime labels), never
 # the orchestrator's forge-engine-* ones, so this cannot touch a healthy lane.
-for id in $("${COMPOSE[@]}" --profile engines ps -q llamacpp vllm airllm imagegen 2>/dev/null); do
+for id in $("${COMPOSE[@]}" --profile engines ps -q llamacpp vllm sglang tabby airllm imagegen 2>/dev/null); do
   [ -n "$id" ] || continue
   name=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's|^/||') || continue
   docker rm -f "$id" >/dev/null 2>&1 || true

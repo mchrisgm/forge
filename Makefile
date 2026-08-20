@@ -35,7 +35,7 @@ up: env preflight ## Preflight, then build and start the full stack (gateway on 
 	# doesn't spend minutes pulling. FORGE_SKIP_PULL=1 skips it.
 	@if [ "$(FORGE_SKIP_PULL)" != "1" ]; then \
 		echo "prefetching engine images (FORGE_SKIP_PULL=1 to skip)..."; \
-		$(COMPOSE) --profile engines pull llamacpp vllm || true; \
+		$(COMPOSE) --profile engines pull llamacpp vllm sglang tabby || true; \
 	fi
 	# Sweep lane containers left on pre-rebuild images, then prove the stack
 	# is actually up: services running, orchestrator healthy, images built.
