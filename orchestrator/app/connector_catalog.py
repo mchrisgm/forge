@@ -83,7 +83,10 @@ CORE: tuple[CatalogEntry, ...] = (
         command=("github-mcp-server", "stdio"),
         environment={"GITHUB_PERSONAL_ACCESS_TOKEN": "{env:GITHUB_PAT}"},
         auth_fields=(AuthField("token", "Personal access token", placeholder="ghp_…"),),
-        auth_note="Fine-grained or classic PAT. Also enables git push from sessions.",
+        auth_note=(
+            "Sign in with GitHub (device flow) or paste a fine-grained/classic "
+            "PAT. Also enables private-repo clone and git push from sessions."
+        ),
         docs_url="https://github.com/github/github-mcp-server",
     ),
     CatalogEntry(
@@ -513,7 +516,10 @@ INTEGRATIONS: tuple[CatalogEntry, ...] = (
         mcp_type="remote",
         url="https://huggingface.co/mcp",
         auth_fields=(AuthField("token", "HF token (optional)", placeholder="hf_…"),),
-        auth_note="Works anonymously; add a token for private/gated repos.",
+        auth_note=(
+            "Works anonymously; sign in with Hugging Face (or paste a token) "
+            "for private/gated repos — model search and downloads use it too."
+        ),
         docs_url="https://huggingface.co/settings/mcp",
     ),
     CatalogEntry(

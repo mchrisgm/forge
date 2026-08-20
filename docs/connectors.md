@@ -122,6 +122,28 @@ versions so sessions are reproducible.
 4. Toggling a connector off removes its tools *and* its secrets from the next session —
    the switch actually cuts access, it does not just hide the card.
 
+### Sign in with OAuth (GitHub, Hugging Face)
+
+The **GitHub** and **Hugging Face** cards offer a *Sign in with …* button next to the
+token field — each profile connects its **own** account, no shared PAT required:
+
+- **GitHub** uses the device flow: Forge shows a short code, you enter it on
+  github.com/login/device, and the token lands in your github connector. Sessions then
+  clone/push private repos and drive the GitHub MCP as you, and the new-session dialog
+  offers a picker over your own repositories (public and private).
+- **Hugging Face** uses authorization-code + PKCE: you're redirected through
+  huggingface.co and back to `/oauth/callback`. Model search and gated/private downloads
+  then use your access.
+
+Both need a one-time admin setup on the **Settings** page (or `.env`): a GitHub OAuth App
+with *Enable Device Flow* ticked (client ID only), and a Hugging Face Connected App with
+redirect URL `http(s)://<forge host>/oauth/callback`. Signing in fills the same token slot
+a pasted key uses, so either path works; *Disconnect* (or the enable toggle) cuts access.
+Other providers can be added in `orchestrator/app/services/oauth_flows.py` — one registry
+entry per provider that supports a device or PKCE code grant. The **OAuth-only** vendors
+in the table above are a different story: their MCP servers negotiate OAuth themselves
+in-session, which needs no Forge-side app registration.
+
 ## Getting a token, per service
 
 **No auth needed (flip on and go)** — public servers with nothing to configure:

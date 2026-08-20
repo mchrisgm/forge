@@ -102,15 +102,17 @@ def is_downloading(model_id: int) -> bool:
     return bool(task and not task.done())
 
 
-async def start_download(model: ModelEntry) -> None:
+async def start_download(model: ModelEntry, token: str | None = None) -> None:
+    """`token` lets the requesting user's Hugging Face sign-in authorize
+    gated/private repos; the global HF_TOKEN remains the fallback."""
     if model.id is None or is_downloading(model.id):
         return
-    _active[model.id] = asyncio.create_task(_download(model))
+    _active[model.id] = asyncio.create_task(_download(model, token))
 
 
-async def _download(model: ModelEntry) -> None:
+async def _download(model: ModelEntry, token: str | None = None) -> None:
     settings = get_settings()
-    token = settings.hf_token or None
+    token = token or settings.hf_token or None
     models_dir = Path(settings.models_dir)
     model_id = model.id or 0
 

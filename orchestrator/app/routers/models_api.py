@@ -4,11 +4,12 @@ import re
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
+from ..auth import current_user
 from ..config import get_settings
 from ..db import read_session, write_session
 from ..models import (
@@ -18,8 +19,9 @@ from ..models import (
     Quant,
     Suggestion,
     ToolCallFormat,
+    User,
 )
-from ..services import downloader
+from ..services import downloader, oauth_flows
 from ..services.engine_manager import engine_manager
 from ..services.events import bus, sse_stream
 from ..services.registry import (
@@ -31,6 +33,13 @@ from ..services.registry import (
 )
 
 router = APIRouter(prefix="/models")
+
+
+def _hf_token(user: User) -> str | None:
+    """The caller's Hugging Face sign-in (or pasted token), so searches and
+    downloads of gated/private repos run with THEIR access; global HF_TOKEN
+    stays the fallback inside registry/downloader."""
+    return oauth_flows.stored_token(user.id, "hugging-face") or None
 
 
 class ManualAddBody(BaseModel):
@@ -63,7 +72,9 @@ def list_models() -> list[dict]:
 
 
 @router.post("")
-async def add_model(body: ManualAddBody) -> dict:
+async def add_model(
+    body: ManualAddBody, user: User = Depends(current_user)
+) -> dict:
     if body.engine == EngineKind.llamacpp and not body.gguf_filename.endswith(".gguf"):
         raise HTTPException(400, "llamacpp models need gguf_filename (*.gguf)")
     entry = ModelEntry(
@@ -87,7 +98,7 @@ async def add_model(body: ManualAddBody) -> dict:
     with read_session() as db:
         entry = db.get(ModelEntry, entry_id)
     if body.auto_download:
-        await downloader.start_download(entry)
+        await downloader.start_download(entry, _hf_token(user))
     return entry.model_dump(mode="json")
 
 
@@ -110,7 +121,9 @@ def list_suggestions() -> list[dict]:
 
 
 @router.post("/suggestions/{suggestion_id}/approve")
-async def approve_suggestion(suggestion_id: int) -> dict:
+async def approve_suggestion(
+    suggestion_id: int, user: User = Depends(current_user)
+) -> dict:
     with read_session() as db:
         suggestion = db.get(Suggestion, suggestion_id)
     if suggestion is None:
@@ -154,7 +167,7 @@ async def approve_suggestion(suggestion_id: int) -> dict:
             db.add(sug)
     with read_session() as db:
         entry = db.get(ModelEntry, entry_id)
-    await downloader.start_download(entry)
+    await downloader.start_download(entry, _hf_token(user))
     bus.publish("suggestion.approved", {"suggestion_id": suggestion_id, "model_id": entry_id})
     return entry.model_dump(mode="json")
 
@@ -179,13 +192,20 @@ async def trigger_scan() -> dict:
 
 
 @router.get("/search")
-async def search_models(q: str, kind: str = "text", limit: int = 20) -> list[dict]:
+async def search_models(
+    q: str,
+    kind: str = "text",
+    limit: int = 20,
+    user: User = Depends(current_user),
+) -> list[dict]:
     if kind not in ("text", "image"):
         raise HTTPException(400, "kind must be 'text' or 'image'")
     if not q.strip():
         raise HTTPException(400, "q required")
     try:
-        return await asyncio.to_thread(search_hub, q.strip(), kind, limit)
+        return await asyncio.to_thread(
+            search_hub, q.strip(), kind, limit, _hf_token(user)
+        )
     except Exception as exc:
         raise HTTPException(502, f"Hugging Face search failed: {exc}") from exc
 
@@ -205,7 +225,9 @@ LANE_NOTE = {
 
 
 @router.post("/search/add")
-async def add_from_search(body: SearchAddBody) -> dict:
+async def add_from_search(
+    body: SearchAddBody, user: User = Depends(current_user)
+) -> dict:
     """Resolve a searched repo into a runnable catalog entry: text models get
     artifact discovery + lane assignment (GGUF/AWQ hunt, same as suggestions);
     image models become imagegen-lane snapshot entries."""
@@ -223,13 +245,13 @@ async def add_from_search(body: SearchAddBody) -> dict:
         # Only diffusers-format repos are loadable by the imagegen server;
         # text-to-image covers plenty of raw-checkpoint/LoRA repos that would
         # download tens of GB and then fail at load time.
-        if not await asyncio.to_thread(is_diffusers_repo, hf_repo):
+        if not await asyncio.to_thread(is_diffusers_repo, hf_repo, _hf_token(user)):
             raise HTTPException(
                 409,
                 f"{hf_repo} is not a diffusers-format repo (no model_index.json) "
                 "— the imagegen lane cannot load raw checkpoints or LoRAs",
             )
-        size_gb = await asyncio.to_thread(snapshot_size_gb, hf_repo)
+        size_gb = await asyncio.to_thread(snapshot_size_gb, hf_repo, _hf_token(user))
         entry = ModelEntry(
             hf_repo=hf_repo,
             display_name=hf_repo.split("/")[-1],
@@ -243,7 +265,9 @@ async def add_from_search(body: SearchAddBody) -> dict:
         )
     elif body.kind == "text":
         try:
-            resolved = await asyncio.to_thread(resolve_text_candidate, hf_repo)
+            resolved = await asyncio.to_thread(
+                resolve_text_candidate, hf_repo, _hf_token(user)
+            )
         except Exception as exc:
             raise HTTPException(502, f"could not resolve {hf_repo}: {exc}") from exc
         lane = resolved["lane"]
@@ -309,7 +333,7 @@ async def add_from_search(body: SearchAddBody) -> dict:
     with read_session() as db:
         entry = db.get(ModelEntry, entry_id)
     if body.auto_download:
-        await downloader.start_download(entry)
+        await downloader.start_download(entry, _hf_token(user))
     bus.publish("model.added", {"model_id": entry_id, "hf_repo": entry.hf_repo})
     return entry.model_dump(mode="json")
 
@@ -348,14 +372,16 @@ def thinking_directives(model_id: int, level: str) -> dict:
 
 
 @router.post("/{model_id}/download")
-async def download_model(model_id: int) -> dict:
+async def download_model(
+    model_id: int, user: User = Depends(current_user)
+) -> dict:
     with read_session() as db:
         entry = db.get(ModelEntry, model_id)
     if entry is None:
         raise HTTPException(404, "model not found")
     if downloader.is_downloading(model_id):
         raise HTTPException(409, "already downloading")
-    await downloader.start_download(entry)
+    await downloader.start_download(entry, _hf_token(user))
     return {"ok": True}
 
 

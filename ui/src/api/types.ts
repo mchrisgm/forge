@@ -140,6 +140,67 @@ export interface PackInstallResult {
   note: string;
 }
 
+// ── Per-user OAuth sign-in (routers/connectors.py + services/oauth_flows.py) ─
+
+/** GitHub uses the device flow; Hugging Face an authorization-code redirect. */
+export type OAuthMethod = "device" | "code";
+
+/** One provider from GET /api/connectors/oauth/providers. */
+export interface OAuthProviderStatus {
+  supported: boolean;
+  method?: OAuthMethod;
+  /** False until the admin configures a client ID on the Settings page. */
+  ready?: boolean;
+  setup_note?: string;
+  setup_url?: string;
+}
+
+/** POST /{kind}/oauth/start — device flow (GitHub). */
+export interface OAuthDeviceStart {
+  flow: "device";
+  flow_id: string;
+  /** Shown large; the user types it at verification_uri. */
+  user_code: string;
+  verification_uri: string;
+  /** Poll cadence in seconds (RFC 8628). */
+  interval: number;
+  expires_in: number;
+}
+
+/** POST /{kind}/oauth/start — code flow (Hugging Face PKCE redirect). */
+export interface OAuthCodeStart {
+  flow: "code";
+  flow_id: string;
+  authorize_url: string;
+}
+
+export type OAuthStartResult = OAuthDeviceStart | OAuthCodeStart;
+
+/** POST /{kind}/oauth/poll (device only). 410 = expired, 403 = denied. */
+export interface OAuthPollResult {
+  status: "pending" | "connected";
+  account?: string;
+  /** Present when the provider asked us to slow down — use it from now on. */
+  interval?: number;
+}
+
+/** POST /{kind}/oauth/exchange (code flow) — errors arrive as 4xx. */
+export interface OAuthExchangeResult {
+  status: "connected";
+  account: string;
+}
+
+/** One repo from GET /api/connectors/github/repos (409 if not connected). */
+export interface GitHubRepo {
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+  description: string;
+  pushed_at: string | null;
+  html_url: string;
+  clone_url: string;
+}
+
 /** One credential/config field a connector needs (GET /api/connectors). */
 export interface ConnectorAuthField {
   key: string;
@@ -149,6 +210,21 @@ export interface ConnectorAuthField {
   /** Secret + configured fields come back as the "••••••" mask. */
   value: string;
   configured: boolean;
+}
+
+/** Per-user OAuth sign-in state on a connector card (GET /api/connectors). */
+export interface ConnectorOAuth {
+  /** Only github and hugging-face support OAuth sign-in today. */
+  supported: boolean;
+  method?: OAuthMethod;
+  /** False until the admin configures a client ID on the Settings page. */
+  ready?: boolean;
+  setup_note?: string;
+  setup_url?: string;
+  connected: boolean;
+  account: string;
+  /** Unix seconds; absent/null when not connected. */
+  connected_at?: number | null;
 }
 
 export interface Connector {
@@ -162,6 +238,7 @@ export interface Connector {
   auth_note: string;
   docs_url: string;
   is_custom: boolean;
+  oauth: ConnectorOAuth;
   has_token: boolean;
 }
 
@@ -234,6 +311,19 @@ export interface HeadroomStatus {
   url: string;
 }
 
+/** GET /api/settings "oauth" — one provider's admin-configured OAuth app. */
+export interface OAuthAppSettings {
+  label: string;
+  method: OAuthMethod;
+  /** Client IDs are not secret — shown in the clear. */
+  client_id: string;
+  /** True when the provider's flow can use a client secret (Hugging Face). */
+  needs_secret: boolean;
+  has_secret: boolean;
+  setup_note: string;
+  setup_url: string;
+}
+
 export interface SettingsPayload {
   session_idle_min: number;
   registry_cron: string;
@@ -242,6 +332,8 @@ export interface SettingsPayload {
   ram_offload_budget_gb: number;
   llamacpp_slots: number;
   headroom: HeadroomStatus;
+  /** Keyed by connector kind ("github", "hugging-face"). */
+  oauth?: Record<string, OAuthAppSettings>;
 }
 
 // ── Sandbox (orchestrator/app/routers/sandbox_api.py) ───────────────────────

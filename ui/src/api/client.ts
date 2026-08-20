@@ -14,6 +14,7 @@ import type {
   FileResponse,
   FilesResponse,
   GitCommitEntry,
+  GitHubRepo,
   GitStatus,
   ImageGenerationResult,
   Lease,
@@ -23,6 +24,10 @@ import type {
   ModelEntry,
   ModelSearchKind,
   ModelSearchResult,
+  OAuthExchangeResult,
+  OAuthPollResult,
+  OAuthProviderStatus,
+  OAuthStartResult,
   PackInstallResult,
   PackSkill,
   PublicUser,
@@ -367,12 +372,49 @@ export const api = {
   deleteConnector: (kind: string) =>
     del<{ ok: boolean }>(`/api/connectors/${encodeURIComponent(kind)}`),
 
+  // per-user OAuth sign-in (github device flow, hugging-face PKCE code flow)
+  oauthProviders: () =>
+    get<Record<string, OAuthProviderStatus>>("/api/connectors/oauth/providers"),
+  /** Device providers take an empty body; code providers need the SPA's
+   *  `${origin}/oauth/callback` redirect URI. 409 = admin hasn't set a
+   *  client ID yet. */
+  oauthStart: (kind: string, redirectUri?: string) =>
+    post<OAuthStartResult>(
+      `/api/connectors/${encodeURIComponent(kind)}/oauth/start`,
+      redirectUri ? { redirect_uri: redirectUri } : {},
+    ),
+  /** Device flow only — call every `interval` seconds (respect an updated
+   *  interval in the response). 410 = code expired, 403 = user declined. */
+  oauthPoll: (kind: string, flowId: string) =>
+    post<OAuthPollResult>(
+      `/api/connectors/${encodeURIComponent(kind)}/oauth/poll`,
+      { flow_id: flowId },
+    ),
+  /** Code flow only — `state` is the flow id round-tripped by the provider. */
+  oauthExchange: (kind: string, code: string, state: string) =>
+    post<OAuthExchangeResult>(
+      `/api/connectors/${encodeURIComponent(kind)}/oauth/exchange`,
+      { code, state },
+    ),
+  oauthDisconnect: (kind: string) =>
+    del<{ ok: boolean }>(`/api/connectors/${encodeURIComponent(kind)}/oauth`),
+  /** The caller's own repos for the session repo picker, recent pushes
+   *  first. 409 (with a helpful detail) when GitHub isn't connected. */
+  githubRepos: (q?: string) =>
+    get<GitHubRepo[]>(
+      `/api/connectors/github/repos${q ? `?q=${encodeURIComponent(q)}` : ""}`,
+    ),
+
   // settings
   getSettings: () => get<SettingsPayload>("/api/settings"),
   patchSettings: (body: {
     session_idle_min?: number;
     registry_cron?: string;
     headroom_enabled?: boolean;
+    /** OAuth app config (admin) — empty string clears a stored value. */
+    github_oauth_client_id?: string;
+    hf_oauth_client_id?: string;
+    hf_oauth_client_secret?: string;
   }) => patch<SettingsPayload>("/api/settings", body),
 };
 

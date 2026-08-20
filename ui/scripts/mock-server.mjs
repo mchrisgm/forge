@@ -725,6 +725,137 @@ const connectors = JSON.parse(
   readFileSync(join(__dirname, "mock-connectors.json"), "utf8"),
 );
 
+// ── Per-user OAuth sign-in (routers/connectors.py + services/oauth_flows.py) ─
+
+// Admin-configured OAuth apps (PATCH /api/settings flat keys). Both client
+// IDs are set so the "Sign in with …" buttons render out of the box.
+const oauthSettings = {
+  github_oauth_client_id: "Iv1.mock0demo0client",
+  hf_oauth_client_id: "hf-mock-oauth-app",
+  hf_oauth_client_secret: "",
+};
+
+const OAUTH_PROVIDER_META = {
+  github: {
+    label: "GitHub",
+    method: "device",
+    clientIdKey: "github_oauth_client_id",
+    setup_note:
+      "Create a GitHub OAuth App (any callback URL) with device flow " +
+      "enabled, then paste its client ID here. No client secret needed.",
+    setup_url: "https://github.com/settings/developers",
+  },
+  "hugging-face": {
+    label: "Hugging Face",
+    method: "code",
+    clientIdKey: "hf_oauth_client_id",
+    secretKey: "hf_oauth_client_secret",
+    setup_note:
+      "Create a Hugging Face OAuth app with redirect URL http(s)://<your " +
+      "forge host>/oauth/callback and paste its client ID (and secret, if " +
+      "issued) here.",
+    setup_url: "https://huggingface.co/settings/applications",
+  },
+};
+
+// Demo per-user state: GitHub starts connected (connected chip + repo picker
+// work immediately); Hugging Face shows the sign-in button. Disconnect via
+// the UI to exercise the not-connected paths.
+const oauthConnections = {
+  github: { account: "chris-dev", connected_at: (now - 2 * DAY) / 1000 },
+  "hugging-face": null,
+};
+
+const oauthProviderStatus = (kind) => {
+  const meta = OAUTH_PROVIDER_META[kind];
+  if (!meta) return { supported: false };
+  return {
+    supported: true,
+    method: meta.method,
+    ready: Boolean(oauthSettings[meta.clientIdKey]),
+    setup_note: meta.setup_note,
+    setup_url: meta.setup_url,
+  };
+};
+
+const connectorOauthView = (kind) => {
+  const conn = oauthConnections[kind] ?? null;
+  return {
+    ...oauthProviderStatus(kind),
+    connected: Boolean(conn),
+    account: conn?.account ?? "",
+    connected_at: conn?.connected_at ?? null,
+  };
+};
+
+const settingsOauthView = () =>
+  Object.fromEntries(
+    Object.entries(OAUTH_PROVIDER_META).map(([kind, meta]) => [
+      kind,
+      {
+        label: meta.label,
+        method: meta.method,
+        client_id: oauthSettings[meta.clientIdKey],
+        needs_secret: Boolean(meta.secretKey),
+        has_secret: Boolean(meta.secretKey && oauthSettings[meta.secretKey]),
+        setup_note: meta.setup_note,
+        setup_url: meta.setup_url,
+      },
+    ]),
+  );
+
+// Pending flows: device polls report pending once, then connected.
+let oauthFlowSeq = 0;
+const oauthFlows = new Map(); // flow_id -> { kind, polls }
+
+const githubRepos = [
+  {
+    full_name: "acme/api-server",
+    private: true,
+    default_branch: "main",
+    description: "FastAPI backend for the Acme platform.",
+    pushed_at: iso(2 * HOUR),
+    html_url: "https://github.com/acme/api-server",
+    clone_url: "https://github.com/acme/api-server.git",
+  },
+  {
+    full_name: "acme/webapp",
+    private: false,
+    default_branch: "main",
+    description: "Customer-facing React app.",
+    pushed_at: iso(7 * HOUR),
+    html_url: "https://github.com/acme/webapp",
+    clone_url: "https://github.com/acme/webapp.git",
+  },
+  {
+    full_name: "chris-dev/dotfiles",
+    private: false,
+    default_branch: "main",
+    description: "",
+    pushed_at: iso(3 * DAY),
+    html_url: "https://github.com/chris-dev/dotfiles",
+    clone_url: "https://github.com/chris-dev/dotfiles.git",
+  },
+  {
+    full_name: "acme/data-pipeline",
+    private: true,
+    default_branch: "develop",
+    description: "Nightly ingest + dbt models.",
+    pushed_at: iso(6 * DAY),
+    html_url: "https://github.com/acme/data-pipeline",
+    clone_url: "https://github.com/acme/data-pipeline.git",
+  },
+  {
+    full_name: "chris-dev/irrigation-controller",
+    private: false,
+    default_branch: "main",
+    description: "ESP32 firmware for the garden drip system.",
+    pushed_at: iso(21 * DAY),
+    html_url: "https://github.com/chris-dev/irrigation-controller",
+    clone_url: "https://github.com/chris-dev/irrigation-controller.git",
+  },
+];
+
 // ── Multi-user profiles (routers/users.py) ──────────────────────────────────
 
 const currentUser = {
@@ -1510,7 +1641,122 @@ function handleApi(req, res, url) {
       sendJsonAfter(req, res, 700, result);
     });
   }
-  if (p === "/api/connectors") return sendJson(res, connectors);
+  if (p === "/api/connectors") {
+    return sendJson(
+      res,
+      connectors.map((c) => ({ ...c, oauth: connectorOauthView(c.kind) })),
+    );
+  }
+
+  // per-user OAuth sign-in
+  if (p === "/api/connectors/oauth/providers") {
+    return sendJson(
+      res,
+      Object.fromEntries(
+        Object.keys(OAUTH_PROVIDER_META).map((k) => [k, oauthProviderStatus(k)]),
+      ),
+    );
+  }
+  m = p.match(/^\/api\/connectors\/([^/]+)\/oauth\/start$/);
+  if (m && req.method === "POST") {
+    const kind = m[1];
+    const status = oauthProviderStatus(kind);
+    if (!status.supported) {
+      return sendJson(res, { detail: `${kind} does not support OAuth sign-in` }, 404);
+    }
+    if (!status.ready) {
+      return sendJson(
+        res,
+        {
+          detail:
+            `${OAUTH_PROVIDER_META[kind].label} sign-in isn't configured — ` +
+            "an admin must add a client ID on the Settings page. " +
+            OAUTH_PROVIDER_META[kind].setup_note,
+        },
+        409,
+      );
+    }
+    return readBody(req, (body) => {
+      const flowId = `flow-${++oauthFlowSeq}`;
+      oauthFlows.set(flowId, { kind, polls: 0 });
+      if (status.method === "device") {
+        return sendJson(res, {
+          flow: "device",
+          flow_id: flowId,
+          user_code: "ABCD-1234",
+          verification_uri: "https://github.com/login/device",
+          interval: 2,
+          expires_in: 900,
+        });
+      }
+      // Code flow: "authorize" straight back into the SPA so the whole
+      // redirect → /oauth/callback → exchange path works offline.
+      const redirect = body.redirect_uri || "/oauth/callback";
+      sendJson(res, {
+        flow: "code",
+        flow_id: flowId,
+        authorize_url: `${redirect}?code=fake&state=${flowId}`,
+      });
+    });
+  }
+  m = p.match(/^\/api\/connectors\/([^/]+)\/oauth\/poll$/);
+  if (m && req.method === "POST") {
+    const kind = m[1];
+    return readBody(req, (body) => {
+      const flow = oauthFlows.get(body.flow_id);
+      if (!flow || flow.kind !== kind) {
+        return sendJson(res, { detail: "unknown or expired sign-in flow" }, 404);
+      }
+      flow.polls += 1;
+      if (flow.polls < 2) return sendJson(res, { status: "pending" });
+      oauthFlows.delete(body.flow_id);
+      oauthConnections[kind] = {
+        account: "chris-dev",
+        connected_at: Date.now() / 1000,
+      };
+      sendJson(res, { status: "connected", account: "chris-dev" });
+    });
+  }
+  m = p.match(/^\/api\/connectors\/([^/]+)\/oauth\/exchange$/);
+  if (m && req.method === "POST") {
+    const kind = m[1];
+    return readBody(req, (body) => {
+      const flow = oauthFlows.get(body.state);
+      if (!flow || flow.kind !== kind || !body.code) {
+        return sendJson(res, { detail: "unknown or expired sign-in flow" }, 404);
+      }
+      oauthFlows.delete(body.state);
+      const account = kind === "hugging-face" ? "chris-hf" : "chris-dev";
+      oauthConnections[kind] = { account, connected_at: Date.now() / 1000 };
+      sendJson(res, { status: "connected", account });
+    });
+  }
+  m = p.match(/^\/api\/connectors\/([^/]+)\/oauth$/);
+  if (m && req.method === "DELETE") {
+    oauthConnections[m[1]] = null;
+    return sendJson(res, { ok: true });
+  }
+  if (p === "/api/connectors/github/repos") {
+    if (!oauthConnections.github) {
+      return sendJson(
+        res,
+        {
+          detail:
+            "GitHub isn't connected — sign in (or paste a token) on the " +
+            "Connectors page to pick from your repositories.",
+        },
+        409,
+      );
+    }
+    const needle = (q.get("q") ?? "").trim().toLowerCase();
+    return sendJson(
+      res,
+      needle
+        ? githubRepos.filter((r) => r.full_name.toLowerCase().includes(needle))
+        : githubRepos,
+    );
+  }
+
   if (p === "/api/settings") {
     if (req.method === "PATCH") {
       return readBody(req, (body) => {
@@ -1521,10 +1767,17 @@ function handleApi(req, res, url) {
             healthy: body.headroom_enabled ? true : null,
           };
         }
-        sendJson(res, settings);
+        for (const key of [
+          "github_oauth_client_id",
+          "hf_oauth_client_id",
+          "hf_oauth_client_secret",
+        ]) {
+          if (typeof body[key] === "string") oauthSettings[key] = body[key];
+        }
+        sendJson(res, { ...settings, oauth: settingsOauthView() });
       });
     }
-    return sendJson(res, settings);
+    return sendJson(res, { ...settings, oauth: settingsOauthView() });
   }
   if (p === "/api/health") return sendJson(res, { ok: true });
 
