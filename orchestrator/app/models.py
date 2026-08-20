@@ -18,6 +18,7 @@ def new_uuid() -> str:
 class EngineKind(str, Enum):
     llamacpp = "llamacpp"
     vllm = "vllm"
+    sglang = "sglang"  # SGLang (RadixAttention) — native safetensors serving
     airllm = "airllm"
     imagegen = "imagegen"  # diffusers-based text-to-image lane
 
@@ -25,6 +26,9 @@ class EngineKind(str, Enum):
 class Quant(str, Enum):
     gguf_q4_k_m = "gguf-q4_k_m"
     awq = "awq"
+    # SGLang serves the checkpoint as published (bf16/fp16 or its embedded
+    # quantization_config — fp8/gptq/awq — auto-detected at load).
+    safetensors = "safetensors"
     fp16_airllm = "fp16-airllm"
     fp16_diffusers = "fp16-diffusers"
 

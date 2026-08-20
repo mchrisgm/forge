@@ -157,6 +157,20 @@ services:
               count: 1
               capabilities: [gpu]
 
+  sglang:
+    profiles: ["engines"]
+    image: ${FORGE_SGLANG_IMAGE:-lmsysorg/sglang:v0.5.17}
+    volumes:
+      - models:/data/models
+    networks: [forge-internal]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   airllm:
     profiles: ["engines"]
     build: ./engines/airllm

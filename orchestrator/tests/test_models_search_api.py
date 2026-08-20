@@ -316,7 +316,7 @@ class TestAddFromSearch:
             headers=auth_headers,
         )
         assert resp.status_code == 409
-        assert "does not fit" in resp.json()["detail"]
+        assert "cannot run on this box" in resp.json()["detail"]
         assert download_spy == []
         with db_module.read_session() as db:
             assert db.exec(select(ModelEntry)).all() == []
@@ -500,7 +500,7 @@ class TestRefit:
         resolved.update(lane=None)
         r = api.post(f"/api/models/{model_id}/refit", headers=auth_headers)
         assert r.status_code == 409
-        assert "does not fit this hardware" in r.json()["detail"]
+        assert "cannot run on this box" in r.json()["detail"]
 
     def test_target_artifact_already_in_catalog_is_a_409(
         self, api, auth_headers, resolved, download_spy

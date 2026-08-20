@@ -136,3 +136,138 @@ FIT_QUALITY: dict[str, float] = {
     "llamacpp-offload": 0.55,
     "airllm": 0.15,
 }
+
+
+# ── config-aware engine detection (reads the model's real config.json) ──────
+#
+# Name-based guessing put a speculative-decoding draft model on the AirLLM
+# lane; the checkpoint's own config carries the truth. HubFacts is everything
+# detect_lane needs, assembled by registry.resolve_text_candidate from
+# config.json + the repo listing.
+
+
+# Signals that a checkpoint is the DRAFT half of a speculative-decoding pair
+# (SpecForge/DSpark/DFlash, EAGLE, Medusa): it accelerates a target model
+# inside the serving engine and cannot chat on its own.
+_DRAFT_TAGS = {"speculative-decoding", "specforge", "dspark", "dflash", "eagle", "medusa"}
+_DRAFT_ARCH_MARKERS = ("draft", "eagle", "medusa")
+
+# model_type families SGLang serves notably better than vLLM on this class of
+# hardware (MLA attention, huge-MoE routing, hybrid layouts) — preferred when
+# both could load the checkpoint.
+_SGLANG_PREFERRED_TYPES = {
+    "deepseek_v2", "deepseek_v3", "deepseek_vl2",
+    "kimi_k2", "kimi_k3",
+    "glm4_moe", "qwen3_next", "minimax_text",
+}
+
+# Standard decoder families every GPU engine (vLLM AND SGLang) implements
+# natively. Conservative: an arch outside this set with custom code is only
+# servable via a GGUF conversion.
+_NATIVE_MODEL_TYPES = _SGLANG_PREFERRED_TYPES | {
+    "llama", "llama4", "mistral", "mixtral", "qwen2", "qwen2_moe",
+    "qwen3", "qwen3_moe", "gemma", "gemma2", "gemma3", "gemma3_text",
+    "phi", "phi3", "phi4", "granite", "gpt_oss", "glm", "glm4",
+    "internlm2", "internlm3", "exaone", "olmo2", "smollm3", "seed_oss",
+}
+
+# quantization_config quant_method values 4-bit-ish enough to use the AWQ
+# weight sizing; anything else quantized is sized like fp8 (~1.1 B/param).
+_Q4_METHODS = {"awq", "gptq", "compressed-tensors", "quark", "bitsandbytes"}
+
+
+@dataclass(frozen=True)
+class HubFacts:
+    """What the Hub actually says about a repo (config.json + listing)."""
+
+    params_b: float = 0.0
+    model_type: str = ""
+    architectures: tuple[str, ...] = ()
+    custom_code: bool = False       # config.auto_map present (trust_remote_code)
+    quant_method: str = ""          # config.quantization_config.quant_method
+    tags: tuple[str, ...] = ()
+    gguf_size_gb: float = 0.0       # best single-file GGUF found (0 = none)
+    has_awq_variant: bool = False   # separate AWQ build exists (name/tag match)
+    is_moe: bool = False
+
+
+def _is_draft_model(facts: HubFacts) -> bool:
+    if any(t in _DRAFT_TAGS for t in facts.tags):
+        return True
+    return any(
+        marker in arch.lower()
+        for arch in facts.architectures
+        for marker in _DRAFT_ARCH_MARKERS
+    )
+
+
+def _weights_gb(facts: HubFacts) -> float:
+    """Estimated on-GPU weight footprint of the checkpoint as published."""
+    if facts.quant_method:
+        per_param = 0.55 if facts.quant_method in _Q4_METHODS else 1.1
+    else:
+        per_param = 2.0  # bf16/fp16
+    return facts.params_b * per_param
+
+
+def _fits_gpu(facts: HubFacts, ctx: int, budgets: Budgets) -> bool:
+    if facts.params_b <= 0:
+        return False
+    kv_gb = kv_cache_gb(estimate_n_layers(facts.params_b), ctx)
+    return _weights_gb(facts) + kv_gb + 0.6 <= budgets.vram_gb
+
+
+def detect_lane(
+    facts: HubFacts, ctx: int = 16384, budgets: Budgets | None = None
+) -> tuple[str | None, str]:
+    """(lane, reason) for a checkpoint, from what its config actually says.
+
+    Lane strings extend assign_lane's: "sglang" joins vllm/llamacpp-*/airllm.
+    A None lane's reason explains honestly why nothing on this box can run it.
+    """
+    budgets = budgets or Budgets()
+
+    if _is_draft_model(facts):
+        return None, (
+            "this is a speculative-decoding DRAFT model "
+            f"({', '.join(facts.architectures) or 'per its tags'}): it "
+            "accelerates a larger target model inside the serving engine and "
+            "cannot chat on its own"
+        )
+
+    native = facts.model_type in _NATIVE_MODEL_TYPES
+    servable_on_gpu = native or (not facts.custom_code and bool(facts.model_type))
+
+    # A checkpoint already quantized (or small enough in bf16) that fits VRAM
+    # beats any conversion. SGLang is the default native server; vLLM keeps
+    # the separate-AWQ-variant path it has always owned.
+    if servable_on_gpu and _fits_gpu(facts, ctx, budgets):
+        if facts.model_type in _SGLANG_PREFERRED_TYPES or facts.quant_method:
+            return "sglang", (
+                f"{facts.quant_method or 'bf16'} checkpoint fits in VRAM; "
+                "served natively by SGLang"
+            )
+        return "sglang", "bf16 checkpoint fits in VRAM; served natively by SGLang"
+    if facts.has_awq_variant and fits_vllm(facts.params_b, ctx, budgets):
+        return "vllm", "a separate AWQ build fits in VRAM"
+
+    if facts.gguf_size_gb and fits_llamacpp(facts.gguf_size_gb, budgets):
+        if fits_llamacpp_full_gpu(facts.gguf_size_gb, budgets):
+            return "llamacpp-full-gpu", "GGUF quantization fits fully in VRAM"
+        return "llamacpp-offload", "GGUF quantization runs with CPU offload"
+
+    if facts.custom_code and not native:
+        return None, (
+            f"custom-code architecture ({', '.join(facts.architectures) or facts.model_type}) "
+            "— no engine on this box implements it natively and no GGUF "
+            "conversion was found"
+        )
+    if fits_airllm(facts.params_b) and native:
+        return "airllm", "too large for VRAM — streamed from disk (slow lane)"
+    return None, (
+        f"no runnable artifact fits this hardware (params {facts.params_b:.1f}B, "
+        f"arch {facts.model_type or 'unknown'})"
+    )
+
+
+FIT_QUALITY["sglang"] = 1.0

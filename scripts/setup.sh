@@ -120,7 +120,7 @@ bold "[4/6] Building and starting the stack"
 "${COMPOSE[@]}" --profile engines build airllm imagegen
 if [ "$SKIP_PULL" = 0 ]; then
   info "prefetching the llama.cpp/vLLM engine images (skip next time with --skip-pull)..."
-  "${COMPOSE[@]}" --profile engines pull llamacpp vllm || \
+  "${COMPOSE[@]}" --profile engines pull llamacpp vllm sglang || \
     info "engine image prefetch skipped/failed — they'll pull on first model load"
 fi
 

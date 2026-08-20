@@ -308,35 +308,74 @@ def is_diffusers_repo(hf_repo: str, token: str | None = None) -> bool:
     return "model_index.json" in files
 
 
+def _fetch_config(hf_repo: str, token: str | None) -> dict[str, Any]:
+    """The repo's config.json — the ground truth for engine detection. Empty
+    dict when unavailable (no config, gated, network); detection then falls
+    back to name/tag heuristics."""
+    import json
+
+    from huggingface_hub import hf_hub_download
+
+    try:
+        path = hf_hub_download(hf_repo, "config.json", token=token)
+        with open(path, "rb") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        log.debug("config.json unavailable for %s: %s", hf_repo, exc)
+        return {}
+
+
 def resolve_text_candidate(hf_repo: str, token: str | None = None) -> dict[str, Any]:
-    """Artifact discovery + lane assignment for one repo the user picked from
-    search — the same pipeline scan() runs per suggestion. Blocking."""
+    """Artifact discovery + AUTOMATIC engine detection for one repo.
+
+    Reads the checkpoint's real config.json (architectures, model_type,
+    quantization_config, custom code) plus the repo listing, and lets
+    fit_rules.detect_lane pick the engine — never the repo name. Blocking."""
     from huggingface_hub import HfApi
+
+    from .fit_rules import HubFacts, detect_lane
 
     settings = get_settings()
     token = token or settings.hf_token or None
     api = HfApi(token=token)
     info = api.model_info(hf_repo)
     tags = list(info.tags or [])
+    config = _fetch_config(hf_repo, token)
     params_b = estimate_params_b(
         hf_repo, getattr(getattr(info, "safetensors", None), "total", None)
     )
     gguf_repo, gguf_file, gguf_size = _find_gguf(api, hf_repo, token)
     budgets = Budgets(settings.vram_budget_gb, settings.ram_offload_budget_gb)
-    lane = assign_lane(
-        params_b,
-        gguf_size or None,
-        _has_awq(hf_repo, tags),
-        is_moe(hf_repo, tags),
-        budgets=budgets,
+
+    quant_config = config.get("quantization_config")
+    facts = HubFacts(
+        params_b=params_b,
+        model_type=str(config.get("model_type") or ""),
+        architectures=tuple(config.get("architectures") or ()),
+        custom_code=bool(config.get("auto_map")),
+        quant_method=(
+            str(quant_config.get("quant_method") or "")
+            if isinstance(quant_config, dict)
+            else ""
+        ),
+        tags=tuple(tags),
+        gguf_size_gb=float(gguf_size or 0),
+        has_awq_variant=_has_awq(hf_repo, tags),
+        is_moe=is_moe(hf_repo, tags),
     )
+    lane, reason = detect_lane(facts, budgets=budgets)
     return {
         "lane": lane,
+        "reason": reason,
         "params_b": params_b,
-        "is_moe": is_moe(hf_repo, tags),
+        "is_moe": facts.is_moe,
         "gguf_repo": gguf_repo,
         "gguf_file": gguf_file,
         "gguf_size_gb": gguf_size,
+        "model_type": facts.model_type,
+        "architectures": list(facts.architectures),
+        "quant_method": facts.quant_method,
     }
 
 

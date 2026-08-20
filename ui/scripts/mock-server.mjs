@@ -30,6 +30,26 @@ const DAY = 24 * HOUR;
 
 const models = [
   {
+    id: 9,
+    hf_repo: "Qwen/Qwen3-4B-Instruct-2507",
+    display_name: "Qwen3 4B Instruct",
+    family: "qwen",
+    params_b: 4.0,
+    quant: "safetensors",
+    file_path: "hf/Qwen__Qwen3-4B-Instruct-2507",
+    size_gb: 8.1,
+    engine: "sglang",
+    ctx_max: 16384,
+    n_layers: 0,
+    is_moe: false,
+    tool_call_format: "hermes",
+    vision: false,
+    status: "ready",
+    score: 0.9,
+    note: "Engine detected automatically: bf16 checkpoint fits in VRAM; served natively by SGLang",
+    added_at: "2026-08-20T10:00:00Z",
+  },
+  {
     id: 1,
     hf_repo: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
     display_name: "Qwen3 Coder 30B A3B",
