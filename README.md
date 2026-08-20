@@ -277,6 +277,38 @@ holds a GPU lease:
   month-old chats resume for a few thousand tokens. Inspect, edit, pin, or
   wipe everything on the Memory page; see [docs/memory.md](docs/memory.md)
   for the full design.
+- **Live progress & real stop** — while a reply generates you see what is
+  actually happening (queued, routing, model loading, prompt processing) and
+  tokens stream from the first one; `<think>` output collapses under an
+  expandable section. Generation continues server-side if you navigate away
+  — reopening the chat re-attaches to the live stream — and the Stop button
+  cancels the job **on the server** (the partial reply is kept), so leaving
+  and returning does not resurrect it.
+
+## Auto model routing
+
+Set a conversation's model to **Auto** and a tiny always-resident router
+model reads each prompt and picks the best downloaded model for it — small
+models for quick chat, the big ones for code and hard reasoning — then loads
+the pick onto a GPU if it isn't serving yet, narrating every stage in the
+chat ("choosing → routed to X → loading"). Choose the router model on the
+**Settings** page (TinyLlama / Qwen-0.6B class, any ready llama.cpp GGUF
+model). Placement follows the hardware: with several GPUs the router lives
+fully offloaded on the *smallest-VRAM* one; on a single-GPU box it runs on
+CPU beside the main lane so it never steals VRAM. Routing degrades softly —
+router unset, unhealthy, or answering nonsense falls back to a deterministic
+pick (whatever is already serving, else the largest ready model) with the
+reason shown in the chat. When every GPU is busy, Auto answers with the
+currently serving model instead of evicting someone's loaded engine.
+
+## Chat system prompt
+
+Every text model in chat runs under one system prompt: a built-in default
+written in the style of frontier assistants — lead with the answer, no
+sycophancy, format discipline, honest about limits — with each profile's
+personal instructions and memories stacked on top. Admins can rewrite it on
+the **Settings** page (it applies to every profile and model immediately) and
+restore the default with one click.
 
 ## Thinking levels
 

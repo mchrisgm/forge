@@ -247,14 +247,18 @@ class TestSendMessage:
         assert resp.headers["content-type"].startswith("text/event-stream")
 
         payloads = sse_payloads(resp.text)
-        # Upstream frames forwarded verbatim, then [DONE], then forge.done.
+        # A status frame narrates prompt processing, then the upstream frames
+        # forwarded verbatim, then [DONE], then forge.done.
+        status = json.loads(payloads[0])
+        assert status["forge"] == "status"
+        assert "processing" in status["detail"]
         deltas = [
             json.loads(p)["choices"][0]["delta"]["content"]
-            for p in payloads[:2]
+            for p in payloads[1:3]
         ]
         assert deltas == list(STREAM_PIECES)
-        assert payloads[2] == "[DONE]"
-        done = json.loads(payloads[3])
+        assert payloads[3] == "[DONE]"
+        done = json.loads(payloads[4])
         assert done["forge"] == "done"
         assert done["conversation_id"] == conversation["id"]
 
@@ -461,4 +465,8 @@ class TestChatStatus:
 
     def test_empty_when_nothing_is_ready(self, api, auth_headers):
         body = api.get("/api/chat/status", headers=auth_headers).json()
-        assert body == {"serving": [], "image": None}
+        assert body == {
+            "serving": [],
+            "image": None,
+            "auto": {"available": False, "router_model": "", "router_ready": False},
+        }

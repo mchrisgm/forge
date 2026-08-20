@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     vllm_port: int = 8082
     sglang_port: int = 8085
     tabby_port: int = 8086
+    router_port: int = 8087  # tiny auto-routing model (model_router.py)
     airllm_port: int = 8083
     imagegen_port: int = 8084
 

@@ -21,7 +21,14 @@ from ..models import (
     Upload,
     User,
 )
-from ..services import chat_service, image_service, memory, uploads, web_reader
+from ..services import (
+    chat_service,
+    image_service,
+    memory,
+    model_router,
+    uploads,
+    web_reader,
+)
 from ..services.chat_jobs import chat_job_manager
 from ..services.engine_manager import engine_manager
 
@@ -303,8 +310,25 @@ async def send_message(
             "to finish before sending another message"
         )
 
-    lease = _select_lease(conversation.model_slug)
-    model = _model_for_lease(lease)
+    # "auto": the tiny router model picks the answering model INSIDE the job
+    # (model_router), so nothing needs to be serving yet — but at least one
+    # downloaded text model must exist for routing to have anything to pick.
+    is_auto = conversation.model_slug == model_router.AUTO_SLUG
+    model = None
+    if is_auto:
+        lease = None
+        if not model_router.ready_candidates():
+            raise HTTPException(
+                409,
+                {
+                    "message": "no model is ready to route to",
+                    "detail": "Auto mode needs at least one downloaded text "
+                    "model. Download one from the Models page first.",
+                },
+            )
+    else:
+        lease = _select_lease(conversation.model_slug)
+        model = _model_for_lease(lease)
     thinking = body.thinking or conversation.thinking
 
     use_memory = user.memory_enabled and conversation.memory_enabled
@@ -332,16 +356,22 @@ async def send_message(
     history = _history_for(conversation)
     if reused_last and history:
         history = history[:-1]  # the retried turn re-enters via body.content
-    messages = chat_service.assemble(
-        user,
-        history,
-        body.content,
-        attachments,
-        model,
-        thinking,
-        entries,
-        conversation.summary,
-    )
+
+    def _assemble(answering_model: ModelEntry | None) -> list[dict]:
+        return chat_service.assemble(
+            user,
+            history,
+            body.content,
+            attachments,
+            answering_model,
+            thinking,
+            entries,
+            conversation.summary,
+        )
+
+    # Auto mode assembles inside the job's prepare hook instead — the prompt
+    # is tailored to whichever model routing actually lands on.
+    messages = [] if is_auto else _assemble(model)
 
     # Persist the user turn before generating so the history stays consistent
     # even if the client is long gone (skipped when reusing a retried turn).
@@ -359,12 +389,25 @@ async def send_message(
         row = db.get(Conversation, conversation_id)
         if row:
             row.updated_at = datetime.now(UTC)
-            if not row.model_slug:
+            if not row.model_slug and lease is not None:
                 row.model_slug = lease.model_slug
             db.add(row)
 
     async def post_exchange(assistant_text: str) -> None:
         await _post_exchange(user, conversation, body.content, assistant_text)
+
+    prepare = None
+    if is_auto:
+        # Runs INSIDE the background job (chat_jobs._run) before the slot is
+        # taken: routing and even a minutes-long model load stream progress as
+        # forge:"status" frames and survive the client detaching.
+        async def prepare(push_status):
+            push_status("choosing the best model for this prompt…")
+            chosen, reason = await model_router.choose_model(body.content)
+            push_status(f"routed to {chosen.display_name} — {reason}")
+            routed = await model_router.ensure_serving(chosen, push_status)
+            answering = _model_for_lease(routed) or chosen
+            return routed, routed.model_slug, _assemble(answering)
 
     # The job runs in the orchestrator's event loop, independent of this
     # request — closing the SSE below never stops it.
@@ -372,12 +415,27 @@ async def send_message(
         conversation_id=conversation_id,
         user_id=user.id,
         lease=lease,
-        model_slug=lease.model_slug,
+        model_slug=lease.model_slug if lease else model_router.AUTO_SLUG,
         messages=messages,
         turn_key=turn_key,
         post_exchange=post_exchange,
+        prepare=prepare,
     )
     return StreamingResponse(job.subscribe(), media_type="text/event-stream")
+
+
+@router.post("/conversations/{conversation_id}/cancel")
+async def cancel_generation(
+    conversation_id: str, user: User = Depends(current_user)
+):
+    """Stop the in-flight generation for this conversation server-side. The
+    partial reply is kept (persisted as the assistant turn); leaving and
+    re-entering the chat will NOT resume it."""
+    _own_conversation(conversation_id, user)
+    status = chat_job_manager.cancel(conversation_id)
+    if status is None:
+        raise HTTPException(409, "nothing is generating for this conversation")
+    return {"ok": True, **status}
 
 
 @router.get("/conversations/{conversation_id}/stream")
@@ -565,7 +623,10 @@ async def temporary_chat(body: TemporaryBody, user: User = Depends(current_user)
     """Incognito: streams a reply, stores nothing, reads no memory."""
     if not body.messages:
         raise HTTPException(400, "messages required")
-    lease = _select_lease(body.model_slug)
+    # Temporary chats store nothing and shouldn't trigger model loads either:
+    # "auto" degrades to whatever is already serving (least-loaded lease).
+    slug = "" if body.model_slug == model_router.AUTO_SLUG else body.model_slug
+    lease = _select_lease(slug)
     model = _model_for_lease(lease)
     attachments = _own_uploads(body.attachment_ids, user)
 
@@ -603,10 +664,18 @@ async def temporary_chat(body: TemporaryBody, user: User = Depends(current_user)
 
 @router.get("/status")
 def chat_status(user: User = Depends(current_user)) -> dict:
-    """What the chat composer needs: which models are serving right now."""
+    """What the chat composer needs: which models are serving right now, and
+    whether the "auto" routing option is usable."""
     leases = [lease.as_dict() for lease in engine_manager.ready_text_leases()]
     image_lease = engine_manager.ready_image_lease()
     return {
         "serving": leases,
         "image": image_lease.as_dict() if image_lease else None,
+        "auto": {
+            # Auto works whenever at least one text model is downloaded; the
+            # tiny router model refines the pick when configured and ready.
+            "available": bool(model_router.ready_candidates()),
+            "router_model": model_router.router_model_slug(),
+            "router_ready": model_router.router_model_entry() is not None,
+        },
     }

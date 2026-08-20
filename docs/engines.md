@@ -27,6 +27,14 @@ Engine choice is automatic: `fit_rules.detect_lane` reads each checkpoint's
 real `config.json` (architectures, `model_type`, `quantization_config`,
 custom code) and routes it — see the README's Engine lanes section.
 
+One more container sits *beside* the lanes rather than in them: the **auto
+router** (`forge-engine-router`, label `forge.router`, port 8087) — a tiny
+llama.cpp instance serving the Settings-chosen router model that picks the
+answering model for "Auto" conversations (`app/services/model_router.py`).
+It never holds a GPU lease: multi-GPU boxes park it fully offloaded on the
+smallest-VRAM GPU, single-GPU boxes run it on CPU so the main lane keeps
+its VRAM.
+
 ## Added from this survey: TabbyAPI (ExLlamaV3)
 
 **What it adds.** ExLlamaV3's EXL3 format is the state of the art for

@@ -423,3 +423,58 @@ class TestActiveEndpoint:
         # The other user sees none of my generations.
         theirs = api.get("/api/chat/active", headers=second_user_headers).json()
         assert theirs == []
+
+
+# ── real stop (cancel) ──────────────────────────────────────────────────────
+
+
+class TestCancel:
+    async def test_cancel_stops_the_job_and_persists_the_partial(
+        self, api, monkeypatch
+    ):
+        hold = asyncio.Event()  # engine "hangs" mid-generation, never finishes
+        install_stream(monkeypatch, ["partial "], hold=hold)
+        lease = make_lease("m", "http://engine:1")
+        use_leases(monkeypatch, [lease])
+        conv_id = make_conversation()
+        job = chat_job_manager.start(
+            conversation_id=conv_id, user_id=1, lease=lease, model_slug="m", messages=[]
+        )
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if job.collected:
+                break
+
+        status = chat_job_manager.cancel(conv_id)
+        assert status is not None
+        await wait_done(job)
+
+        assert job.state == "error"
+        assert job.error == "cancelled"
+        with db_module.read_session() as db:
+            rows = db.exec(
+                select(ChatMessage).where(ChatMessage.conversation_id == conv_id)
+            ).all()
+        assert [r.content for r in rows] == ["partial "]  # partial kept
+        # Terminal: a re-attach replays and ENDS instead of resuming.
+        frames = [f async for f in job.subscribe()]
+        assert any('"forge": "done"' in f for f in frames)
+
+    async def test_cancel_with_nothing_running_returns_none(self, api):
+        assert chat_job_manager.cancel("nope") is None
+
+    def test_cancel_endpoint_requires_ownership(
+        self, api, auth_headers, second_user_headers, monkeypatch
+    ):
+        lease = make_lease("m", "http://engine:1")
+        use_leases(monkeypatch, [lease])
+        conv = api.post("/api/chat/conversations", json={}, headers=auth_headers).json()
+        r = api.post(
+            f"/api/chat/conversations/{conv['id']}/cancel", headers=second_user_headers
+        )
+        assert r.status_code == 404
+        # Owner with nothing generating gets an honest 409.
+        r = api.post(
+            f"/api/chat/conversations/{conv['id']}/cancel", headers=auth_headers
+        )
+        assert r.status_code == 409

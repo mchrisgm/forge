@@ -1,8 +1,17 @@
 // Chat composer: auto-growing textarea, attachment upload chips, thinking
 // selector, image-generation mode (toggle or "/imagine <prompt>"), send/stop.
-// Enter sends; Shift+Enter adds a newline.
+// Enter sends; Shift+Enter adds a newline. On mobile (< sm) the tool buttons
+// move to a row above the input so the textarea + send button get the full
+// width; on sm+ everything sits on one row (flex order classes, no duplicate
+// controls in the DOM).
 
-import { useRef, useState, type KeyboardEvent } from "react";
+import {
+  forwardRef,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import { Link } from "react-router-dom";
 import { api, errorMessage, fileUrl } from "../../api/client";
 import type { ThinkingLevel, UploadMeta } from "../../api/types";
@@ -123,18 +132,13 @@ function AttachmentChip({
   );
 }
 
-export function Composer({
-  onSend,
-  onStop,
-  onGenerateImage,
-  imageProviders,
-  streaming,
-  generatingImage = false,
-  disabled = false,
-  thinking,
-  onThinking,
-  placeholder = "Message…",
-}: {
+/** Imperative surface for the chat view (starter-prompt cards). */
+export interface ComposerHandle {
+  /** Replace the draft with `text` and focus the input — never auto-sends. */
+  prefill: (text: string) => void;
+}
+
+interface ComposerProps {
   onSend: (content: string, uploads: UploadMeta[]) => void;
   onStop: () => void;
   /** An image turn — from the image toggle or "/imagine <prompt>". */
@@ -149,7 +153,24 @@ export function Composer({
   thinking: ThinkingLevel;
   onThinking: (next: ThinkingLevel) => void;
   placeholder?: string;
-}) {
+}
+
+export const Composer = forwardRef<ComposerHandle, ComposerProps>(
+  function Composer(
+    {
+      onSend,
+      onStop,
+      onGenerateImage,
+      imageProviders,
+      streaming,
+      generatingImage = false,
+      disabled = false,
+      thinking,
+      onThinking,
+      placeholder = "Message…",
+    },
+    ref,
+  ) {
   const { toast } = useToast();
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
@@ -215,6 +236,17 @@ export function Composer({
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   };
+
+  useImperativeHandle(ref, () => ({
+    prefill: (text: string) => {
+      setDraft(text);
+      // Grow + focus after the new value has rendered into the textarea.
+      requestAnimationFrame(() => {
+        autoGrow();
+        textareaRef.current?.focus();
+      });
+    },
+  }));
 
   const pickFiles = (files: FileList | null) => {
     if (!files) return;
@@ -416,7 +448,10 @@ export function Composer({
         </div>
       )}
 
-      <div className="flex items-end gap-2 pb-3">
+      {/* < sm: tool buttons (order-1) wrap onto a top row, a full-width break
+          (order-2) pushes the textarea (order-3) + send (order-4) onto their
+          own row. sm+: order-none everywhere restores the single-row layout. */}
+      <div className="flex flex-wrap items-end gap-2 pb-3">
         <input
           ref={fileInputRef}
           type="file"
@@ -436,7 +471,7 @@ export function Composer({
           disabled={
             streaming || imageMode || attachments.length >= MAX_ATTACHMENTS
           }
-          className="h-11 w-11 shrink-0 rounded-xl p-0"
+          className="order-1 h-11 w-11 shrink-0 rounded-xl p-0 sm:order-none"
         >
           <IconPaperclip size={17} />
         </Button>
@@ -453,7 +488,7 @@ export function Composer({
             setReadMode(false);
           }}
           className={cx(
-            "flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-xl border text-sm transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50",
+            "order-1 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-xl border text-sm transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50 sm:order-none",
             imageMode
               ? "border-accent/50 bg-accent/15 text-accent"
               : "border-edge bg-raised text-text hover:bg-overlay",
@@ -471,7 +506,7 @@ export function Composer({
           }
           onClick={() => setReadMode((m) => !m)}
           className={cx(
-            "flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-xl border text-sm transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50",
+            "order-1 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-xl border text-sm transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50 sm:order-none",
             readMode
               ? "border-info/50 bg-info/15 text-info"
               : "border-edge bg-raised text-text hover:bg-overlay",
@@ -479,6 +514,8 @@ export function Composer({
         >
           <IconGlobe size={17} />
         </button>
+        {/* Mobile-only flex line break between the tool row and the input. */}
+        <div aria-hidden className="order-2 basis-full sm:hidden" />
         <label htmlFor="chat-composer" className="sr-only">
           Message
         </label>
@@ -493,15 +530,19 @@ export function Composer({
             autoGrow();
           }}
           onKeyDown={onKeyDown}
-          className="max-h-40 min-h-11 flex-1 resize-none rounded-xl border border-edge bg-raised px-3.5 py-2.5 text-sm text-text placeholder:text-faint focus:border-accent focus:outline-none"
+          className="order-3 max-h-40 min-h-11 min-w-0 flex-1 resize-none rounded-xl border border-edge bg-raised px-3.5 py-2.5 text-sm text-text placeholder:text-faint focus:border-accent focus:outline-none sm:order-none"
         />
-        <ThinkingSelect value={thinking} onChange={onThinking} />
+        {/* DOM order keeps thinking between textarea and send on sm+; order-1
+            lifts it onto the mobile tool row (last slot, hugging the right). */}
+        <div className="order-1 ml-auto shrink-0 sm:order-none sm:ml-0">
+          <ThinkingSelect value={thinking} onChange={onThinking} />
+        </div>
         {streaming ? (
           <Button
             variant="danger"
             aria-label="Stop generating"
             onClick={onStop}
-            className="h-11 w-11 shrink-0 rounded-xl p-0"
+            className="order-4 h-11 w-11 shrink-0 rounded-xl p-0 sm:order-none"
           >
             <IconStop size={18} />
           </Button>
@@ -511,7 +552,7 @@ export function Composer({
             aria-label={imageIntent ? "Generate image" : "Send message"}
             onClick={doSend}
             disabled={!canSend}
-            className="h-11 w-11 shrink-0 rounded-xl p-0"
+            className="order-4 h-11 w-11 shrink-0 rounded-xl p-0 sm:order-none"
           >
             {generatingImage ? <Spinner size={18} /> : <IconSend size={18} />}
           </Button>
@@ -519,4 +560,5 @@ export function Composer({
       </div>
     </div>
   );
-}
+  },
+);

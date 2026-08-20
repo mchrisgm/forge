@@ -2,12 +2,20 @@
 // assistant markdown with inline images (generated ones captioned by their
 // prompt), image-generation placeholders, inline stream errors with retry.
 
+import { useEffect, useRef, useState } from "react";
 import { fileUrl } from "../../api/client";
 import type { AttachmentMeta } from "../../api/types";
 import { cx, formatBytes } from "../../lib/utils";
-import { IconDownload, IconFile, IconRefresh } from "../icons";
+import {
+  IconChevronDown,
+  IconChevronRight,
+  IconDownload,
+  IconFile,
+  IconRefresh,
+} from "../icons";
 import { Markdown } from "../lazy-markdown";
 import { Button, Spinner } from "../ui";
+import { ImageLightbox } from "./ImageLightbox";
 
 /** A message as the chat surface renders it (server or in-flight). */
 export interface UiMessage {
@@ -20,6 +28,12 @@ export interface UiMessage {
   /** The engine lane is busy — this turn is waiting for a free slot. Cleared
    *  when generation starts (forge:running) or the first token arrives. */
   queued?: boolean;
+  /** Accumulated reasoning trace (reasoning_content deltas + `<think>` spans),
+   *  rendered in the collapsed "Thinking" expander above the answer. */
+  thinking?: string;
+  /** Latest pre-token stage line from the stream (queued/status `detail`),
+   *  shown verbatim while no thinking/answer tokens have arrived yet. */
+  stageDetail?: string;
   /** An image generation is in flight — renders a placeholder bubble. */
   pendingImage?: { prompt: string };
   /** Temporary-mode generation: the image exists only in this tab (data
@@ -32,7 +46,105 @@ export interface UiMessage {
 /** The backend records generated-image turns as "[Generated image: …]". */
 const GENERATED_PLACEHOLDER_RE = /^\[Generated image:[\s\S]*\]$/;
 
-/** Inline image that opens the full-size file in a new tab. */
+/**
+ * Split a PERSISTED assistant message into its reasoning trace and visible
+ * answer: every `<think>…</think>` block (plus a trailing unclosed one) is
+ * extracted into `thinking` and stripped from `answer`, so the markdown
+ * renderer never sees the think text. Pure — for stored history only; live
+ * streams are split token-by-token by createThinkSplitter instead.
+ */
+export function splitStoredThinking(content: string): {
+  thinking: string;
+  answer: string;
+} {
+  if (!content.includes("<think>")) return { thinking: "", answer: content };
+  const blocks: string[] = [];
+  const answer = content.replace(
+    /<think>([\s\S]*?)(?:<\/think>|$)/g,
+    (_match, inner: string) => {
+      if (inner.trim()) blocks.push(inner.trim());
+      return "";
+    },
+  );
+  return { thinking: blocks.join("\n\n"), answer: answer.trim() };
+}
+
+/**
+ * Collapsed-by-default reasoning expander above an assistant answer. While
+ * the model is still thinking the header stays alive — char count and elapsed
+ * seconds tick with a pulsing dot — so progress is visible without expanding;
+ * expanded, the trace streams into a muted scrollable block that follows the
+ * tail. After completion it stays available with the final size.
+ */
+function ThinkingExpander({
+  text,
+  live,
+}: {
+  text: string;
+  /** True while thinking tokens are still expected (streaming, no answer yet). */
+  live: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const startedAtRef = useRef<number | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Tick the header clock once per second while the model is thinking.
+  useEffect(() => {
+    if (!live) return;
+    startedAtRef.current ??= Date.now();
+    const timer = window.setInterval(() => {
+      const started = startedAtRef.current ?? Date.now();
+      setElapsed(Math.round((Date.now() - started) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [live]);
+
+  // Follow the tail while streaming with the trace expanded.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (live && open && el) el.scrollTop = el.scrollHeight;
+  }, [text, live, open]);
+
+  return (
+    <div>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className="flex min-h-8 cursor-pointer items-center gap-1.5 rounded-md text-xs font-medium text-muted transition-colors duration-150 hover:text-text"
+      >
+        {open ? (
+          <IconChevronDown size={14} className="shrink-0" />
+        ) : (
+          <IconChevronRight size={14} className="shrink-0" />
+        )}
+        <span>
+          Thinking · {text.length.toLocaleString()} chars
+          {live && ` · ${elapsed}s`}
+        </span>
+        {live && (
+          <span
+            aria-hidden
+            className="animate-pulse-dot h-1.5 w-1.5 shrink-0 rounded-full bg-info"
+          />
+        )}
+      </button>
+      {open && (
+        <div
+          ref={scrollRef}
+          className="mt-1 max-h-56 overflow-y-auto rounded-lg border border-border bg-raised/50 px-3 py-2.5"
+        >
+          <p className="text-xs leading-relaxed break-words whitespace-pre-wrap text-muted">
+            {text}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Inline image that opens the built-in lightbox viewer (zoom/pan/export). */
 function ImageAttachment({
   attachment,
   large = false,
@@ -40,28 +152,42 @@ function ImageAttachment({
   attachment: AttachmentMeta;
   large?: boolean;
 }) {
+  const [open, setOpen] = useState(false);
   const alt =
     attachment.generated && attachment.prompt
       ? attachment.prompt
       : attachment.filename;
   return (
-    <a
-      href={fileUrl(attachment.id)}
-      target="_blank"
-      rel="noreferrer noopener"
-      title="Open full size"
-      className="block"
-    >
-      <img
-        src={fileUrl(attachment.id)}
-        alt={alt}
-        loading="lazy"
-        className={cx(
-          "rounded-lg border border-border object-cover",
-          large ? "w-full" : "h-24 max-w-40",
-        )}
-      />
-    </a>
+    <>
+      <button
+        type="button"
+        title="View full size"
+        onClick={() => setOpen(true)}
+        className="block cursor-zoom-in"
+      >
+        <img
+          src={fileUrl(attachment.id)}
+          alt={alt}
+          loading="lazy"
+          className={cx(
+            "rounded-lg border border-border object-cover",
+            large ? "w-full" : "h-24 max-w-40",
+          )}
+        />
+      </button>
+      {open && (
+        <ImageLightbox
+          src={fileUrl(attachment.id)}
+          filename={attachment.filename}
+          caption={
+            attachment.generated && attachment.prompt
+              ? attachment.prompt
+              : undefined
+          }
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
   );
 }
 
@@ -142,6 +268,46 @@ function AssistantAttachments({
   );
 }
 
+/** Temporary-mode generation (data URI, nothing stored server-side) — the
+ *  lightbox still works, it just reads the inline data. */
+function TempImageFigure({
+  image,
+}: {
+  image: { dataUri: string; prompt: string };
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <figure className="m-0 max-w-sm">
+      <button
+        type="button"
+        title="View full size"
+        onClick={() => setOpen(true)}
+        className="block w-full cursor-zoom-in"
+      >
+        <img
+          src={image.dataUri}
+          alt={image.prompt}
+          className="w-full rounded-lg border border-border object-cover"
+        />
+      </button>
+      <figcaption
+        className="mt-1.5 line-clamp-2 text-xs text-faint"
+        title={image.prompt}
+      >
+        {image.prompt} · temporary — not saved
+      </figcaption>
+      {open && (
+        <ImageLightbox
+          src={image.dataUri}
+          filename="generated-image.png"
+          caption={image.prompt}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </figure>
+  );
+}
+
 /** Placeholder while an image generation runs (can take minutes). */
 function PendingImageBubble({ prompt }: { prompt: string }) {
   return (
@@ -203,26 +369,17 @@ export function MessageBubble({
   const placeholderOnly =
     hasGeneratedImage && GENERATED_PLACEHOLDER_RE.test(message.content.trim());
 
-  // Assistant turn: attachments, markdown, and (on failure) the error with
-  // whatever partial text streamed in.
+  // Assistant turn: optional reasoning expander, attachments, markdown, and
+  // (on failure) the error with whatever partial text streamed in.
   return (
     <div className="w-full max-w-full space-y-2">
-      {message.tempImage && (
-        <figure className="m-0 max-w-sm">
-          {/* No open-in-new-tab link: browsers block top-level data: URLs. */}
-          <img
-            src={message.tempImage.dataUri}
-            alt={message.tempImage.prompt}
-            className="w-full rounded-lg border border-border object-cover"
-          />
-          <figcaption
-            className="mt-1.5 line-clamp-2 text-xs text-faint"
-            title={message.tempImage.prompt}
-          >
-            {message.tempImage.prompt} · temporary — not saved
-          </figcaption>
-        </figure>
+      {message.thinking && (
+        <ThinkingExpander
+          text={message.thinking}
+          live={Boolean(message.streaming) && !message.content}
+        />
       )}
+      {message.tempImage && <TempImageFigure image={message.tempImage} />}
       <AssistantAttachments attachments={message.attachments} />
       {message.content && !placeholderOnly && <Markdown text={message.content} />}
       {message.error && (

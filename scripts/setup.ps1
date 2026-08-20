@@ -178,7 +178,7 @@ if (-not $SkipPull) {
 # the now-dead leases (it never respawns or health-checks them on its own).
 Write-Info 'sweeping orchestrator-spawned containers left on outdated images...'
 $staleRemoved = @()
-foreach ($label in 'forge.engine', 'forge.session') {
+foreach ($label in 'forge.engine', 'forge.router', 'forge.session') {
   foreach ($id in @(Invoke-Capture docker ps -q --filter "label=$label")) {
     if (-not $id) { continue }
     $name      = (Invoke-Capture docker inspect -f '{{.Name}}' $id) -replace '^/', ''

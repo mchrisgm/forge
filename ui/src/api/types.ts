@@ -357,6 +357,17 @@ export interface SettingsPayload {
   ram_offload_budget_gb: number;
   llamacpp_slots: number;
   headroom: HeadroomStatus;
+  /** Effective chat system prompt (the override when set, else the default). */
+  chat_system_prompt: string;
+  /** True when an admin override is stored (effective ≠ built-in default). */
+  chat_system_prompt_customized: boolean;
+  /** The built-in default, for comparison/reset UI. */
+  chat_system_prompt_default: string;
+  /** Auto-routing model slug ("" = LLM routing disabled — "Auto" chats fall
+   *  back to deterministic picks). Admin-editable via PATCH. */
+  router_model_slug: string;
+  /** False when router_model_slug names no downloaded llama.cpp model. */
+  router_model_ready: boolean;
   /** Keyed by connector kind ("github", "hugging-face"). */
   oauth?: Record<string, OAuthAppSettings>;
 }
@@ -564,11 +575,25 @@ export interface ConversationDetail extends Conversation {
   messages: ChatMessage[];
 }
 
+/** GET /api/chat/status "auto" — whether the "Auto" model option is usable.
+ *  Available whenever at least one text model is downloaded; the tiny router
+ *  model refines the pick when configured and ready. */
+export interface ChatAutoStatus {
+  available: boolean;
+  /** Configured router model slug ("" = LLM routing disabled). */
+  router_model: string;
+  /** False when the configured slug isn't a downloaded llama.cpp model —
+   *  auto then falls back to deterministic picks. */
+  router_ready: boolean;
+}
+
 /** GET /api/chat/status — which models the composer can talk to. */
 export interface ChatStatus {
   serving: Lease[];
   /** Ready imagegen-lane lease, or null when no image model is serving. */
   image: Lease | null;
+  /** The "Auto" routing option's state (absent on older backends). */
+  auto?: ChatAutoStatus;
 }
 
 /** POST /api/chat/image response — the generated file plus, for a saved
@@ -606,12 +631,23 @@ export interface ChatDoneFrame {
 export interface ChatQueuedFrame {
   forge: "queued";
   conversation_id: string;
+  /** Human-readable line naming the busy lane ("queued — the vllm lane is
+   *  busy with another generation"). Shown verbatim in the pending stage. */
+  detail?: string;
 }
 
 /** A slot opened up (or the first token arrived) — tokens now stream. */
 export interface ChatRunningFrame {
   forge: "running";
   conversation_id: string;
+}
+
+/** Pre-token progress — always sent before the first token: "prompt sent to
+ *  <model> (<engine>) — processing". Shown verbatim with an elapsed ticker. */
+export interface ChatStatusFrame {
+  forge: "status";
+  conversation_id: string;
+  detail: string;
 }
 
 /** The terminal frame, tagged for the discriminated union. */
@@ -626,11 +662,14 @@ export interface ChatIdleFrame {
 }
 
 /** Every `{"forge": …}` status frame a chat SSE stream can carry. Token
- *  deltas (OpenAI `{choices:[{delta:{content}}]}`) and `{"error": …}` frames
- *  are separate — see readChatStream's handlers. */
+ *  deltas (OpenAI `{choices:[{delta:{content}}]}` — reasoning models may also
+ *  carry `delta.reasoning_content` and/or literal `<think>…</think>` spans in
+ *  `delta.content`) and `{"error": …}` frames are separate — see
+ *  readChatStream's handlers. */
 export type ChatStreamFrame =
   | ChatQueuedFrame
   | ChatRunningFrame
+  | ChatStatusFrame
   | ChatDoneFrameTagged
   | ChatIdleFrame;
 

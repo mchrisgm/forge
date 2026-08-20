@@ -8,10 +8,14 @@
 // (closing the reader never stops the job), and returning RE-ATTACHES via GET
 // /conversations/{id}/stream — which replays the buffered tokens then streams
 // live to `forge:done`. On open we always reattach: an `idle` frame means
-// nothing is running (just show stored history), otherwise a live bubble picks
-// up the in-flight reply. `forge:queued`/`running` frames surface the
-// "waiting for a free slot" state. Because jobs are server-side, multiple
-// conversations generate at once; the composer lock is per open conversation.
+// nothing is running (just show stored history); otherwise the pending bubble
+// appears the moment the stream opens (eagerly when the history ends on a user
+// turn, else on the first frame) and replayed stage/thinking/answer frames
+// restore the live view. `forge:queued`/`status` frames drive the pre-token
+// stage line (busy lane, "prompt sent … — processing" + elapsed); reasoning
+// deltas and `<think>` spans stream into a collapsed Thinking expander.
+// Because jobs are server-side, multiple conversations generate at once; the
+// composer lock is per open conversation.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -39,9 +43,22 @@ import {
   storeThinking,
 } from "../ThinkingSelect";
 import { Button, EmptyState, LaneBadge, Spinner } from "../ui";
-import { Composer, type ImageProvider } from "./Composer";
-import { MessageBubble, type UiMessage } from "./messages";
+import {
+  Composer,
+  type ComposerHandle,
+  type ImageProvider,
+} from "./Composer";
+import {
+  MessageBubble,
+  splitStoredThinking,
+  type UiMessage,
+} from "./messages";
 import { SandboxContext, type SandboxRunner } from "./sandbox-context";
+import { StarterPanel } from "./StarterPanel";
+
+/** The model_slug sentinel for router-picked models (backend AUTO_SLUG). */
+const AUTO_SLUG = "auto";
+const AUTO_LABEL = "Auto — picks the best model";
 
 const THINKING_STORAGE_KEY = "forge.thinking.chats";
 
@@ -69,6 +86,54 @@ function imageErrorMessage(err: unknown): string {
   return errorMessage(err);
 }
 
+/**
+ * Live stage line while a generation has produced no thinking/answer tokens
+ * yet. Queued shows the backend's detail verbatim (it names the busy lane);
+ * once processing starts, the status detail ("prompt sent to <model>
+ * (<engine>) — processing") gets a live elapsed-seconds ticker until the
+ * first token arrives.
+ */
+function PendingStageLine({
+  detail,
+  queued,
+}: {
+  detail?: string;
+  queued: boolean;
+}) {
+  const [elapsed, setElapsed] = useState(0);
+  const startedAtRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (queued) {
+      // Still waiting for a slot — the processing clock hasn't started.
+      startedAtRef.current = null;
+      setElapsed(0);
+      return;
+    }
+    startedAtRef.current ??= Date.now();
+    const timer = window.setInterval(() => {
+      const started = startedAtRef.current ?? Date.now();
+      setElapsed(Math.round((Date.now() - started) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [queued]);
+
+  return (
+    <div role="status" className="flex items-center gap-2 text-xs text-muted">
+      <Spinner size={14} />
+      <span className="min-w-0 break-words">
+        {detail ??
+          (queued
+            ? "Queued — waiting for a free slot…"
+            : "Contacting the model…")}
+      </span>
+      {!queued && elapsed > 0 && (
+        <span className="shrink-0 text-faint">· {elapsed}s</span>
+      )}
+    </div>
+  );
+}
+
 export function ChatView({
   conversationId,
 }: {
@@ -90,6 +155,7 @@ export function ChatView({
   );
 
   const abortRef = useRef<AbortController | null>(null);
+  const composerRef = useRef<ComposerHandle>(null);
   const messagesRef = useRef<UiMessage[]>(messages);
   /** Which conversation the current `messages` state belongs to. */
   const loadedForRef = useRef<string | null>(null);
@@ -122,6 +188,9 @@ export function ChatView({
   const serving = status.data?.serving ?? [];
   const nothingServing = status.data != null && serving.length === 0;
   const imageLease = status.data?.image ?? null;
+  // "Auto": the tiny router model picks the answering model per prompt (the
+  // stream narrates the routing via forge:"status" frames).
+  const autoAvailable = status.data?.auto?.available === true;
 
   // ── sandbox lane: fetched once, cached; drives the code-block Run button ──
   const sandbox = useQuery({
@@ -163,18 +232,20 @@ export function ChatView({
 
   // A slug-less request only resolves when exactly one model serves, so with
   // several serving a fresh chat needs an explicit pick — default to the
-  // first, and drop a pick whose lease has gone away.
+  // first, and drop a pick whose lease has gone away. "auto" is a virtual
+  // slug (no lease) that stays valid while the router option is available.
   useEffect(() => {
     if (serving.length > 1 && !newChatSlug) {
       setNewChatSlug(serving[0].model_slug);
     } else if (
       newChatSlug &&
       status.data != null &&
+      !(newChatSlug === AUTO_SLUG && autoAvailable) &&
       !serving.some((l) => l.model_slug === newChatSlug)
     ) {
       setNewChatSlug(serving.length > 1 ? serving[0].model_slug : "");
     }
-  }, [serving, newChatSlug, status.data]);
+  }, [serving, newChatSlug, status.data, autoAvailable]);
 
   // ── conversation history ──────────────────────────────────────────────────
   const conversation = useQuery({
@@ -214,21 +285,33 @@ export function ChatView({
     setMessages(
       data.messages
         .filter((m) => m.role !== "system")
-        .map((m) => ({
-          key: `srv-${m.id}`,
-          role: m.role as "user" | "assistant",
-          content: m.content,
-          attachments: m.attachments,
-        })),
+        .map((m) => {
+          // Persisted assistant turns may carry literal <think> blocks —
+          // extract them into the expander; markdown only gets the answer.
+          const { thinking, answer } =
+            m.role === "assistant"
+              ? splitStoredThinking(m.content)
+              : { thinking: "", answer: m.content };
+          return {
+            key: `srv-${m.id}`,
+            role: m.role as "user" | "assistant",
+            content: answer,
+            thinking: thinking || undefined,
+            attachments: m.attachments,
+          };
+        }),
     );
   }, [conversation.data, streaming]);
 
   // Abort any in-flight generation when leaving the surface entirely.
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  // Auto-scroll as content grows.
+  // Auto-scroll as content (answer or thinking) grows.
   const fingerprint = messages
-    .map((m) => `${m.key}:${m.content.length}:${m.error ? 1 : 0}`)
+    .map(
+      (m) =>
+        `${m.key}:${m.content.length}:${m.thinking?.length ?? 0}:${m.error ? 1 : 0}`,
+    )
     .join("|");
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
@@ -273,10 +356,14 @@ export function ChatView({
   /** Re-attach to a possibly in-flight server-side generation for `id`.
    *  Replays buffered frames then streams live; a lone `idle` frame means
    *  nothing is running (the stored history already on screen is complete).
-   *  The live assistant bubble is created lazily so an idle stream leaves no
-   *  empty bubble behind. Detaching (abort on navigation/stop) never errors —
+   *  When the history ends on a user turn a generation is almost certainly in
+   *  flight, so the pending bubble (and the composer lock) appears the moment
+   *  the stream opens — `expectInFlight` — instead of waiting for the first
+   *  replayed frame; an idle frame tears it down again. Every other path
+   *  creates the bubble on the first frame of any kind (queued/status/
+   *  thinking/answer). Detaching (abort on navigation/stop) never errors —
    *  the job keeps running server-side. */
-  const reattach = async (id: string) => {
+  const reattach = async (id: string, expectInFlight: boolean) => {
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -287,13 +374,20 @@ export function ChatView({
       return; // couldn't probe — the stored history is already shown
     }
     if (!resp.body) return;
+    if (abortRef.current !== controller) {
+      // A send/switch superseded us while connecting — don't double-consume.
+      void resp.body.cancel().catch(() => undefined);
+      return;
+    }
 
     let assistantKey: string | null = null;
+    let sawIdle = false;
     const ensureBubble = (): string => {
       if (assistantKey) return assistantKey;
       const key = nextKey();
       assistantKey = key;
-      // Our live bubble beats server snapshots until the job persists.
+      // Our live bubble beats server snapshots until the job persists, and
+      // the composer lock engages so a second send stays blocked meanwhile.
       holdRef.current = id;
       setStreaming(true);
       setMessages((prev) => [
@@ -308,14 +402,42 @@ export function ChatView({
       ]);
       return key;
     };
+    const dropBubble = () => {
+      if (!assistantKey) return;
+      const key = assistantKey;
+      assistantKey = null;
+      setMessages((prev) => prev.filter((m) => m.key !== key));
+      setStreaming(false);
+      holdRef.current = null;
+    };
+
+    if (expectInFlight) ensureBubble();
 
     let streamError: string | null = null;
     try {
       await readChatStream(resp.body, {
-        onStatus: (state) => {
-          if (state === "idle") return; // nothing running — keep history
+        onStatus: (state, detail) => {
+          if (state === "idle") {
+            // Nothing running — the stored history is complete. Tear down the
+            // eagerly-created bubble, if any.
+            sawIdle = true;
+            dropBubble();
+            return;
+          }
           const key = ensureBubble();
-          patchAssistant(key, (m) => ({ ...m, queued: state === "queued" }));
+          patchAssistant(key, (m) => ({
+            ...m,
+            queued: state === "queued",
+            stageDetail: detail ?? m.stageDetail,
+          }));
+        },
+        onThinking: (delta) => {
+          const key = ensureBubble();
+          patchAssistant(key, (m) => ({
+            ...m,
+            thinking: (m.thinking ?? "") + delta,
+            queued: false,
+          }));
         },
         onDelta: (fragment) => {
           const key = ensureBubble();
@@ -346,7 +468,7 @@ export function ChatView({
     }
 
     if (abortRef.current !== controller) return; // superseded — leave it be
-    if (!assistantKey) return; // idle stream — stored history is complete
+    if (sawIdle || !assistantKey) return; // idle — stored history is complete
     finalizeAssistant(assistantKey, streamError, streamError == null);
     setStreaming(false);
     holdRef.current = null;
@@ -357,15 +479,22 @@ export function ChatView({
   };
 
   // On open (mount or switched-to), once history has loaded, probe the stream
-  // to reattach to any in-flight generation. Runs once per visit; skipped while
-  // we're already streaming our own send into this conversation.
+  // to reattach to any in-flight generation. Runs once per visit — switching
+  // away resets reattachedForRef, so returning (A→B→A, repeatedly) re-probes
+  // every time; skipped while we're already streaming our own send into this
+  // conversation.
   useEffect(() => {
     const id = conversationId;
     if (id == null || streaming) return;
     if (reattachedForRef.current === id) return;
-    if (!conversation.data || conversation.data.id !== id) return;
+    const data = conversation.data;
+    if (!data || data.id !== id) return;
     reattachedForRef.current = id;
-    void reattach(id);
+    // History ending on a user turn = a reply is (very likely) generating —
+    // show the pending state immediately rather than on the first frame.
+    const turns = data.messages.filter((m) => m.role !== "system");
+    const lastIsUser = turns[turns.length - 1]?.role === "user";
+    void reattach(id, lastIsUser);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId, streaming, conversation.data]);
 
@@ -442,11 +571,19 @@ export function ChatView({
       }
       let streamError: string | null = null;
       await readChatStream(resp.body, {
-        onStatus: (state) =>
-          // A busy lane queues the job first; clear it once a slot opens.
+        onStatus: (state, detail) =>
+          // A busy lane queues the job first (detail names the lane); the
+          // always-sent status frame then carries the "prompt sent …" line.
           patchAssistant(assistantKey, (m) => ({
             ...m,
             queued: state === "queued",
+            stageDetail: detail ?? m.stageDetail,
+          })),
+        onThinking: (delta) =>
+          patchAssistant(assistantKey, (m) => ({
+            ...m,
+            thinking: (m.thinking ?? "") + delta,
+            queued: false,
           })),
         onDelta: (fragment) =>
           patchAssistant(assistantKey, (m) => ({
@@ -613,14 +750,46 @@ export function ChatView({
     else void run(last.content, last.metas, true);
   };
 
-  const stop = () => abortRef.current?.abort();
+  /** Stop generating: abort the local stream reader for instant feedback AND
+   *  cancel the server-side job (fire-and-forget — 409 just means nothing was
+   *  generating anymore). The partial text stays as the assistant turn; the
+   *  job's stream delivers its final done frame after the cancel. Temporary
+   *  chats have no server-side job — the abort alone stops them. */
+  const stop = () => {
+    abortRef.current?.abort();
+    const id = conversationId ?? loadedForRef.current;
+    if (!tempMode && id) {
+      void api.cancelGeneration(id).catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 409) return;
+        toast("error", `Couldn't cancel server-side: ${errorMessage(err)}`);
+      });
+    }
+  };
 
   // ── model picking ─────────────────────────────────────────────────────────
   const conversationSlug = conversation.data?.model_slug ?? "";
   const activeSlug = conversationId ? conversationSlug : newChatSlug;
+  const isAuto = activeSlug === AUTO_SLUG;
   const singleLease = serving.length === 1 ? serving[0] : null;
-  const activeLease =
-    serving.find((l) => l.model_slug === activeSlug) ?? singleLease;
+  const activeLease = isAuto
+    ? null
+    : serving.find((l) => l.model_slug === activeSlug) ?? singleLease;
+
+  // Picker entries: the virtual "auto" option first (when usable), then one
+  // per serving lease. Rendered only when there's an actual choice.
+  const pickerOptions = useMemo(
+    () => [
+      ...(autoAvailable
+        ? [{ slug: AUTO_SLUG, label: AUTO_LABEL, mono: false }]
+        : []),
+      ...serving.map((l) => ({
+        slug: l.model_slug,
+        label: l.model_slug,
+        mono: true,
+      })),
+    ],
+    [autoAvailable, serving],
+  );
 
   const pickModel = useMutation({
     mutationFn: (slug: string) =>
@@ -648,9 +817,13 @@ export function ChatView({
   const canToggleTemp =
     conversationId == null && messages.length === 0 && !streaming;
   const lastMessage = messages[messages.length - 1];
+  // Pending stage line: only until the first thinking/answer token — the
+  // Thinking expander (then the streamed text) takes over from there.
   const waitingForFirstToken =
-    streaming && lastMessage?.role === "assistant" && !lastMessage.content;
-  const waitingIsQueued = waitingForFirstToken && lastMessage?.queued === true;
+    streaming &&
+    lastMessage?.role === "assistant" &&
+    !lastMessage.content &&
+    !lastMessage.thinking;
 
   return (
     <SandboxContext.Provider value={sandboxRunner}>
@@ -668,7 +841,9 @@ export function ChatView({
           <div className="min-w-0 flex-1">
             <h1 className="truncate text-base font-bold text-text">{title}</h1>
             <div className="flex items-center gap-2 text-xs text-muted">
-              {activeLease ? (
+              {isAuto ? (
+                <span className="truncate">{AUTO_LABEL}</span>
+              ) : activeLease ? (
                 <>
                   <span className="truncate">{activeLease.model_name}</span>
                   <LaneBadge engine={activeLease.engine} />
@@ -726,26 +901,27 @@ export function ChatView({
         </p>
       )}
 
-      {/* Model picker — several models serving at once */}
-      {serving.length > 1 && (
+      {/* Model picker — several models serving, or "Auto" plus at least one */}
+      {pickerOptions.length > 1 && (
         <div
           role="radiogroup"
           aria-label="Model for this chat"
           className="mt-3 flex flex-wrap items-center gap-1.5"
         >
           <span className="mr-1 text-xs font-medium text-faint">Model</span>
-          {serving.map((l) => {
-            const active = activeSlug === l.model_slug;
+          {pickerOptions.map((opt) => {
+            const active = activeSlug === opt.slug;
             return (
               <button
-                key={l.model_slug}
+                key={opt.slug}
                 type="button"
                 role="radio"
                 aria-checked={active}
                 disabled={streaming || pickModel.isPending}
-                onClick={() => onPickModel(l.model_slug)}
+                onClick={() => onPickModel(opt.slug)}
                 className={cx(
-                  "inline-flex min-h-9 cursor-pointer items-center gap-1.5 rounded-full border px-3 font-mono text-xs font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-60",
+                  "inline-flex min-h-9 cursor-pointer items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-60",
+                  opt.mono && "font-mono",
                   active
                     ? "border-accent/50 bg-accent/15 text-accent"
                     : "border-border bg-raised text-muted hover:text-text",
@@ -758,7 +934,7 @@ export function ChatView({
                     active ? "bg-accent" : "bg-ok",
                   )}
                 />
-                {l.model_slug}
+                {opt.label}
               </button>
             );
           })}
@@ -783,8 +959,12 @@ export function ChatView({
           />
         )}
 
+        {/* Empty state: starter prompts for a fresh chat. The !streaming
+            guard keeps it from flashing mid-first-generation or while a
+            reattach is restoring an in-flight reply. */}
         {messages.length === 0 &&
           !sendError &&
+          !streaming &&
           !conversation.isLoading &&
           !conversation.isError &&
           (nothingServing ? (
@@ -801,15 +981,17 @@ export function ChatView({
                 </Link>
               }
             />
-          ) : (
+          ) : tempMode ? (
             <EmptyState
               icon="spark"
-              title={tempMode ? "Off the record" : "Start the conversation"}
-              hint={
-                tempMode
-                  ? "Nothing here is stored and memory stays untouched. Close the page and it's gone."
-                  : "Chat with your local model. Conversations are saved to your profile and can teach its memory."
-              }
+              title="Off the record"
+              hint="Nothing here is stored and memory stays untouched. Close the page and it's gone."
+            />
+          ) : (
+            <StarterPanel
+              onPick={(prompt) => composerRef.current?.prefill(prompt)}
+              showTemporaryTip={conversationId == null}
+              autoAvailable={autoAvailable}
             />
           ))}
 
@@ -817,6 +999,7 @@ export function ChatView({
           if (
             m.role === "assistant" &&
             !m.content &&
+            !m.thinking &&
             !m.error &&
             !m.pendingImage &&
             m.attachments.length === 0
@@ -858,16 +1041,12 @@ export function ChatView({
           </div>
         )}
 
-        {waitingForFirstToken && (
-          <div
-            role="status"
-            className="flex items-center gap-2 text-xs text-muted"
-          >
-            <Spinner size={14} />
-            {waitingIsQueued
-              ? "Queued — waiting for a free slot…"
-              : "Generating…"}
-          </div>
+        {waitingForFirstToken && lastMessage && (
+          <PendingStageLine
+            key={lastMessage.key}
+            detail={lastMessage.stageDetail}
+            queued={lastMessage.queued === true}
+          />
         )}
         <div ref={bottomRef} />
       </div>
@@ -888,6 +1067,7 @@ export function ChatView({
         )}
         <div className="pb-safe">
           <Composer
+            ref={composerRef}
             onSend={onSend}
             onStop={stop}
             onGenerateImage={onGenerateImage}
@@ -900,9 +1080,11 @@ export function ChatView({
             placeholder={
               tempMode
                 ? "Message (temporary — not saved)…"
-                : activeLease
-                  ? `Message ${activeLease.model_name}…`
-                  : "Message…"
+                : isAuto
+                  ? "Message — Auto picks the model…"
+                  : activeLease
+                    ? `Message ${activeLease.model_name}…`
+                    : "Message…"
             }
           />
         </div>

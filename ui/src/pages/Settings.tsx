@@ -2,7 +2,7 @@
 // profiles may register. Everything personal lives on /profile now.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import type { HeadroomStatus, OAuthAppSettings } from "../api/types";
@@ -14,15 +14,18 @@ import {
 import { PageHeader } from "../components/layout";
 import {
   Button,
+  Chip,
   EmptyState,
   Field,
+  Select,
   SkeletonList,
+  TextArea,
   TextInput,
   Toggle,
 } from "../components/ui";
 import { useToast } from "../hooks/toast";
 import { useCurrentUser } from "../lib/auth";
-import { cx } from "../lib/utils";
+import { cx, opencodeModelId } from "../lib/utils";
 
 const MASK = "••••••";
 
@@ -84,6 +87,212 @@ function HeadroomCard({ headroom }: { headroom: HeadroomStatus }) {
               : "Off"}
         </span>
       </p>
+    </section>
+  );
+}
+
+// ── Chat system prompt (admin) ──────────────────────────────────────────────
+// PATCH {chat_system_prompt} — "" (or the default verbatim) restores the
+// built-in default; the server reports the effective prompt + customized flag.
+
+function ChatSystemPromptCard({
+  prompt,
+  customized,
+  defaultPrompt,
+}: {
+  prompt: string;
+  customized: boolean;
+  defaultPrompt: string;
+}) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [draft, setDraft] = useState(prompt);
+
+  useEffect(() => setDraft(prompt), [prompt]);
+
+  const refresh = (data: Awaited<ReturnType<typeof api.patchSettings>>) => {
+    // PATCH returns the full payload with the re-resolved effective prompt —
+    // swap it in so the textarea and Customized chip update at once.
+    queryClient.setQueryData(["settings"], data);
+    void queryClient.invalidateQueries({ queryKey: ["settings"] });
+  };
+
+  const save = useMutation({
+    mutationFn: () => api.patchSettings({ chat_system_prompt: draft }),
+    onSuccess: (data) => {
+      refresh(data);
+      toast("success", "Chat system prompt saved");
+    },
+    onError: (err) => toast("error", errorMessage(err)),
+  });
+
+  const restore = useMutation({
+    mutationFn: () => api.patchSettings({ chat_system_prompt: "" }),
+    onSuccess: (data) => {
+      refresh(data);
+      toast("success", "Default chat system prompt restored");
+    },
+    onError: (err) => toast("error", errorMessage(err)),
+  });
+
+  const busy = save.isPending || restore.isPending;
+  const dirty = draft !== prompt;
+
+  return (
+    <section className="rounded-xl border border-border bg-surface p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-semibold text-text">Chat system prompt</h2>
+        {customized && <Chip color="text-info">Customized</Chip>}
+      </div>
+      <p className="mt-0.5 mb-3 text-sm text-muted">
+        Injected as the system prompt for every text model in chat — each
+        profile's personal instructions stack on top of it.
+      </p>
+      <TextArea
+        aria-label="Chat system prompt"
+        rows={12}
+        spellCheck={false}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder={defaultPrompt}
+        className="font-mono text-xs leading-relaxed"
+      />
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+        <span className="text-xs text-faint">
+          {draft.length.toLocaleString()} characters
+        </span>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={!customized || busy}
+            loading={restore.isPending}
+            onClick={() => restore.mutate()}
+          >
+            Restore default
+          </Button>
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={!dirty || busy}
+            loading={save.isPending}
+            onClick={() => save.mutate()}
+          >
+            Save
+          </Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ── Auto-routing model (admin) ──────────────────────────────────────────────
+// PATCH {router_model_slug} — the tiny always-on model that reads each prompt
+// in "Auto" chats and picks the answering model. "" disables LLM routing
+// (auto then falls back to deterministic picks).
+
+function AutoRoutingCard({
+  routerSlug,
+  routerReady,
+}: {
+  routerSlug: string;
+  routerReady: boolean;
+}) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [draft, setDraft] = useState(routerSlug);
+
+  useEffect(() => setDraft(routerSlug), [routerSlug]);
+
+  const models = useQuery({ queryKey: ["models"], queryFn: api.listModels });
+  // Only downloaded llama.cpp (GGUF) models qualify — the router has to be
+  // tiny and always loadable next to whatever else is serving.
+  const candidates = useMemo(
+    () =>
+      (models.data ?? []).filter(
+        (m) => m.engine === "llamacpp" && m.status === "ready",
+      ),
+    [models.data],
+  );
+  const slugOf = (m: (typeof candidates)[number]) =>
+    opencodeModelId(m.display_name, m.id);
+  // A stored slug that no longer matches a ready model still shows in the
+  // select (with the warning chip) instead of silently snapping elsewhere.
+  const knownDraft = !draft || candidates.some((m) => slugOf(m) === draft);
+
+  const save = useMutation({
+    mutationFn: () => api.patchSettings({ router_model_slug: draft.trim() }),
+    onSuccess: (data) => {
+      // PATCH returns the full payload with the re-resolved ready flag.
+      queryClient.setQueryData(["settings"], data);
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      // The chat composer's "Auto" option keys off /api/chat/status.
+      void queryClient.invalidateQueries({ queryKey: ["chat-status"] });
+      toast(
+        "success",
+        draft.trim()
+          ? "Auto-routing model saved"
+          : "LLM routing disabled — Auto uses deterministic picks",
+      );
+    },
+    onError: (err) => toast("error", errorMessage(err)),
+  });
+
+  const dirty = draft !== routerSlug;
+
+  return (
+    <section className="rounded-xl border border-border bg-surface p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-semibold text-text">Auto-routing model</h2>
+        {routerSlug && !routerReady && (
+          <Chip color="text-warn">not downloaded/ready</Chip>
+        )}
+      </div>
+      <p className="mt-0.5 mb-3 text-sm text-muted">
+        A tiny always-on model (TinyLlama / Qwen 0.6B class — it must be a
+        downloaded llama.cpp/GGUF model) reads each prompt in "Auto" chats and
+        picks the answering model. Disabled = Auto falls back to deterministic
+        picks.
+      </p>
+      {routerSlug && !routerReady && (
+        <p className="mb-3 text-xs text-warn">
+          The configured router model isn't downloaded/ready — auto falls back
+          to deterministic picks until it is.
+        </p>
+      )}
+      <Field
+        label="Router model"
+        helper="Only ready llama.cpp (GGUF) models are listed."
+      >
+        {(id) => (
+          <Select
+            id={id}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+          >
+            <option value="">Disabled — deterministic picks</option>
+            {!knownDraft && (
+              <option value={draft}>{draft} (not in the library)</option>
+            )}
+            {candidates.map((m) => (
+              <option key={m.id} value={slugOf(m)}>
+                {m.display_name} · {m.params_b} B
+              </option>
+            ))}
+          </Select>
+        )}
+      </Field>
+      <div className="mt-3 flex justify-end">
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={!dirty}
+          loading={save.isPending}
+          onClick={() => save.mutate()}
+        >
+          Save
+        </Button>
+      </div>
     </section>
   );
 }
@@ -427,6 +636,21 @@ export default function Settings() {
           </form>
 
           <HeadroomCard headroom={settings.data.headroom} />
+
+          {user?.is_admin && (
+            <ChatSystemPromptCard
+              prompt={settings.data.chat_system_prompt}
+              customized={settings.data.chat_system_prompt_customized}
+              defaultPrompt={settings.data.chat_system_prompt_default}
+            />
+          )}
+
+          {user?.is_admin && (
+            <AutoRoutingCard
+              routerSlug={settings.data.router_model_slug ?? ""}
+              routerReady={settings.data.router_model_ready ?? false}
+            />
+          )}
 
           {user?.is_admin && settings.data.oauth && (
             <OAuthAppsCard oauth={settings.data.oauth} />
