@@ -164,6 +164,26 @@ const models = [
     added_at: iso(20 * DAY),
   },
   {
+    // Slug "tinyllama-1-1b-chat" — the auto-routing (router) fixture model.
+    id: 8,
+    hf_repo: "TinyLlama/TinyLlama-1.1B-Chat-v1.0-GGUF",
+    display_name: "TinyLlama 1.1B Chat",
+    family: "llama",
+    params_b: 1.1,
+    quant: "gguf-q4_k_m",
+    file_path: "/models/tinyllama-1.1b-chat-v1.0-q4_k_m.gguf",
+    size_gb: 0.7,
+    engine: "llamacpp",
+    ctx_max: 2048,
+    n_layers: 22,
+    is_moe: false,
+    tool_call_format: "none",
+    status: "ready",
+    score: 0.4,
+    note: "Auto-routing model — reads each prompt in Auto chats and picks the answering model.",
+    added_at: iso(15 * DAY),
+  },
+  {
     id: 7,
     hf_repo: "black-forest-labs/FLUX.1-schnell",
     display_name: "FLUX.1 schnell",
@@ -774,6 +794,17 @@ const chatSystemPromptView = () => ({
   chat_system_prompt: chatSystemPromptOverride || DEFAULT_CHAT_SYSTEM_PROMPT,
   chat_system_prompt_customized: Boolean(chatSystemPromptOverride),
   chat_system_prompt_default: DEFAULT_CHAT_SYSTEM_PROMPT,
+});
+
+// Auto-routing model (admin-editable via PATCH /api/settings). In-memory like
+// the chat system prompt; ready only while it names the TinyLlama fixture
+// ("" = LLM routing disabled — Auto falls back to deterministic picks).
+const ROUTER_FIXTURE_SLUG = "tinyllama-1-1b-chat";
+let routerModelSlug = ROUTER_FIXTURE_SLUG;
+
+const routerSettingsView = () => ({
+  router_model_slug: routerModelSlug,
+  router_model_ready: routerModelSlug === ROUTER_FIXTURE_SLUG,
 });
 
 const connectors = JSON.parse(
@@ -1480,7 +1511,29 @@ function handleApi(req, res, url) {
   if (p === "/api/users") return sendJson(res, publicUsers);
 
   // chat
-  if (p === "/api/chat/status") return sendJson(res, chatStatus);
+  if (p === "/api/chat/status") {
+    return sendJson(res, {
+      ...chatStatus,
+      auto: {
+        available: true,
+        router_model: routerModelSlug,
+        router_ready: routerModelSlug === ROUTER_FIXTURE_SLUG,
+      },
+    });
+  }
+  // Server-side cancel of an in-flight generation. Mirrors the CHAT_INFLIGHT
+  // fixture: with it set a job "exists" to cancel; otherwise 409.
+  m = p.match(/^\/api\/chat\/conversations\/([^/]+)\/cancel$/);
+  if (m && req.method === "POST") {
+    if (process.env.CHAT_INFLIGHT === "1") {
+      return sendJson(res, { ok: true, state: "done" });
+    }
+    return sendJson(
+      res,
+      { detail: "nothing is generating for this conversation" },
+      409,
+    );
+  }
   // Which of the caller's conversations are generating right now (badges the
   // list). Empty by default so screenshots show a calm list.
   if (p === "/api/chat/active") return sendJson(res, []);
@@ -1892,6 +1945,9 @@ function handleApi(req, res, url) {
           chatSystemPromptOverride =
             value === DEFAULT_CHAT_SYSTEM_PROMPT.trim() ? "" : value;
         }
+        if (typeof body.router_model_slug === "string") {
+          routerModelSlug = body.router_model_slug.trim();
+        }
         for (const key of [
           "github_oauth_client_id",
           "hf_oauth_client_id",
@@ -1902,6 +1958,7 @@ function handleApi(req, res, url) {
         sendJson(res, {
           ...settings,
           ...chatSystemPromptView(),
+          ...routerSettingsView(),
           oauth: settingsOauthView(),
         });
       });
@@ -1909,6 +1966,7 @@ function handleApi(req, res, url) {
     return sendJson(res, {
       ...settings,
       ...chatSystemPromptView(),
+      ...routerSettingsView(),
       oauth: settingsOauthView(),
     });
   }

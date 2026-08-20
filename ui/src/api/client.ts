@@ -199,6 +199,13 @@ export const api = {
   deleteConversation: (id: string) =>
     del<{ ok: boolean }>(`/api/chat/conversations/${id}`),
   chatStatus: () => get<ChatStatus>("/api/chat/status"),
+  /** Stop the in-flight server-side generation for a conversation. The
+   *  partial reply is kept as the assistant turn; the stream then delivers
+   *  its final done frame. 409 = nothing is generating (safe to ignore). */
+  cancelGeneration: (conversationId: string) =>
+    post<{ ok: boolean; state?: string }>(
+      `/api/chat/conversations/${conversationId}/cancel`,
+    ),
   /** Which of the caller's conversations are generating right now — polled to
    *  badge the conversation list. Generation is server-side, so this stays
    *  accurate whether or not the chat is currently open. */
@@ -417,6 +424,9 @@ export const api = {
     /** Chat system prompt (admin) — "" (or the default verbatim) restores
      *  the built-in default. */
     chat_system_prompt?: string;
+    /** Auto-routing model (admin) — "" disables LLM routing ("Auto" chats
+     *  then fall back to deterministic picks). */
+    router_model_slug?: string;
     /** OAuth app config (admin) — empty string clears a stored value. */
     github_oauth_client_id?: string;
     hf_oauth_client_id?: string;

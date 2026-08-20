@@ -363,6 +363,11 @@ export interface SettingsPayload {
   chat_system_prompt_customized: boolean;
   /** The built-in default, for comparison/reset UI. */
   chat_system_prompt_default: string;
+  /** Auto-routing model slug ("" = LLM routing disabled — "Auto" chats fall
+   *  back to deterministic picks). Admin-editable via PATCH. */
+  router_model_slug: string;
+  /** False when router_model_slug names no downloaded llama.cpp model. */
+  router_model_ready: boolean;
   /** Keyed by connector kind ("github", "hugging-face"). */
   oauth?: Record<string, OAuthAppSettings>;
 }
@@ -570,11 +575,25 @@ export interface ConversationDetail extends Conversation {
   messages: ChatMessage[];
 }
 
+/** GET /api/chat/status "auto" — whether the "Auto" model option is usable.
+ *  Available whenever at least one text model is downloaded; the tiny router
+ *  model refines the pick when configured and ready. */
+export interface ChatAutoStatus {
+  available: boolean;
+  /** Configured router model slug ("" = LLM routing disabled). */
+  router_model: string;
+  /** False when the configured slug isn't a downloaded llama.cpp model —
+   *  auto then falls back to deterministic picks. */
+  router_ready: boolean;
+}
+
 /** GET /api/chat/status — which models the composer can talk to. */
 export interface ChatStatus {
   serving: Lease[];
   /** Ready imagegen-lane lease, or null when no image model is serving. */
   image: Lease | null;
+  /** The "Auto" routing option's state (absent on older backends). */
+  auto?: ChatAutoStatus;
 }
 
 /** POST /api/chat/image response — the generated file plus, for a saved

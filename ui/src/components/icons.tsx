@@ -83,6 +83,12 @@ export const IconPlus = (p: IconProps) => (
   </Icon>
 );
 
+export const IconMinus = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M5 12h14" />
+  </Icon>
+);
+
 export const IconTrash = (p: IconProps) => (
   <Icon {...p}>
     <path d="M4 7h16M9.5 7V4.8A1.3 1.3 0 0 1 10.8 3.5h2.4a1.3 1.3 0 0 1 1.3 1.3V7M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12" />

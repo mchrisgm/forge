@@ -15,6 +15,7 @@ import {
 } from "../icons";
 import { Markdown } from "../lazy-markdown";
 import { Button, Spinner } from "../ui";
+import { ImageLightbox } from "./ImageLightbox";
 
 /** A message as the chat surface renders it (server or in-flight). */
 export interface UiMessage {
@@ -143,7 +144,7 @@ function ThinkingExpander({
   );
 }
 
-/** Inline image that opens the full-size file in a new tab. */
+/** Inline image that opens the built-in lightbox viewer (zoom/pan/export). */
 function ImageAttachment({
   attachment,
   large = false,
@@ -151,28 +152,42 @@ function ImageAttachment({
   attachment: AttachmentMeta;
   large?: boolean;
 }) {
+  const [open, setOpen] = useState(false);
   const alt =
     attachment.generated && attachment.prompt
       ? attachment.prompt
       : attachment.filename;
   return (
-    <a
-      href={fileUrl(attachment.id)}
-      target="_blank"
-      rel="noreferrer noopener"
-      title="Open full size"
-      className="block"
-    >
-      <img
-        src={fileUrl(attachment.id)}
-        alt={alt}
-        loading="lazy"
-        className={cx(
-          "rounded-lg border border-border object-cover",
-          large ? "w-full" : "h-24 max-w-40",
-        )}
-      />
-    </a>
+    <>
+      <button
+        type="button"
+        title="View full size"
+        onClick={() => setOpen(true)}
+        className="block cursor-zoom-in"
+      >
+        <img
+          src={fileUrl(attachment.id)}
+          alt={alt}
+          loading="lazy"
+          className={cx(
+            "rounded-lg border border-border object-cover",
+            large ? "w-full" : "h-24 max-w-40",
+          )}
+        />
+      </button>
+      {open && (
+        <ImageLightbox
+          src={fileUrl(attachment.id)}
+          filename={attachment.filename}
+          caption={
+            attachment.generated && attachment.prompt
+              ? attachment.prompt
+              : undefined
+          }
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
   );
 }
 
@@ -253,6 +268,46 @@ function AssistantAttachments({
   );
 }
 
+/** Temporary-mode generation (data URI, nothing stored server-side) — the
+ *  lightbox still works, it just reads the inline data. */
+function TempImageFigure({
+  image,
+}: {
+  image: { dataUri: string; prompt: string };
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <figure className="m-0 max-w-sm">
+      <button
+        type="button"
+        title="View full size"
+        onClick={() => setOpen(true)}
+        className="block w-full cursor-zoom-in"
+      >
+        <img
+          src={image.dataUri}
+          alt={image.prompt}
+          className="w-full rounded-lg border border-border object-cover"
+        />
+      </button>
+      <figcaption
+        className="mt-1.5 line-clamp-2 text-xs text-faint"
+        title={image.prompt}
+      >
+        {image.prompt} · temporary — not saved
+      </figcaption>
+      {open && (
+        <ImageLightbox
+          src={image.dataUri}
+          filename="generated-image.png"
+          caption={image.prompt}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </figure>
+  );
+}
+
 /** Placeholder while an image generation runs (can take minutes). */
 function PendingImageBubble({ prompt }: { prompt: string }) {
   return (
@@ -324,22 +379,7 @@ export function MessageBubble({
           live={Boolean(message.streaming) && !message.content}
         />
       )}
-      {message.tempImage && (
-        <figure className="m-0 max-w-sm">
-          {/* No open-in-new-tab link: browsers block top-level data: URLs. */}
-          <img
-            src={message.tempImage.dataUri}
-            alt={message.tempImage.prompt}
-            className="w-full rounded-lg border border-border object-cover"
-          />
-          <figcaption
-            className="mt-1.5 line-clamp-2 text-xs text-faint"
-            title={message.tempImage.prompt}
-          >
-            {message.tempImage.prompt} · temporary — not saved
-          </figcaption>
-        </figure>
-      )}
+      {message.tempImage && <TempImageFigure image={message.tempImage} />}
       <AssistantAttachments attachments={message.attachments} />
       {message.content && !placeholderOnly && <Markdown text={message.content} />}
       {message.error && (

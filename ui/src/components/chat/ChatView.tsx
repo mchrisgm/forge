@@ -43,13 +43,22 @@ import {
   storeThinking,
 } from "../ThinkingSelect";
 import { Button, EmptyState, LaneBadge, Spinner } from "../ui";
-import { Composer, type ImageProvider } from "./Composer";
+import {
+  Composer,
+  type ComposerHandle,
+  type ImageProvider,
+} from "./Composer";
 import {
   MessageBubble,
   splitStoredThinking,
   type UiMessage,
 } from "./messages";
 import { SandboxContext, type SandboxRunner } from "./sandbox-context";
+import { StarterPanel } from "./StarterPanel";
+
+/** The model_slug sentinel for router-picked models (backend AUTO_SLUG). */
+const AUTO_SLUG = "auto";
+const AUTO_LABEL = "Auto — picks the best model";
 
 const THINKING_STORAGE_KEY = "forge.thinking.chats";
 
@@ -146,6 +155,7 @@ export function ChatView({
   );
 
   const abortRef = useRef<AbortController | null>(null);
+  const composerRef = useRef<ComposerHandle>(null);
   const messagesRef = useRef<UiMessage[]>(messages);
   /** Which conversation the current `messages` state belongs to. */
   const loadedForRef = useRef<string | null>(null);
@@ -178,6 +188,9 @@ export function ChatView({
   const serving = status.data?.serving ?? [];
   const nothingServing = status.data != null && serving.length === 0;
   const imageLease = status.data?.image ?? null;
+  // "Auto": the tiny router model picks the answering model per prompt (the
+  // stream narrates the routing via forge:"status" frames).
+  const autoAvailable = status.data?.auto?.available === true;
 
   // ── sandbox lane: fetched once, cached; drives the code-block Run button ──
   const sandbox = useQuery({
@@ -219,18 +232,20 @@ export function ChatView({
 
   // A slug-less request only resolves when exactly one model serves, so with
   // several serving a fresh chat needs an explicit pick — default to the
-  // first, and drop a pick whose lease has gone away.
+  // first, and drop a pick whose lease has gone away. "auto" is a virtual
+  // slug (no lease) that stays valid while the router option is available.
   useEffect(() => {
     if (serving.length > 1 && !newChatSlug) {
       setNewChatSlug(serving[0].model_slug);
     } else if (
       newChatSlug &&
       status.data != null &&
+      !(newChatSlug === AUTO_SLUG && autoAvailable) &&
       !serving.some((l) => l.model_slug === newChatSlug)
     ) {
       setNewChatSlug(serving.length > 1 ? serving[0].model_slug : "");
     }
-  }, [serving, newChatSlug, status.data]);
+  }, [serving, newChatSlug, status.data, autoAvailable]);
 
   // ── conversation history ──────────────────────────────────────────────────
   const conversation = useQuery({
@@ -735,14 +750,46 @@ export function ChatView({
     else void run(last.content, last.metas, true);
   };
 
-  const stop = () => abortRef.current?.abort();
+  /** Stop generating: abort the local stream reader for instant feedback AND
+   *  cancel the server-side job (fire-and-forget — 409 just means nothing was
+   *  generating anymore). The partial text stays as the assistant turn; the
+   *  job's stream delivers its final done frame after the cancel. Temporary
+   *  chats have no server-side job — the abort alone stops them. */
+  const stop = () => {
+    abortRef.current?.abort();
+    const id = conversationId ?? loadedForRef.current;
+    if (!tempMode && id) {
+      void api.cancelGeneration(id).catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 409) return;
+        toast("error", `Couldn't cancel server-side: ${errorMessage(err)}`);
+      });
+    }
+  };
 
   // ── model picking ─────────────────────────────────────────────────────────
   const conversationSlug = conversation.data?.model_slug ?? "";
   const activeSlug = conversationId ? conversationSlug : newChatSlug;
+  const isAuto = activeSlug === AUTO_SLUG;
   const singleLease = serving.length === 1 ? serving[0] : null;
-  const activeLease =
-    serving.find((l) => l.model_slug === activeSlug) ?? singleLease;
+  const activeLease = isAuto
+    ? null
+    : serving.find((l) => l.model_slug === activeSlug) ?? singleLease;
+
+  // Picker entries: the virtual "auto" option first (when usable), then one
+  // per serving lease. Rendered only when there's an actual choice.
+  const pickerOptions = useMemo(
+    () => [
+      ...(autoAvailable
+        ? [{ slug: AUTO_SLUG, label: AUTO_LABEL, mono: false }]
+        : []),
+      ...serving.map((l) => ({
+        slug: l.model_slug,
+        label: l.model_slug,
+        mono: true,
+      })),
+    ],
+    [autoAvailable, serving],
+  );
 
   const pickModel = useMutation({
     mutationFn: (slug: string) =>
@@ -794,7 +841,9 @@ export function ChatView({
           <div className="min-w-0 flex-1">
             <h1 className="truncate text-base font-bold text-text">{title}</h1>
             <div className="flex items-center gap-2 text-xs text-muted">
-              {activeLease ? (
+              {isAuto ? (
+                <span className="truncate">{AUTO_LABEL}</span>
+              ) : activeLease ? (
                 <>
                   <span className="truncate">{activeLease.model_name}</span>
                   <LaneBadge engine={activeLease.engine} />
@@ -852,26 +901,27 @@ export function ChatView({
         </p>
       )}
 
-      {/* Model picker — several models serving at once */}
-      {serving.length > 1 && (
+      {/* Model picker — several models serving, or "Auto" plus at least one */}
+      {pickerOptions.length > 1 && (
         <div
           role="radiogroup"
           aria-label="Model for this chat"
           className="mt-3 flex flex-wrap items-center gap-1.5"
         >
           <span className="mr-1 text-xs font-medium text-faint">Model</span>
-          {serving.map((l) => {
-            const active = activeSlug === l.model_slug;
+          {pickerOptions.map((opt) => {
+            const active = activeSlug === opt.slug;
             return (
               <button
-                key={l.model_slug}
+                key={opt.slug}
                 type="button"
                 role="radio"
                 aria-checked={active}
                 disabled={streaming || pickModel.isPending}
-                onClick={() => onPickModel(l.model_slug)}
+                onClick={() => onPickModel(opt.slug)}
                 className={cx(
-                  "inline-flex min-h-9 cursor-pointer items-center gap-1.5 rounded-full border px-3 font-mono text-xs font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-60",
+                  "inline-flex min-h-9 cursor-pointer items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-60",
+                  opt.mono && "font-mono",
                   active
                     ? "border-accent/50 bg-accent/15 text-accent"
                     : "border-border bg-raised text-muted hover:text-text",
@@ -884,7 +934,7 @@ export function ChatView({
                     active ? "bg-accent" : "bg-ok",
                   )}
                 />
-                {l.model_slug}
+                {opt.label}
               </button>
             );
           })}
@@ -909,8 +959,12 @@ export function ChatView({
           />
         )}
 
+        {/* Empty state: starter prompts for a fresh chat. The !streaming
+            guard keeps it from flashing mid-first-generation or while a
+            reattach is restoring an in-flight reply. */}
         {messages.length === 0 &&
           !sendError &&
+          !streaming &&
           !conversation.isLoading &&
           !conversation.isError &&
           (nothingServing ? (
@@ -927,15 +981,17 @@ export function ChatView({
                 </Link>
               }
             />
-          ) : (
+          ) : tempMode ? (
             <EmptyState
               icon="spark"
-              title={tempMode ? "Off the record" : "Start the conversation"}
-              hint={
-                tempMode
-                  ? "Nothing here is stored and memory stays untouched. Close the page and it's gone."
-                  : "Chat with your local model. Conversations are saved to your profile and can teach its memory."
-              }
+              title="Off the record"
+              hint="Nothing here is stored and memory stays untouched. Close the page and it's gone."
+            />
+          ) : (
+            <StarterPanel
+              onPick={(prompt) => composerRef.current?.prefill(prompt)}
+              showTemporaryTip={conversationId == null}
+              autoAvailable={autoAvailable}
             />
           ))}
 
@@ -1011,6 +1067,7 @@ export function ChatView({
         )}
         <div className="pb-safe">
           <Composer
+            ref={composerRef}
             onSend={onSend}
             onStop={stop}
             onGenerateImage={onGenerateImage}
@@ -1023,9 +1080,11 @@ export function ChatView({
             placeholder={
               tempMode
                 ? "Message (temporary — not saved)…"
-                : activeLease
-                  ? `Message ${activeLease.model_name}…`
-                  : "Message…"
+                : isAuto
+                  ? "Message — Auto picks the model…"
+                  : activeLease
+                    ? `Message ${activeLease.model_name}…`
+                    : "Message…"
             }
           />
         </div>
