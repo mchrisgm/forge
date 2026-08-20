@@ -1,12 +1,21 @@
-"""Auto model routing: a tiny resident LLM picks the right model per prompt.
+"""Auto model routing: a tiny resident LLM sizes the task, then picks a model.
 
 When a conversation's model is set to "auto", a small always-on router model
 (chosen on the Settings page — TinyLlama/Qwen-0.6B class, must be a READY
-llama.cpp model) reads the user's prompt and decides which downloaded model
-should answer it; the orchestrator then makes sure that model is serving
-(loading it onto a GPU if needed) before generation starts. The whole dance
-streams as forge:"status" frames, so the chat narrates "choosing → routed →
-loading → generating" instead of sitting silent.
+llama.cpp model) reads the user's prompt and decides how HEAVY the task is:
+
+  * light — reading or summarizing text, browsing/looking things up, reading
+    news, opening or reading files, translation, casual chat, short factual
+    questions → answered by the SMALLEST downloaded model (fast).
+  * heavy — writing or debugging code, step-by-step logical reasoning, math,
+    planning or complex analysis → answered by the LARGEST downloaded model.
+
+The pick is made across ALL downloaded models by capability (parameter count),
+never by what happens to be loaded already — the orchestrator then makes sure
+the chosen model is serving (loading it onto a GPU if needed) before
+generation starts. The whole dance streams as forge:"status" frames, so the
+chat narrates "choosing → routed → loading → generating" instead of sitting
+silent.
 
 Placement (the user's spec): with multiple GPUs the router lives on the
 "worst" one (smallest VRAM); with a single GPU it runs alongside the big
@@ -16,14 +25,16 @@ would be a worse trade. The router container sits OUTSIDE the per-GPU lease
 map (label forge.router, fixed name/port), so it never blocks a lane.
 
 Every failure degrades softly: router not configured, container won't start,
-or the reply unparseable → fall back to the largest ready model (or whatever
-is already serving) with an honest reason in the status frame.
+or the reply unusable → classify the prompt with a local keyword heuristic
+instead and pick by size the same way, with an honest reason in the status
+frame.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -232,18 +243,98 @@ def ready_candidates() -> list[ModelEntry]:
     return [r for r in rows if r.engine != EngineKind.imagegen]
 
 
-def _fallback(candidates: list[ModelEntry]) -> ModelEntry:
-    # Prefer whatever is ALREADY serving (no load wait), else the largest.
-    serving = {le.model_id for le in engine_manager.ready_text_leases()}
-    live = [c for c in candidates if (c.id or 0) in serving]
-    pool = live or candidates
-    return max(pool, key=lambda c: c.params_b)
+def model_for_slug(slug: str) -> ModelEntry | None:
+    """The downloaded model whose OpenCode id matches `slug` (the id the chat
+    picker sends when a specific model is chosen). None when nothing matches —
+    e.g. the model was deleted after the conversation pinned it."""
+    slug = (slug or "").strip()
+    if not slug:
+        return None
+    for c in ready_candidates():
+        if opencode_model_id_for(c) == slug:
+            return c
+    return None
+
+
+# ── task sizing ─────────────────────────────────────────────────────────────
+# The router classifies each prompt into one of these buckets; the bucket maps
+# to a model size, so selection stays capability-based (never "what's loaded").
+TASK_LIGHT = "light"
+TASK_HEAVY = "heavy"
+
+# Local heuristic used whenever the tiny model can't be reached or answers
+# unusably: code fences or these signals => heavy, otherwise light.
+_HEAVY_SIGNALS = re.compile(
+    r"```|\b("
+    r"cod(e|ing)|debug|compile|refactor|function|method|class|"
+    r"algorithm|regex|stack ?trace|traceback|exception|"
+    r"python|javascript|typescript|rust|golang|java|c\+\+|sql|bash|"
+    r"prove|proof|derive|theorem|reason(ing)?|step[- ]by[- ]step|"
+    r"logic(al)?|calculat|equation|integral|optimi[sz]e|complexity|"
+    r"architect|design a|implement|analy[sz]e"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_CLASSIFY_SYSTEM = (
+    "You triage a user's request to the right SIZE of local model. Reply with "
+    "exactly one word — either 'light' or 'heavy'.\n"
+    "light = reading or summarizing text, browsing or looking up information, "
+    "reading the news, opening or reading files, translation, casual "
+    "conversation, or short factual questions.\n"
+    "heavy = writing or debugging code, step-by-step logical reasoning, math, "
+    "planning, or complex analysis.\n"
+    "Answer with only the single word 'light' or 'heavy'."
+)
+
+
+def _keyword_task_class(prompt: str) -> str:
+    """Router-free task sizing: the fallback when the tiny model is down."""
+    return TASK_HEAVY if _HEAVY_SIGNALS.search(prompt or "") else TASK_LIGHT
+
+
+def _pick_for_class(candidates: list[ModelEntry], task_class: str) -> ModelEntry:
+    """The model a task class maps to, chosen across ALL downloaded models by
+    capability: light → smallest (fastest), heavy → largest (most capable).
+    Deterministic ties: params first, then id."""
+    ordered = sorted(candidates, key=lambda c: (c.params_b, c.id or 0))
+    return ordered[0] if task_class == TASK_LIGHT else ordered[-1]
+
+
+async def _classify(prompt: str, lease: Lease) -> str | None:
+    """Ask the tiny router model to size the task. None on any failure or an
+    answer that is neither 'light' nor 'heavy'."""
+    body = {
+        "model": lease.model_slug,
+        "messages": [
+            {"role": "system", "content": _CLASSIFY_SYSTEM},
+            {"role": "user", "content": prompt[:2000]},
+        ],
+        "max_tokens": 4,
+        "temperature": 0,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=_CHOOSE_TIMEOUT_S) as http:
+            resp = await http.post(f"{lease.base_url}/chat/completions", json=body)
+            resp.raise_for_status()
+            reply = str(resp.json()["choices"][0]["message"]["content"]).lower()
+    except Exception as exc:
+        log.warning("router classify failed: %s", exc)
+        return None
+    # Check heavy first: "this is not light, it's heavy" must resolve to heavy.
+    if TASK_HEAVY in reply:
+        return TASK_HEAVY
+    if TASK_LIGHT in reply:
+        return TASK_LIGHT
+    return None
 
 
 async def choose_model(prompt: str) -> tuple[ModelEntry, str]:
-    """(model, reason) for this prompt. The tiny router model decides when it
-    is configured and healthy; every failure path falls back deterministically
-    with an honest reason."""
+    """(model, reason) for this prompt. The tiny router model sizes the task
+    (light vs heavy) and we pick the smallest/largest downloaded model to
+    match — capability-based, independent of what's currently loaded. Every
+    failure path sizes the task with a local keyword heuristic instead, so
+    context-aware routing still works with the router container down."""
     candidates = ready_candidates()
     if not candidates:
         raise RuntimeError(
@@ -254,52 +345,18 @@ async def choose_model(prompt: str) -> tuple[ModelEntry, str]:
 
     lease = await ensure_router()
     if lease is None:
-        pick = _fallback(candidates)
-        return pick, "router model unavailable — defaulted"
+        task_class = _keyword_task_class(prompt)
+        pick = _pick_for_class(candidates, task_class)
+        return pick, f"router model unavailable — {task_class} task by keywords"
 
-    menu = "\n".join(
-        f"- {opencode_model_id_for(c)}: {c.display_name}, {c.params_b:g}B params"
-        + (f" — {c.note[:80]}" if c.note else "")
-        for c in candidates
-    )
-    body = {
-        "model": lease.model_slug,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You route user requests to the best local model. Pick the "
-                    "smallest model that can handle the request well: simple "
-                    "chat/short questions -> small models; coding, long or "
-                    "complex reasoning -> larger ones. Reply with ONLY the "
-                    "chosen model id from the list, nothing else.\n" + menu
-                ),
-            },
-            {"role": "user", "content": prompt[:2000]},
-        ],
-        "max_tokens": 24,
-        "temperature": 0,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=_CHOOSE_TIMEOUT_S) as http:
-            resp = await http.post(f"{lease.base_url}/chat/completions", json=body)
-            resp.raise_for_status()
-            reply = str(resp.json()["choices"][0]["message"]["content"])
-    except Exception as exc:
-        log.warning("router choose failed: %s", exc)
-        pick = _fallback(candidates)
-        return pick, "router call failed — defaulted"
+    task_class = await _classify(prompt, lease)
+    if task_class is None:
+        task_class = _keyword_task_class(prompt)
+        pick = _pick_for_class(candidates, task_class)
+        return pick, f"router reply unclear — {task_class} task by keywords"
 
-    reply_lower = reply.lower()
-    matches = [
-        c for c in candidates if opencode_model_id_for(c).lower() in reply_lower
-    ]
-    if matches:
-        # Longest slug wins ("qwen3-14b" must not lose to a "qwen3-1b" substring).
-        pick = max(matches, key=lambda c: len(opencode_model_id_for(c)))
-        return pick, f"picked by {lease.model_name}"
-    pick = _fallback(candidates)
-    return pick, "router reply unparseable — defaulted"
+    pick = _pick_for_class(candidates, task_class)
+    return pick, f"{task_class} task — routed by {lease.model_name}"
 
 
 async def ensure_serving(model: ModelEntry, push_status) -> Lease:

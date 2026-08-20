@@ -1,6 +1,7 @@
 """Auto-routing tests (model_router): worst-GPU placement, router-model
-resolution, the choose_model decision (LLM pick, longest-slug disambiguation,
-every fallback path), ensure_serving's no-evict policy, the router container
+resolution, slug resolution, the choose_model decision (task-size
+classification → pick by capability, keyword fallback, selection independent
+of what's loaded), ensure_serving's no-evict policy, the router container
 spawn, the settings knob, and the end-to-end "auto" chat flow with routing
 narrated as forge:"status" frames."""
 
@@ -61,6 +62,10 @@ def router_reply(content: str):
     return handler
 
 
+HEAVY_PROMPT = "write a python function to sort a list"
+LIGHT_PROMPT = "what is the news today"
+
+
 class TestWorstGpu:
     def test_smallest_vram_wins(self):
         gpus = [
@@ -100,6 +105,52 @@ class TestRouterModelEntry:
         assert model_router.router_model_entry() is None
 
 
+class TestModelForSlug:
+    def test_resolves_downloaded_model(self, db_ready):
+        model_id = add_model(display_name="Chat Model")
+        got = model_router.model_for_slug("chat-model")
+        assert got is not None and got.id == model_id
+
+    def test_unknown_slug_returns_none(self, db_ready):
+        add_model(display_name="Chat Model")
+        assert model_router.model_for_slug("no-such-model") is None
+
+    def test_empty_slug_returns_none(self, db_ready):
+        add_model(display_name="Chat Model")
+        assert model_router.model_for_slug("") is None
+        assert model_router.model_for_slug("   ") is None
+
+
+class TestTaskSizing:
+    """The router-free heuristic and the class→model mapping in isolation."""
+
+    def test_heavy_keywords(self):
+        for prompt in (
+            "write a python function",
+            "debug this stack trace",
+            "prove that sqrt(2) is irrational",
+            "```\nx = 1\n```",
+        ):
+            assert model_router._keyword_task_class(prompt) == "heavy"
+
+    def test_light_keywords(self):
+        for prompt in (
+            "what is the news today",
+            "summarize this article for me",
+            "translate hello into french",
+            "how are you?",
+        ):
+            assert model_router._keyword_task_class(prompt) == "light"
+
+    def test_light_picks_smallest_heavy_picks_largest(self, db_ready):
+        small_id = add_model(display_name="Small Model", params_b=3.0)
+        big_id = add_model(display_name="Big Model", params_b=14.0)
+        with db_module.read_session() as db:
+            candidates = [db.get(ModelEntry, small_id), db.get(ModelEntry, big_id)]
+        assert model_router._pick_for_class(candidates, "light").id == small_id
+        assert model_router._pick_for_class(candidates, "heavy").id == big_id
+
+
 class TestChooseModel:
     def run(self, coro):
         return asyncio.new_event_loop().run_until_complete(coro)
@@ -114,29 +165,42 @@ class TestChooseModel:
         assert model.id == model_id
         assert reason == "the only ready model"
 
-    def test_router_unavailable_defaults_to_largest(self, db_ready, monkeypatch):
+    def _no_router(self, monkeypatch):
+        async def no_router():
+            return None
+
+        monkeypatch.setattr(model_router, "ensure_router", no_router)
+
+    def test_router_unavailable_heavy_keywords_picks_largest(
+        self, db_ready, monkeypatch
+    ):
         add_model(display_name="Small Model", params_b=3.0)
         big_id = add_model(display_name="Big Model", params_b=14.0)
-
-        async def no_router():
-            return None
-
-        monkeypatch.setattr(model_router, "ensure_router", no_router)
-        model, reason = self.run(model_router.choose_model("hi"))
+        self._no_router(monkeypatch)
+        model, reason = self.run(model_router.choose_model(HEAVY_PROMPT))
         assert model.id == big_id
-        assert reason == "router model unavailable — defaulted"
+        assert reason == "router model unavailable — heavy task by keywords"
 
-    def test_fallback_prefers_already_serving(self, db_ready, monkeypatch):
+    def test_router_unavailable_light_keywords_picks_smallest(
+        self, db_ready, monkeypatch
+    ):
         small_id = add_model(display_name="Small Model", params_b=3.0)
         add_model(display_name="Big Model", params_b=14.0)
+        self._no_router(monkeypatch)
+        model, reason = self.run(model_router.choose_model(LIGHT_PROMPT))
+        assert model.id == small_id
+        assert reason == "router model unavailable — light task by keywords"
+
+    def test_selection_ignores_what_is_loaded(self, db_ready, monkeypatch):
+        # The user's rule: pick by capability across ALL downloaded models, not
+        # by which one happens to be serving. The small model is loaded, but a
+        # heavy task must still route to the big (cold) one.
+        small_id = add_model(display_name="Small Model", params_b=3.0)
+        big_id = add_model(display_name="Big Model", params_b=14.0)
         serve("small-model", model_id=small_id)
-
-        async def no_router():
-            return None
-
-        monkeypatch.setattr(model_router, "ensure_router", no_router)
-        model, _ = self.run(model_router.choose_model("hi"))
-        assert model.id == small_id  # serving beats larger-but-cold
+        self._no_router(monkeypatch)
+        model, _ = self.run(model_router.choose_model(HEAVY_PROMPT))
+        assert model.id == big_id  # capability wins over "already loaded"
 
     def _with_router(self, monkeypatch):
         lease = Lease(
@@ -155,51 +219,59 @@ class TestChooseModel:
         monkeypatch.setattr(model_router, "ensure_router", fake_router)
         return lease
 
-    def test_router_picks_by_slug(self, db_ready, monkeypatch, httpx_mock):
-        add_model(display_name="Big Model", params_b=14.0)
-        small_id = add_model(display_name="Small Model", params_b=3.0)
+    def test_router_classifies_heavy_picks_largest(
+        self, db_ready, monkeypatch, httpx_mock
+    ):
+        add_model(display_name="Small Model", params_b=3.0)
+        big_id = add_model(display_name="Big Model", params_b=14.0)
         self._with_router(monkeypatch)
-        httpx_mock.set_handler(router_reply("small-model"))
-        model, reason = self.run(model_router.choose_model("what is 2+2?"))
-        assert model.id == small_id
-        assert reason == "picked by Tiny Router"
+        httpx_mock.set_handler(router_reply("heavy"))
+        model, reason = self.run(model_router.choose_model("do the thing"))
+        assert model.id == big_id
+        assert reason == "heavy task — routed by Tiny Router"
+        # The classification request carries the light/heavy instruction and
+        # the user's prompt — no model menu.
         body = json.loads(httpx_mock.requests[-1].content)
-        menu = body["messages"][0]["content"]
-        assert "small-model" in menu and "big-model" in menu
-        assert body["messages"][1]["content"] == "what is 2+2?"
+        system = body["messages"][0]["content"].lower()
+        assert "light" in system and "heavy" in system
+        assert body["messages"][1]["content"] == "do the thing"
 
-    def test_longest_slug_wins_substring_clash(self, db_ready, monkeypatch,
-                                               httpx_mock):
-        add_model(display_name="Coder", params_b=7.0)
-        pro_id = add_model(display_name="Coder Pro", params_b=14.0)
+    def test_router_classifies_light_picks_smallest(
+        self, db_ready, monkeypatch, httpx_mock
+    ):
+        small_id = add_model(display_name="Small Model", params_b=3.0)
+        add_model(display_name="Big Model", params_b=14.0)
         self._with_router(monkeypatch)
-        # "coder-pro" contains "coder" — the longer exact slug must win.
-        httpx_mock.set_handler(router_reply("I choose coder-pro."))
-        model, _ = self.run(model_router.choose_model("write a parser"))
-        assert model.id == pro_id
+        httpx_mock.set_handler(router_reply("light"))
+        model, reason = self.run(model_router.choose_model("do the thing"))
+        assert model.id == small_id
+        assert reason == "light task — routed by Tiny Router"
 
-    def test_unparseable_reply_defaults(self, db_ready, monkeypatch, httpx_mock):
+    def test_router_unclear_reply_falls_back_to_keywords(
+        self, db_ready, monkeypatch, httpx_mock
+    ):
         add_model(display_name="Small Model", params_b=3.0)
         big_id = add_model(display_name="Big Model", params_b=14.0)
         self._with_router(monkeypatch)
         httpx_mock.set_handler(router_reply("hmm, tough one"))
-        model, reason = self.run(model_router.choose_model("hi"))
+        model, reason = self.run(model_router.choose_model(HEAVY_PROMPT))
         assert model.id == big_id
-        assert reason == "router reply unparseable — defaulted"
+        assert reason == "router reply unclear — heavy task by keywords"
 
-    def test_router_call_failure_defaults(self, db_ready, monkeypatch,
-                                          httpx_mock):
-        add_model(display_name="Small Model", params_b=3.0)
-        big_id = add_model(display_name="Big Model", params_b=14.0)
+    def test_router_call_failure_uses_keywords(
+        self, db_ready, monkeypatch, httpx_mock
+    ):
+        small_id = add_model(display_name="Small Model", params_b=3.0)
+        add_model(display_name="Big Model", params_b=14.0)
         self._with_router(monkeypatch)
 
         def boom(request: httpx.Request) -> httpx.Response:
             return httpx.Response(500, text="router exploded")
 
         httpx_mock.set_handler(boom)
-        model, reason = self.run(model_router.choose_model("hi"))
-        assert model.id == big_id
-        assert reason == "router call failed — defaulted"
+        model, reason = self.run(model_router.choose_model(LIGHT_PROMPT))
+        assert model.id == small_id
+        assert reason == "router reply unclear — light task by keywords"
 
 
 class TestEnsureRouter:

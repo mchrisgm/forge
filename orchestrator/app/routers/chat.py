@@ -310,13 +310,16 @@ async def send_message(
             "to finish before sending another message"
         )
 
-    # "auto": the tiny router model picks the answering model INSIDE the job
-    # (model_router), so nothing needs to be serving yet — but at least one
-    # downloaded text model must exist for routing to have anything to pick.
-    is_auto = conversation.model_slug == model_router.AUTO_SLUG
-    model = None
+    # Model selection — "auto" OR a specific downloaded model — is resolved and
+    # LOADED inside the background job's prepare hook (model_router), so a chat
+    # can use ANY downloaded model, not just one that happens to be serving.
+    # Nothing needs a lease up front; even a minutes-long load streams progress
+    # as forge:"status" frames and survives the client detaching. An empty slug
+    # (legacy chats) means auto.
+    slug = conversation.model_slug
+    is_auto = slug in ("", model_router.AUTO_SLUG)
+    explicit_model = None
     if is_auto:
-        lease = None
         if not model_router.ready_candidates():
             raise HTTPException(
                 409,
@@ -327,8 +330,17 @@ async def send_message(
                 },
             )
     else:
-        lease = _select_lease(conversation.model_slug)
-        model = _model_for_lease(lease)
+        explicit_model = model_router.model_for_slug(slug)
+        if explicit_model is None:
+            raise HTTPException(
+                409,
+                {
+                    "message": "that model isn't downloaded",
+                    "detail": f"{slug!r} is no longer available — pick another "
+                    "model from the menu, or download it from the Models page.",
+                },
+            )
+    lease = None
     thinking = body.thinking or conversation.thinking
 
     use_memory = user.memory_enabled and conversation.memory_enabled
@@ -369,9 +381,10 @@ async def send_message(
             conversation.summary,
         )
 
-    # Auto mode assembles inside the job's prepare hook instead — the prompt
-    # is tailored to whichever model routing actually lands on.
-    messages = [] if is_auto else _assemble(model)
+    # Assembly happens inside prepare against the model that actually answers
+    # (auto's routed pick, or the explicit choice once loaded), so the system
+    # prompt and tool formatting match it.
+    messages: list[dict] = []
 
     # Persist the user turn before generating so the history stays consistent
     # even if the client is long gone (skipped when reusing a retried turn).
@@ -389,25 +402,28 @@ async def send_message(
         row = db.get(Conversation, conversation_id)
         if row:
             row.updated_at = datetime.now(UTC)
-            if not row.model_slug and lease is not None:
-                row.model_slug = lease.model_slug
+            if not row.model_slug:
+                # An empty (legacy) selection is auto routing — pin it so the
+                # picker and the next turn agree on the mode.
+                row.model_slug = model_router.AUTO_SLUG
             db.add(row)
 
     async def post_exchange(assistant_text: str) -> None:
         await _post_exchange(user, conversation, body.content, assistant_text)
 
-    prepare = None
-    if is_auto:
-        # Runs INSIDE the background job (chat_jobs._run) before the slot is
-        # taken: routing and even a minutes-long model load stream progress as
-        # forge:"status" frames and survive the client detaching.
-        async def prepare(push_status):
+    # Runs INSIDE the background job (chat_jobs._run) before the slot is taken:
+    # routing (auto) and the model load both stream progress as forge:"status"
+    # frames and survive the client detaching.
+    async def prepare(push_status):
+        if is_auto:
             push_status("choosing the best model for this prompt…")
             chosen, reason = await model_router.choose_model(body.content)
             push_status(f"routed to {chosen.display_name} — {reason}")
-            routed = await model_router.ensure_serving(chosen, push_status)
-            answering = _model_for_lease(routed) or chosen
-            return routed, routed.model_slug, _assemble(answering)
+        else:
+            chosen = explicit_model
+        routed = await model_router.ensure_serving(chosen, push_status)
+        answering = _model_for_lease(routed) or chosen
+        return routed, routed.model_slug, _assemble(answering)
 
     # The job runs in the orchestrator's event loop, independent of this
     # request — closing the SSE below never stops it.
@@ -415,7 +431,7 @@ async def send_message(
         conversation_id=conversation_id,
         user_id=user.id,
         lease=lease,
-        model_slug=lease.model_slug if lease else model_router.AUTO_SLUG,
+        model_slug=model_router.AUTO_SLUG if is_auto else slug,
         messages=messages,
         turn_key=turn_key,
         post_exchange=post_exchange,
