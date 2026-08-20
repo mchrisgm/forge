@@ -9,7 +9,7 @@ import pytest
 from sqlmodel import select
 
 from app import db as db_module
-from app.models import ModelEntry
+from app.models import EngineKind, ModelEntry, ModelStatus, Quant
 from app.routers import models_api as models_api_module
 from app.routers.models_api import LANE_NOTE
 from app.services import downloader, registry
@@ -432,3 +432,113 @@ class TestIsDiffusersRepo:
     def test_listing_failure_is_false(self, api, hub):
         hub.error = RuntimeError("hub down")
         assert registry.is_diffusers_repo("org/pipe") is False
+
+
+# ── refit: escape a lane that cannot serve the model ────────────────────────
+#
+# An AirLLM-lane model whose checkpoint AirLLM cannot stream (kimi-k3 class of
+# failure) can be re-resolved onto llama.cpp/vLLM when a fitting artifact
+# exists — or fail with an honest "cannot run on this box".
+
+
+class TestRefit:
+    def airllm_entry(self) -> int:
+        return add_model(
+            hf_repo="moonshotai/Kimi-K3-DSpark",
+            display_name="Kimi K3 DSpark",
+            engine=EngineKind.airllm,
+            quant=Quant.fp16_airllm,
+            file_path="",
+            params_b=200.0,
+            status=ModelStatus.ready,
+        )
+
+    def test_airllm_model_refits_onto_a_gguf_that_fits(
+        self, api, auth_headers, resolved, download_spy
+    ):
+        model_id = self.airllm_entry()
+        resolved.update(
+            lane="llamacpp-offload",
+            gguf_repo="bartowski/Kimi-K3-DSpark-GGUF",
+            gguf_file="kimi-k3-dspark-q4_k_m.gguf",
+            gguf_size_gb=28.0,
+            params_b=200.0,
+        )
+        r = api.post(f"/api/models/{model_id}/refit", headers=auth_headers)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["engine"] == "llamacpp"
+        assert body["hf_repo"] == "bartowski/Kimi-K3-DSpark-GGUF"
+        assert body["file_path"] == "kimi-k3-dspark-q4_k_m.gguf"
+        assert body["quant"] == Quant.gguf_q4_k_m.value
+        assert "Refitted from the airllm lane" in body["note"]
+        assert download_spy == ["bartowski/Kimi-K3-DSpark-GGUF"]
+
+    def test_airllm_model_refits_onto_vllm_awq(
+        self, api, auth_headers, resolved, download_spy
+    ):
+        model_id = self.airllm_entry()
+        resolved.update(lane="vllm", params_b=32.0)
+        r = api.post(f"/api/models/{model_id}/refit", headers=auth_headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["engine"] == "vllm"
+        assert r.json()["quant"] == "awq"
+        assert download_spy  # snapshot download kicked off
+
+    def test_no_smaller_artifact_is_an_honest_409(
+        self, api, auth_headers, resolved, download_spy
+    ):
+        model_id = self.airllm_entry()
+        resolved.update(lane="airllm")  # re-resolution picks the same lane
+        r = api.post(f"/api/models/{model_id}/refit", headers=auth_headers)
+        assert r.status_code == 409
+        assert "cannot run on this box" in r.json()["detail"]
+        assert download_spy == []
+
+    def test_no_lane_at_all_is_a_409(self, api, auth_headers, resolved):
+        model_id = self.airllm_entry()
+        resolved.update(lane=None)
+        r = api.post(f"/api/models/{model_id}/refit", headers=auth_headers)
+        assert r.status_code == 409
+        assert "does not fit this hardware" in r.json()["detail"]
+
+    def test_target_artifact_already_in_catalog_is_a_409(
+        self, api, auth_headers, resolved, download_spy
+    ):
+        add_model(
+            hf_repo="bartowski/Kimi-K3-DSpark-GGUF",
+            display_name="Kimi K3 DSpark GGUF",
+            file_path="kimi-k3-dspark-q4_k_m.gguf",
+        )
+        model_id = self.airllm_entry()
+        resolved.update(
+            lane="llamacpp-offload",
+            gguf_repo="bartowski/Kimi-K3-DSpark-GGUF",
+            gguf_file="kimi-k3-dspark-q4_k_m.gguf",
+        )
+        r = api.post(f"/api/models/{model_id}/refit", headers=auth_headers)
+        assert r.status_code == 409
+        assert "already in the catalog" in r.json()["detail"]
+        assert download_spy == []
+
+    def test_loaded_model_must_be_unloaded_first(
+        self, api, auth_headers, resolved, monkeypatch
+    ):
+        model_id = self.airllm_entry()
+        lease = SimpleNamespace(model_id=model_id)
+        monkeypatch.setattr(
+            models_api_module.engine_manager, "active_leases", lambda: [lease]
+        )
+        r = api.post(f"/api/models/{model_id}/refit", headers=auth_headers)
+        assert r.status_code == 409
+        assert "unload" in r.json()["detail"]
+
+    def test_resolution_failure_is_a_502(self, api, auth_headers, monkeypatch):
+        model_id = self.airllm_entry()
+
+        def boom(repo, token=None):
+            raise RuntimeError("HF down")
+
+        monkeypatch.setattr(models_api_module, "resolve_text_candidate", boom)
+        r = api.post(f"/api/models/{model_id}/refit", headers=auth_headers)
+        assert r.status_code == 502

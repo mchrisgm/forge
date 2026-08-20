@@ -282,6 +282,45 @@ class _ModelState:
 
 STATE = _ModelState()
 
+
+def _startup_preflight() -> str | None:
+    """The streamability pre-flight, run once in the background at server
+    start: resolve the class AirLLM will pick and compare its expected layer
+    names against the checkpoint's real tensor names. Returns the error
+    message for a model this lane can NEVER serve, else None (including when
+    the answer is unknowable — the load-time gates still apply)."""
+    if not MODEL_PATH:
+        return None
+    tensor_names = _checkpoint_tensor_names(MODEL_PATH)
+    if not tensor_names:
+        return None
+    resolved = _resolve_streaming_names(MODEL_PATH, os.environ.get("HF_TOKEN", ""))
+    if not resolved:
+        return None
+    cls_name, layer_names = resolved
+    return _streamability_error(tensor_names, cls_name, layer_names)
+
+
+@app.on_event("startup")
+async def _preflight_or_exit() -> None:
+    """Fail the LOAD, not the first chat: when the pre-flight proves the model
+    can never stream on this lane, log the reason and exit — the
+    orchestrator's healthwait sees the dead container immediately and errors
+    the lease with this log tail, instead of reporting 'ready' and then
+    500-ing every generation."""
+
+    def check() -> None:
+        try:
+            error = _startup_preflight()
+        except Exception as exc:  # never take the lane down on a probe bug
+            log.warning("startup pre-flight skipped: %s", exc)
+            return
+        if error:
+            log.error("model is not servable by the AirLLM lane: %s", error)
+            os._exit(3)
+
+    threading.Thread(target=check, name="airllm-preflight", daemon=True).start()
+
 # Queue of depth 1. asyncio.Semaphore: locked() + acquire() with no await in
 # between is atomic on the event loop, giving a race-free try-acquire.
 GENERATION_SLOT = asyncio.Semaphore(1)

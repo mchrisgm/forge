@@ -293,6 +293,9 @@ export const api = {
   deleteModel: (id: number) => del<{ ok: boolean }>(`/api/models/${id}`),
   downloadModel: (id: number) =>
     post<{ ok: boolean }>(`/api/models/${id}/download`),
+  /** Re-resolve artifacts and move the model to a different engine lane
+   *  (e.g. AirLLM -> a GGUF that fits). 409 when nothing else fits. */
+  refitModel: (id: number) => post<ModelEntry>(`/api/models/${id}/refit`),
   listSuggestions: () => get<Suggestion[]>("/api/models/suggestions"),
   approveSuggestion: (id: number) =>
     post<ModelEntry>(`/api/models/suggestions/${id}/approve`),

@@ -1540,6 +1540,27 @@ function handleApi(req, res, url) {
   if (p === "/api/models/search/add" && req.method === "POST") {
     return sendJson(res, models[0]);
   }
+  m = p.match(/^\/api\/models\/(\d+)\/refit$/);
+  if (m && req.method === "POST") {
+    const model = models.find((x) => x.id === Number(m[1]));
+    if (!model) return sendJson(res, { detail: "model not found" }, 404);
+    if (model.engine !== "airllm") {
+      return sendJson(
+        res,
+        { detail: `re-resolution keeps the ${model.engine} lane — no alternative artifact exists for this hardware` },
+        409,
+      );
+    }
+    return sendJson(res, {
+      ...model,
+      engine: "llamacpp",
+      quant: "gguf-q4_k_m",
+      hf_repo: `bartowski/${model.display_name.replaceAll(" ", "-")}-GGUF`,
+      file_path: "model-q4_k_m.gguf",
+      status: "downloading",
+      note: "Refitted from the airllm lane: now llamacpp (gguf-q4_k_m).",
+    });
+  }
   m = p.match(/^\/api\/models\/(\d+)\/thinking\/(auto|off|low|high)$/);
   if (m) {
     const model = models.find((x) => x.id === Number(m[1]));

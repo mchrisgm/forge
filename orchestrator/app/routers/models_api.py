@@ -385,6 +385,108 @@ async def download_model(
     return {"ok": True}
 
 
+@router.post("/{model_id}/refit")
+async def refit_model(model_id: int, user: User = Depends(current_user)) -> dict:
+    """Move a model to a DIFFERENT engine lane by re-running artifact
+    resolution (the same GGUF/AWQ hunt used when adding from search).
+
+    Escape hatch for a model its assigned lane cannot actually serve — above
+    all an AirLLM-lane model whose checkpoint layout AirLLM cannot stream:
+    when a quantized build exists that fits this hardware, the entry is
+    rewritten in place (llama.cpp GGUF or vLLM AWQ) and the download starts;
+    when nothing else fits, this says so honestly instead of guessing."""
+    with read_session() as db:
+        entry = db.get(ModelEntry, model_id)
+    if entry is None:
+        raise HTTPException(404, "model not found")
+    if entry.engine == EngineKind.imagegen:
+        raise HTTPException(400, "image models have a single lane — nothing to refit")
+    if downloader.is_downloading(model_id):
+        raise HTTPException(409, "download in progress — wait for it to finish")
+    if any(lease.model_id == model_id for lease in engine_manager.active_leases()):
+        raise HTTPException(409, "model is loaded — unload the engine first")
+
+    try:
+        resolved = await asyncio.to_thread(
+            resolve_text_candidate, entry.hf_repo, _hf_token(user)
+        )
+    except Exception as exc:
+        raise HTTPException(502, f"could not re-resolve {entry.hf_repo}: {exc}") from exc
+
+    lane = resolved["lane"]
+    if lane is None:
+        raise HTTPException(
+            409,
+            f"{entry.hf_repo} does not fit this hardware in any lane (no usable "
+            "GGUF/AWQ artifact within the VRAM+RAM budgets)",
+        )
+    if lane == "vllm":
+        engine, quant = EngineKind.vllm, Quant.awq
+        repo, file_path = entry.hf_repo, ""
+    elif lane == "airllm":
+        engine, quant = EngineKind.airllm, Quant.fp16_airllm
+        repo, file_path = entry.hf_repo, ""
+    else:
+        engine, quant = EngineKind.llamacpp, Quant.gguf_q4_k_m
+        repo = resolved["gguf_repo"] or entry.hf_repo
+        file_path = resolved["gguf_file"] or ""
+        if not file_path:
+            raise HTTPException(409, f"no single-file GGUF found for {entry.hf_repo}")
+    if engine == entry.engine:
+        if engine == EngineKind.airllm:
+            raise HTTPException(
+                409,
+                f"the only lane that can hold {entry.hf_repo} on this hardware "
+                "is AirLLM — no GGUF/AWQ build small enough exists. If AirLLM "
+                "cannot serve it, this model cannot run on this box.",
+            )
+        raise HTTPException(
+            409,
+            f"re-resolution keeps the {engine.value} lane — no alternative "
+            "artifact exists for this hardware",
+        )
+    # The target artifact may already be in the catalog as its own entry.
+    with read_session() as db:
+        rows = db.exec(select(ModelEntry).where(ModelEntry.hf_repo == repo)).all()
+    for row in rows:
+        if row.id != model_id and row.engine == engine and (
+            engine != EngineKind.llamacpp
+            or Path(row.file_path).name == Path(file_path).name
+        ):
+            raise HTTPException(
+                409,
+                f"{repo} {Path(file_path).name}".strip()
+                + f" is already in the catalog as {row.display_name!r} — load "
+                "that model instead (and delete this one if it is unusable)",
+            )
+
+    old_lane = entry.engine.value
+    with write_session() as db:
+        row = db.get(ModelEntry, model_id)
+        row.engine = engine
+        row.quant = quant
+        row.hf_repo = repo
+        row.file_path = file_path
+        row.params_b = float(resolved["params_b"] or row.params_b)
+        row.is_moe = bool(resolved["is_moe"])
+        row.n_layers = 0  # re-estimated at load for the new artifact
+        row.size_gb = float(resolved["gguf_size_gb"] or 0)
+        row.status = ModelStatus.approved
+        row.note = (
+            f"Refitted from the {old_lane} lane: now "
+            f"{engine.value} ({quant.value}) from {repo}."
+        )
+        db.add(row)
+    with read_session() as db:
+        entry = db.get(ModelEntry, model_id)
+    await downloader.start_download(entry, _hf_token(user))
+    bus.publish(
+        "model.refitted",
+        {"model_id": model_id, "from": old_lane, "to": engine.value, "hf_repo": repo},
+    )
+    return entry.model_dump(mode="json")
+
+
 @router.delete("/{model_id}")
 async def delete_model(model_id: int) -> dict:
     if downloader.is_downloading(model_id):
