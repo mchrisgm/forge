@@ -33,7 +33,7 @@ fi
 # ── 1+2. sweep stale / stray lane containers ────────────────────────────────
 bold "Sweeping orchestrator-spawned containers left on outdated images"
 stale_removed=()
-for label in forge.engine forge.session; do
+for label in forge.engine forge.router forge.session; do
   for id in $(docker ps -q --filter "label=$label"); do
     name=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's|^/||') || continue
     ref=$(docker inspect -f '{{.Config.Image}}' "$id" 2>/dev/null || true)

@@ -74,11 +74,14 @@ class ChatJob:
     """One server-side generation for a conversation, with a replay buffer and
     fan-out to any number of live subscribers."""
 
-    def __init__(self, conversation_id: str, user_id: int, lease: Lease) -> None:
+    def __init__(
+        self, conversation_id: str, user_id: int, lease: Lease | None
+    ) -> None:
         self.conversation_id = conversation_id
         self.user_id = user_id
-        self.model_slug = lease.model_slug
-        self.lease_key = lease.base_url  # unique per (engine, gpu)
+        # lease is None for auto-routed jobs until prepare() resolves one.
+        self.model_slug = lease.model_slug if lease else "auto"
+        self.lease_key = lease.base_url if lease else ""  # unique per (engine, gpu)
         # Signature of the user turn this job is answering (content+attachments).
         # A second POST re-attaches only when its turn matches; a genuinely
         # different message must not be swallowed by the reattach shortcut.
@@ -197,6 +200,19 @@ class ChatJobManager:
             if job.finished_at is not None and now - job.finished_at > FINISHED_TTL_S:
                 del self._jobs[cid]
 
+    def cancel(self, conversation_id: str) -> dict | None:
+        """Stop a queued/running generation FOR REAL — the background task is
+        cancelled, the partial reply is persisted, subscribers get the done
+        frame, and a later re-attach finds the job finished instead of
+        silently resuming. Returns the job's status, or None when nothing is
+        generating for this conversation."""
+        job = self.get(conversation_id)
+        if job is None or job.state not in ("queued", "running"):
+            return None
+        if job.task is not None:
+            job.task.cancel()
+        return job.status()
+
     def slot_for(self, lease: Lease) -> asyncio.Semaphore:
         """The per-lease concurrency slot, for engine consumers OUTSIDE the job
         manager (temporary chats, the memory helper's short completions) so they
@@ -244,34 +260,58 @@ class ChatJobManager:
         *,
         conversation_id: str,
         user_id: int,
-        lease: Lease,
+        lease: Lease | None,
         model_slug: str,
         messages: list[dict],
         turn_key: str = "",
         post_exchange: Callable[[str], Awaitable[None]] | None = None,
+        prepare: Callable[[Callable[[str], None]], Awaitable[tuple]] | None = None,
     ) -> ChatJob:
         """Create and launch a background generation for this conversation,
-        replacing any finished job still parked under the same id."""
+        replacing any finished job still parked under the same id.
+
+        `prepare` (auto-routed conversations) runs INSIDE the job before the
+        slot is taken: it receives a push_status callback for narration and
+        returns (lease, model_slug, messages) — so routing and even a
+        minutes-long model load stream progress and survive detach."""
         self._evict_stale()
         job = ChatJob(conversation_id, user_id, lease)
         job.turn_key = turn_key
         self._jobs[conversation_id] = job
         job.task = asyncio.create_task(
-            self._run(job, lease, model_slug, messages, post_exchange)
+            self._run(job, lease, model_slug, messages, post_exchange, prepare)
         )
         return job
 
     async def _run(
         self,
         job: ChatJob,
-        lease: Lease,
+        lease: Lease | None,
         model_slug: str,
         messages: list[dict],
         post_exchange: Callable[[str], Awaitable[None]] | None,
+        prepare: Callable[[Callable[[str], None]], Awaitable[tuple]] | None = None,
     ) -> None:
         # Whatever happens below, the job MUST reach a terminal state and wake
         # its subscribers — a stuck 'running' job would hang every reader on it.
         try:
+            if prepare is not None:
+
+                def push_status(detail: str) -> None:
+                    job.push(
+                        _frame(
+                            {
+                                "forge": "status",
+                                "conversation_id": job.conversation_id,
+                                "detail": detail,
+                            }
+                        )
+                    )
+
+                lease, model_slug, messages = await prepare(push_status)
+                job.model_slug = model_slug
+                job.lease_key = lease.base_url
+            assert lease is not None
             sem = _slots_for(lease)
             # Announce queueing only when a slot is genuinely unavailable — the
             # common uncontended path streams tokens with no extra status frame.

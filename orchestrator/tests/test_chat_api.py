@@ -465,4 +465,8 @@ class TestChatStatus:
 
     def test_empty_when_nothing_is_ready(self, api, auth_headers):
         body = api.get("/api/chat/status", headers=auth_headers).json()
-        assert body == {"serving": [], "image": None}
+        assert body == {
+            "serving": [],
+            "image": None,
+            "auto": {"available": False, "router_model": "", "router_ready": False},
+        }

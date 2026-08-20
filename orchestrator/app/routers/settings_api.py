@@ -10,7 +10,7 @@ from ..auth import require_admin
 from ..config import get_settings
 from ..db import get_setting, set_setting
 from ..models import User
-from ..services import chat_service, routing
+from ..services import chat_service, model_router, routing
 
 router = APIRouter(prefix="/settings")
 
@@ -33,6 +33,9 @@ class PatchBody(BaseModel):
     # Chat system prompt override for every text model. Empty string restores
     # the built-in default; None leaves it unchanged.
     chat_system_prompt: str | None = None
+    # Tiny always-on model that routes "auto" conversations (model_router).
+    # Empty string disables auto's LLM routing (deterministic fallback only).
+    router_model_slug: str | None = None
     # OAuth app credentials for per-user connector sign-in. Empty string
     # clears the Setting-table override (env default applies again).
     github_oauth_client_id: str | None = None
@@ -82,6 +85,11 @@ async def get_all() -> dict:
             (get_setting("chat_system_prompt") or "").strip()
         ),
         "chat_system_prompt_default": chat_service.DEFAULT_SYSTEM_PROMPT,
+        # Auto-routing: the configured tiny router model and whether it
+        # resolves to a READY llama.cpp model right now (the UI warns when
+        # it doesn't — e.g. still downloading, or a typo).
+        "router_model_slug": model_router.router_model_slug(),
+        "router_model_ready": model_router.router_model_entry() is not None,
     }
 
 
@@ -114,6 +122,11 @@ async def patch(
         if value == chat_service.DEFAULT_SYSTEM_PROMPT.strip():
             value = ""
         set_setting("chat_system_prompt", value)
+    if body.router_model_slug is not None:
+        # Loose validation on purpose: the model may still be downloading.
+        # GET exposes router_model_ready so the UI can flag a slug that
+        # doesn't resolve to a ready llama.cpp model.
+        set_setting("router_model_slug", body.router_model_slug.strip())
     for key in (
         "github_oauth_client_id",
         "hf_oauth_client_id",
