@@ -250,14 +250,16 @@ def scan(limit: int | None = None) -> dict[str, Any]:
 SEARCH_PIPELINES = {"text": "text-generation", "image": "text-to-image"}
 
 
-def search_hub(query: str, kind: str = "text", limit: int = 20) -> list[dict[str, Any]]:
+def search_hub(
+    query: str, kind: str = "text", limit: int = 20, token: str | None = None
+) -> list[dict[str, Any]]:
     """Search the Hub for a specific model by name. Blocking — run in a
     worker thread. `kind` picks the pipeline: text (chat/code) or image
     (text-to-image for the imagegen lane)."""
     from huggingface_hub import HfApi
 
     settings = get_settings()
-    api = HfApi(token=settings.hf_token or None)
+    api = HfApi(token=token or settings.hf_token or None)
     listing = list(
         api.list_models(
             search=query,
@@ -293,26 +295,26 @@ def search_hub(query: str, kind: str = "text", limit: int = 20) -> list[dict[str
     return results
 
 
-def is_diffusers_repo(hf_repo: str) -> bool:
+def is_diffusers_repo(hf_repo: str, token: str | None = None) -> bool:
     """True when the repo is diffusers-format (model_index.json present) —
     the only layout the imagegen server can load. Blocking."""
     from huggingface_hub import HfApi
 
     settings = get_settings()
     try:
-        files = HfApi(token=settings.hf_token or None).list_repo_files(hf_repo)
+        files = HfApi(token=token or settings.hf_token or None).list_repo_files(hf_repo)
     except Exception:
         return False
     return "model_index.json" in files
 
 
-def resolve_text_candidate(hf_repo: str) -> dict[str, Any]:
+def resolve_text_candidate(hf_repo: str, token: str | None = None) -> dict[str, Any]:
     """Artifact discovery + lane assignment for one repo the user picked from
     search — the same pipeline scan() runs per suggestion. Blocking."""
     from huggingface_hub import HfApi
 
     settings = get_settings()
-    token = settings.hf_token or None
+    token = token or settings.hf_token or None
     api = HfApi(token=token)
     info = api.model_info(hf_repo)
     tags = list(info.tags or [])
@@ -338,13 +340,13 @@ def resolve_text_candidate(hf_repo: str) -> dict[str, Any]:
     }
 
 
-def snapshot_size_gb(hf_repo: str) -> float:
+def snapshot_size_gb(hf_repo: str, token: str | None = None) -> float:
     """Total weight size of a repo snapshot (safetensors preferred), GiB."""
     from huggingface_hub import HfApi
 
     settings = get_settings()
     try:
-        info = HfApi(token=settings.hf_token or None).model_info(
+        info = HfApi(token=token or settings.hf_token or None).model_info(
             hf_repo, files_metadata=True
         )
     except Exception:

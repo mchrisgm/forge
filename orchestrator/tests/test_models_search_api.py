@@ -24,7 +24,7 @@ TEXT_REPO = "Qwen/Qwen2.5-Coder-7B-Instruct"
 def download_spy(monkeypatch) -> list[str]:
     calls: list[str] = []
 
-    async def fake_start_download(entry) -> None:
+    async def fake_start_download(entry, token=None) -> None:
         calls.append(entry.hf_repo)
 
     monkeypatch.setattr(downloader, "start_download", fake_start_download)
@@ -33,10 +33,14 @@ def download_spy(monkeypatch) -> list[str]:
 
 @pytest.fixture
 def snapshot_stub(monkeypatch) -> None:
-    monkeypatch.setattr(models_api_module, "snapshot_size_gb", lambda repo: 6.94)
+    monkeypatch.setattr(
+        models_api_module, "snapshot_size_gb", lambda repo, token=None: 6.94
+    )
     # Image adds are gated on diffusers format; stub it so no test ever
     # touches the real Hub.
-    monkeypatch.setattr(models_api_module, "is_diffusers_repo", lambda repo: True)
+    monkeypatch.setattr(
+        models_api_module, "is_diffusers_repo", lambda repo, token=None: True
+    )
 
 
 @pytest.fixture
@@ -51,7 +55,7 @@ def resolved(monkeypatch) -> dict:
         "gguf_size_gb": 0.0,
     }
     monkeypatch.setattr(
-        models_api_module, "resolve_text_candidate", lambda repo: dict(state)
+        models_api_module, "resolve_text_candidate", lambda repo, token=None: dict(state)
     )
     return state
 
@@ -93,7 +97,7 @@ class TestSearchModels:
         ]
         calls: list[tuple] = []
 
-        def fake_search_hub(query, kind, limit):
+        def fake_search_hub(query, kind, limit, token=None):
             calls.append((query, kind, limit))
             return results
 
@@ -108,7 +112,7 @@ class TestSearchModels:
         assert calls == [("sdxl turbo", "image", 5)]
 
     def test_hub_failure_is_502(self, api, auth_headers, monkeypatch):
-        def failing_search(query, kind, limit):
+        def failing_search(query, kind, limit, token=None):
             raise RuntimeError("HF is down")
 
         monkeypatch.setattr(models_api_module, "search_hub", failing_search)
@@ -153,9 +157,11 @@ class TestAddFromSearch:
         # ByteDance/SDXL-Lightning) the imagegen server cannot load — refuse
         # them at add time instead of after a multi-GB download.
         monkeypatch.setattr(
-            models_api_module, "is_diffusers_repo", lambda repo: False
+            models_api_module, "is_diffusers_repo", lambda repo, token=None: False
         )
-        monkeypatch.setattr(models_api_module, "snapshot_size_gb", lambda repo: 46.1)
+        monkeypatch.setattr(
+            models_api_module, "snapshot_size_gb", lambda repo, token=None: 46.1
+        )
         resp = api.post(
             "/api/models/search/add",
             json={"hf_repo": SEARCHED_REPO, "kind": "image"},
@@ -329,7 +335,7 @@ class TestAddFromSearch:
         assert download_spy == []
 
     def test_resolution_failure_is_502(self, api, auth_headers, download_spy, monkeypatch):
-        def failing_resolve(repo):
+        def failing_resolve(repo, token=None):
             raise RuntimeError("model_info exploded")
 
         monkeypatch.setattr(models_api_module, "resolve_text_candidate", failing_resolve)

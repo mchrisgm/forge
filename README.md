@@ -343,6 +343,36 @@ session gets the tools. See
 guidance (several vendors are OAuth-only — the notes are honest about it), and
 the custom-connector how-to.
 
+### Sign in with GitHub / Hugging Face (per-user OAuth)
+
+Instead of pasting a shared PAT, each profile can connect its **own**
+accounts — the same device-code and PKCE flows Claude Code and Codex use:
+
+- **GitHub** — click *Sign in with GitHub* on the Connectors page, enter the
+  short code on github.com, done. Your sessions then clone, push, and drive
+  the GitHub MCP as *you*, and the **new-session dialog lets you pick from
+  your own public and private repos** instead of pasting a URL.
+- **Hugging Face** — *Sign in with Hugging Face* redirects through
+  huggingface.co and back. Model search and downloads of gated/private repos
+  then run with *your* access (the global `HF_TOKEN` stays as fallback).
+
+One-time admin setup (Settings page → OAuth sign-in apps, or `.env`):
+
+1. **GitHub**: create an [OAuth App](https://github.com/settings/developers)
+   (any callback URL) with **Enable Device Flow** ticked; paste its client ID.
+2. **Hugging Face**: create a
+   [Connected App](https://huggingface.co/settings/applications) with redirect
+   URL `http(s)://<your forge host>/oauth/callback`; paste its client ID (and
+   secret, if issued).
+
+Signing in fills the connector's regular token slot, so everything that works
+with a pasted key works with OAuth — and pasting a key remains fully
+supported. Disconnecting (or disabling the connector) cuts access
+immediately. The framework is generic (`app/services/oauth_flows.py`): a
+provider that offers device or PKCE code grants is one registry entry away.
+Most catalog integrations instead run their vendor's own OAuth handshake
+inside the session's MCP client, which needs no Forge-side app.
+
 Tokens are stored in SQLite and injected into session containers as
 environment variables (never written into config files) — see the security
 model below before pasting broadly-scoped credentials.

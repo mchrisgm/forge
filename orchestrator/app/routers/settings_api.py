@@ -28,6 +28,34 @@ class PatchBody(BaseModel):
     session_idle_min: int | None = None
     registry_cron: str | None = None
     headroom_enabled: bool | None = None
+    # OAuth app credentials for per-user connector sign-in. Empty string
+    # clears the Setting-table override (env default applies again).
+    github_oauth_client_id: str | None = None
+    hf_oauth_client_id: str | None = None
+    hf_oauth_client_secret: str | None = None
+
+
+_SECRET_MASK = "••••••"
+
+
+def _oauth_view() -> dict:
+    """Per-provider client config for the Settings page — ids are shown (they
+    are public by OAuth's design), secrets only as configured/not."""
+    from ..services import oauth_flows
+
+    view = {}
+    for kind, provider in oauth_flows.PROVIDERS.items():
+        client_id, secret = oauth_flows.client_config(provider)
+        view[kind] = {
+            "label": provider.label,
+            "method": provider.method,
+            "client_id": client_id,
+            "needs_secret": bool(provider.client_secret_key),
+            "has_secret": bool(secret),
+            "setup_note": provider.setup_note,
+            "setup_url": provider.setup_url,
+        }
+    return view
 
 
 @router.get("")
@@ -41,6 +69,7 @@ async def get_all() -> dict:
         "ram_offload_budget_gb": settings.ram_offload_budget_gb,
         "llamacpp_slots": settings.llamacpp_slots,
         "headroom": await routing.status(),
+        "oauth": _oauth_view(),
     }
 
 
@@ -62,5 +91,13 @@ async def patch(body: PatchBody, request: Request) -> dict:
     if body.headroom_enabled is not None:
         set_setting("headroom_enabled", "true" if body.headroom_enabled else "false")
         routing.reset_probe()  # re-probe immediately on next call
+    for key in (
+        "github_oauth_client_id",
+        "hf_oauth_client_id",
+        "hf_oauth_client_secret",
+    ):
+        value = getattr(body, key)
+        if value is not None and value != _SECRET_MASK:
+            set_setting(key, value.strip())
     return await get_all()
 

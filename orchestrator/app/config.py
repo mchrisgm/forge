@@ -103,6 +103,29 @@ class Settings(BaseSettings):
     hf_token: str = Field("", validation_alias=AliasChoices("HF_TOKEN", "FORGE_HF_TOKEN"))
     github_pat: str = Field("", validation_alias=AliasChoices("GITHUB_PAT", "FORGE_GITHUB_PAT"))
 
+    # OAuth app credentials for per-user connector sign-in (Settings-page
+    # values in the Setting table override these env defaults). The admin
+    # registers one OAuth app per provider pointing at their Forge host;
+    # every profile then connects its own account through it.
+    github_oauth_client_id: str = Field(
+        "",
+        validation_alias=AliasChoices(
+            "GITHUB_OAUTH_CLIENT_ID", "FORGE_GITHUB_OAUTH_CLIENT_ID"
+        ),
+    )
+    hf_oauth_client_id: str = Field(
+        "",
+        validation_alias=AliasChoices(
+            "HF_OAUTH_CLIENT_ID", "FORGE_HF_OAUTH_CLIENT_ID"
+        ),
+    )
+    hf_oauth_client_secret: str = Field(
+        "",
+        validation_alias=AliasChoices(
+            "HF_OAUTH_CLIENT_SECRET", "FORGE_HF_OAUTH_CLIENT_SECRET"
+        ),
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

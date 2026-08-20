@@ -9,7 +9,9 @@ from ..auth import current_user
 from ..connector_catalog import CATALOG
 from ..db import read_session, write_session
 from ..models import Connector, User
-from ..services import user_service
+from ..services import github_api, oauth_flows, user_service
+from ..services.github_api import GitHubApiError
+from ..services.oauth_flows import OAuthError
 
 router = APIRouter(prefix="/connectors")
 
@@ -23,6 +25,13 @@ def _public_view(connector: Connector) -> dict:
         config = json.loads(connector.config_json or "{}")
     except json.JSONDecodeError:
         config = {}
+    oauth_meta = config.get("oauth") if isinstance(config.get("oauth"), dict) else None
+    oauth_view = {
+        **oauth_flows.provider_status(connector.kind),
+        "connected": bool(oauth_meta),
+        "account": (oauth_meta or {}).get("account", ""),
+        "connected_at": (oauth_meta or {}).get("connected_at"),
+    }
     entry = CATALOG.get(connector.kind)
     if entry is not None:
         fields = [
@@ -51,6 +60,7 @@ def _public_view(connector: Connector) -> dict:
             "auth_note": entry.auth_note,
             "docs_url": entry.docs_url,
             "is_custom": False,
+            "oauth": oauth_view,
             # Backcompat for the existing UI (github card)
             "has_token": bool(config.get("token")),
         }
@@ -67,6 +77,7 @@ def _public_view(connector: Connector) -> dict:
         "auth_note": "",
         "docs_url": "",
         "is_custom": True,
+        "oauth": oauth_view,
         "has_token": False,
     }
 
@@ -116,6 +127,10 @@ def patch_connector(
             for key, value in body.config.items():
                 if value == MASK:
                     continue  # the UI echoed the mask back — keep the stored value
+                if key == "token":
+                    # A hand-edited token replaces (or clears) an OAuth sign-in:
+                    # the account chip must not claim a connection it no longer has.
+                    current.pop("oauth", None)
                 if value == "" or value is None:
                     current.pop(key, None)
                 else:
@@ -165,6 +180,102 @@ def add_custom(body: CustomBody, user: User = Depends(current_user)) -> dict:
         db.refresh(connector)
         result = _public_view(connector)
     return result
+
+
+# ── OAuth sign-in (per-user; GitHub device flow, Hugging Face PKCE) ─────────
+
+
+class OAuthStartBody(BaseModel):
+    # code-flow only: the SPA's callback URL (window.location.origin +
+    # "/oauth/callback"), replayed verbatim in the token exchange.
+    redirect_uri: str = ""
+
+
+class OAuthPollBody(BaseModel):
+    flow_id: str
+
+
+class OAuthExchangeBody(BaseModel):
+    code: str
+    state: str
+
+
+def _oauth_http(exc: OAuthError) -> HTTPException:
+    return HTTPException(exc.status_code, exc.detail)
+
+
+@router.get("/oauth/providers")
+def oauth_providers(user: User = Depends(current_user)) -> dict:
+    """Which connector kinds support OAuth sign-in and whether each is ready
+    (client id configured by the admin)."""
+    return {kind: oauth_flows.provider_status(kind) for kind in oauth_flows.PROVIDERS}
+
+
+@router.post("/{kind}/oauth/start")
+async def oauth_start(
+    kind: str, body: OAuthStartBody, user: User = Depends(current_user)
+) -> dict:
+    """Begin a sign-in: device flow returns a user code to enter on the
+    provider's page; code flow returns the authorize URL to open."""
+    provider = oauth_flows.PROVIDERS.get(kind)
+    try:
+        if provider is not None and provider.method == "code":
+            return await oauth_flows.start_code(kind, user.id, body.redirect_uri)
+        return await oauth_flows.start_device(kind, user.id)
+    except OAuthError as exc:
+        raise _oauth_http(exc) from exc
+
+
+@router.post("/{kind}/oauth/poll")
+async def oauth_poll(
+    kind: str, body: OAuthPollBody, user: User = Depends(current_user)
+) -> dict:
+    """Device flow: check whether the user has approved yet. Returns
+    {status: pending} until the provider mints the token."""
+    try:
+        return await oauth_flows.poll_device(kind, body.flow_id, user.id)
+    except OAuthError as exc:
+        raise _oauth_http(exc) from exc
+
+
+@router.post("/{kind}/oauth/exchange")
+async def oauth_exchange(
+    kind: str, body: OAuthExchangeBody, user: User = Depends(current_user)
+) -> dict:
+    """Code flow: the SPA callback posts the provider's code + state here."""
+    try:
+        return await oauth_flows.exchange_code(kind, user.id, body.code, body.state)
+    except OAuthError as exc:
+        raise _oauth_http(exc) from exc
+
+
+@router.delete("/{kind}/oauth")
+def oauth_disconnect(kind: str, user: User = Depends(current_user)) -> dict:
+    try:
+        oauth_flows.disconnect(user.id, kind)
+    except OAuthError as exc:
+        raise _oauth_http(exc) from exc
+    return {"ok": True}
+
+
+@router.get("/github/repos")
+async def github_repos(
+    q: str = "", user: User = Depends(current_user)
+) -> list[dict]:
+    """The caller's own repos (public and private) for the session-creation
+    picker — requires their github connector to be connected (OAuth) or to
+    hold a pasted PAT."""
+    token = oauth_flows.stored_token(user.id, "github")
+    if not token:
+        raise HTTPException(
+            409,
+            "GitHub is not connected. Sign in with GitHub (or paste a PAT) on "
+            "the Connectors page to pick from your repositories.",
+        )
+    try:
+        return await github_api.list_repos(token, q)
+    except GitHubApiError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
 
 
 @router.delete("/{kind}")
