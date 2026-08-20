@@ -164,7 +164,25 @@ class PendingFlow:
     redirect_uri: str = ""  # code
 
 
+# Process-local like the downloader/events registries — Forge runs a single
+# orchestrator process (SQLite single-writer design); flows would 404 across
+# workers if that ever changed.
 _flows: dict[str, PendingFlow] = {}
+
+# Cap concurrent sign-in attempts per user: bounds the store AND the calls an
+# authenticated user can fan out against the provider through the shared app.
+MAX_FLOWS_PER_USER = 8
+
+
+def _check_flow_budget(user_id: int) -> None:
+    _sweep()
+    pending = sum(1 for f in _flows.values() if f.user_id == user_id)
+    if pending >= MAX_FLOWS_PER_USER:
+        raise OAuthError(
+            "too many pending sign-in attempts — finish or let one expire "
+            "before starting another",
+            429,
+        )
 
 
 def _sweep() -> None:
@@ -302,6 +320,7 @@ async def start_device(kind: str, user_id: int) -> dict:
     if provider.method != "device":
         raise OAuthError(f"{provider.label} uses a browser redirect, not a code")
     client_id, _ = _require_client(provider)
+    _check_flow_budget(user_id)  # before the provider call — it bounds those too
     try:
         async with httpx.AsyncClient(timeout=15) as http:
             resp = await http.post(
@@ -312,7 +331,8 @@ async def start_device(kind: str, user_id: int) -> dict:
             resp.raise_for_status()
             data = resp.json()
     except (httpx.HTTPError, ValueError) as exc:
-        raise OAuthError(f"{provider.label} is unreachable: {exc}", 502) from exc
+        log.warning("%s OAuth endpoint unreachable: %s", provider.label, exc)
+        raise OAuthError(f"{provider.label} is unreachable right now", 502) from exc
     if "device_code" not in data:
         raise OAuthError(
             f"{provider.label} rejected the sign-in request: "
@@ -362,7 +382,8 @@ async def poll_device(kind: str, flow_id: str, user_id: int) -> dict:
             )
             data = resp.json()
     except (httpx.HTTPError, ValueError) as exc:
-        raise OAuthError(f"{provider.label} is unreachable: {exc}", 502) from exc
+        log.warning("%s OAuth endpoint unreachable: %s", provider.label, exc)
+        raise OAuthError(f"{provider.label} is unreachable right now", 502) from exc
 
     error = data.get("error", "")
     if error == "authorization_pending":
@@ -395,19 +416,25 @@ async def poll_device(kind: str, flow_id: str, user_id: int) -> dict:
 # ── authorization-code flow with PKCE (Hugging Face) ────────────────────────
 
 
-def _valid_redirect(uri: str) -> bool:
-    return bool(uri) and uri.startswith(("http://", "https://")) and (
-        uri.endswith("/oauth/callback")
-    )
+def _valid_redirect(uri: str, allowed_origins: set[str]) -> bool:
+    """Only the Forge UI's own callback qualifies: the exact path on an origin
+    the browser is actually talking to (Origin/Host of this request). The
+    provider-side app registration is the second, independent check."""
+    return any(f"{origin}/oauth/callback" == uri for origin in allowed_origins)
 
 
-async def start_code(kind: str, user_id: int, redirect_uri: str) -> dict:
+async def start_code(
+    kind: str, user_id: int, redirect_uri: str, allowed_origins: set[str]
+) -> dict:
     provider = _provider_for(kind)
     if provider.method != "code":
         raise OAuthError(f"{provider.label} uses a device code, not a redirect")
     client_id, _ = _require_client(provider)
-    if not _valid_redirect(redirect_uri):
-        raise OAuthError("redirect_uri must be <origin>/oauth/callback")
+    if not _valid_redirect(redirect_uri, allowed_origins):
+        raise OAuthError(
+            "redirect_uri must be this Forge's own /oauth/callback page"
+        )
+    _check_flow_budget(user_id)
     verifier = secrets.token_urlsafe(48)
     challenge = (
         base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
@@ -465,7 +492,8 @@ async def exchange_code(kind: str, user_id: int, code: str, state: str) -> dict:
             )
             data = resp.json()
     except (httpx.HTTPError, ValueError) as exc:
-        raise OAuthError(f"{provider.label} is unreachable: {exc}", 502) from exc
+        log.warning("%s OAuth endpoint unreachable: %s", provider.label, exc)
+        raise OAuthError(f"{provider.label} is unreachable right now", 502) from exc
     token = data.get("access_token", "")
     if not token:
         raise OAuthError(

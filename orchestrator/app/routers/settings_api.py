@@ -3,11 +3,13 @@ schedule. Stored in the Setting table, overriding env defaults. Per-profile
 settings (password, instructions, memory) live under /users/me."""
 
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from ..auth import require_admin
 from ..config import get_settings
 from ..db import get_setting, set_setting
+from ..models import User
 from ..services import routing
 
 router = APIRouter(prefix="/settings")
@@ -74,7 +76,12 @@ async def get_all() -> dict:
 
 
 @router.patch("")
-async def patch(body: PatchBody, request: Request) -> dict:
+async def patch(
+    body: PatchBody, request: Request, admin: User = Depends(require_admin)
+) -> dict:
+    """Global knobs — admin only: these settings (idle reaper, registry cron,
+    headroom, and above all the shared OAuth app credentials) affect every
+    profile, so a regular user must not be able to rewrite them."""
     if body.session_idle_min is not None:
         if body.session_idle_min < 5:
             raise HTTPException(400, "idle timeout must be at least 5 minutes")

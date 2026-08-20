@@ -355,6 +355,8 @@ accounts — the same device-code and PKCE flows Claude Code and Codex use:
 - **Hugging Face** — *Sign in with Hugging Face* redirects through
   huggingface.co and back. Model search and downloads of gated/private repos
   then run with *your* access (the global `HF_TOKEN` stays as fallback).
+  Heads up: the model library is shared by design — weights you download with
+  your token become loadable by every profile on this Forge.
 
 One-time admin setup (Settings page → OAuth sign-in apps, or `.env`):
 

@@ -1,7 +1,7 @@
 import json
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlmodel import select
 
@@ -211,16 +211,36 @@ def oauth_providers(user: User = Depends(current_user)) -> dict:
     return {kind: oauth_flows.provider_status(kind) for kind in oauth_flows.PROVIDERS}
 
 
+def _request_origins(request: Request) -> set[str]:
+    """Origins this browser is actually talking to — the only place a code
+    flow may redirect back to. Origin header when present (fetch POSTs send
+    it); otherwise the Host header under either scheme (gateway-agnostic)."""
+    origins: set[str] = set()
+    origin = (request.headers.get("origin") or "").rstrip("/")
+    if origin:
+        origins.add(origin)
+    host = request.headers.get("host") or ""
+    if host:
+        origins.add(f"http://{host}")
+        origins.add(f"https://{host}")
+    return origins
+
+
 @router.post("/{kind}/oauth/start")
 async def oauth_start(
-    kind: str, body: OAuthStartBody, user: User = Depends(current_user)
+    kind: str,
+    body: OAuthStartBody,
+    request: Request,
+    user: User = Depends(current_user),
 ) -> dict:
     """Begin a sign-in: device flow returns a user code to enter on the
     provider's page; code flow returns the authorize URL to open."""
     provider = oauth_flows.PROVIDERS.get(kind)
     try:
         if provider is not None and provider.method == "code":
-            return await oauth_flows.start_code(kind, user.id, body.redirect_uri)
+            return await oauth_flows.start_code(
+                kind, user.id, body.redirect_uri, _request_origins(request)
+            )
         return await oauth_flows.start_device(kind, user.id)
     except OAuthError as exc:
         raise _oauth_http(exc) from exc

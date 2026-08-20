@@ -8,7 +8,11 @@ slot and both authenticate the same way.
 
 from __future__ import annotations
 
+import logging
+
 import httpx
+
+log = logging.getLogger(__name__)
 
 API = "https://api.github.com"
 _PAGE_SIZE = 100
@@ -60,7 +64,8 @@ async def list_repos(token: str, query: str = "") -> list[dict]:
                 if len(batch) < _PAGE_SIZE:
                     break
     except httpx.HTTPError as exc:
-        raise GitHubApiError(f"GitHub is unreachable: {exc}") from exc
+        log.warning("GitHub repo listing failed: %s", exc)
+        raise GitHubApiError("GitHub is unreachable right now") from exc
 
     needle = query.strip().lower()
     results = []

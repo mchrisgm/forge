@@ -109,6 +109,21 @@ class TestProviders:
         after = api.get("/api/connectors/oauth/providers", headers=auth_headers).json()
         assert after["github"]["ready"]
 
+    def test_non_admin_cannot_rewrite_the_shared_oauth_app(
+        self, api, auth_headers, second_user_headers
+    ):
+        # auth_headers is the first profile (admin); the second is not. A
+        # regular user must not be able to swap the OAuth app everyone signs
+        # in through (consent-phishing vector) — or any global setting.
+        r = api.patch(
+            "/api/settings",
+            json={"github_oauth_client_id": "attacker-app"},
+            headers=second_user_headers,
+        )
+        assert r.status_code == 403
+        current = api.get("/api/settings", headers=auth_headers).json()
+        assert current["oauth"]["github"]["client_id"] != "attacker-app"
+
     def test_settings_page_exposes_and_stores_client_config(self, api, auth_headers):
         r = api.patch(
             "/api/settings",
@@ -219,6 +234,18 @@ class TestDeviceFlow:
         )
         assert r2.status_code == 404
 
+    def test_pending_flows_per_user_are_capped(self, api, auth_headers):
+        self.start(api, auth_headers)  # sets client id + device fixture
+        for _ in range(oauth_flows.MAX_FLOWS_PER_USER - 1):
+            r = api.post(
+                "/api/connectors/github/oauth/start", json={}, headers=auth_headers
+            )
+            assert r.status_code == 200
+        r = api.post(
+            "/api/connectors/github/oauth/start", json={}, headers=auth_headers
+        )
+        assert r.status_code == 429
+
 
 # ── code flow with PKCE (Hugging Face) ──────────────────────────────────────
 
@@ -228,7 +255,7 @@ class TestCodeFlow:
         set_setting("hf_oauth_client_id", "cid-hf")
         r = api.post(
             "/api/connectors/hugging-face/oauth/start",
-            json={"redirect_uri": "http://forge.lan:8080/oauth/callback"},
+            json={"redirect_uri": "http://testserver/oauth/callback"},
             headers=headers,
         )
         assert r.status_code == 200, r.text
@@ -273,7 +300,7 @@ class TestCodeFlow:
         form = token_call["data"]
         assert form["code"] == "auth-code-1"
         assert form["code_verifier"]  # PKCE proof travelled
-        assert form["redirect_uri"] == "http://forge.lan:8080/oauth/callback"
+        assert form["redirect_uri"] == "http://testserver/oauth/callback"
 
         stored = connector_config(api, auth_headers, "hugging-face")
         assert stored["config"]["token"] == "hf_oauth_secret"
